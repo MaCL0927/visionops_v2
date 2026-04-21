@@ -1,6 +1,6 @@
 # VisionOps Makefile — 常用命令快捷方式
 
-.PHONY: help up down train pipeline deploy monitor retrain check-triggers test-api
+.PHONY: help up down train train-detection pipeline pipeline-force pipeline-detection pipeline-detection-force deploy monitor retrain check-triggers test-api
 
 PYTHON ?= python
 MODEL_VERSION ?= latest
@@ -16,9 +16,14 @@ help:
 	@echo "  make down            停止所有服务"
 	@echo "  make init            初始化项目（DVC + MinIO）"
 	@echo ""
-	@echo "  make train           运行训练流水线（DVC repro）"
-	@echo "  make pipeline        运行完整MLOps流水线"
-	@echo "  make pipeline-force  强制重跑所有stage"
+
+	@echo " make train              运行原始训练脚本"
+	@echo " make train-detection    运行 detection 训练脚本"
+	@echo " make pipeline           运行原始完整MLOps流水线"
+	@echo " make pipeline-force     强制重跑原始所有stage"
+	@echo " make pipeline-detection 运行 detection 完整MLOps流水线"
+	@echo " make pipeline-detection-force 强制重跑 detection 所有stage"
+
 	@echo "  make deploy          部署RKNN模型到所有边缘设备"
 	@echo "  make deploy DEVICE=rk3588-001  部署到指定设备"
 	@echo ""
@@ -66,26 +71,37 @@ init:
 	dvc remote modify minio access_key_id minioadmin
 	dvc remote modify minio secret_access_key minioadmin123
 	@echo "创建数据目录..."
-	mkdir -p data/raw data/processed models/checkpoints models/export models/metrics logs/retrain
+	mkdir -p \
+		data/raw data/processed \
+		data/raw_detection data/processed_detection \
+		models/checkpoints models/export models/metrics \
+		models/checkpoints_detection models/export_detection models/metrics_detection \
+		models/runs/detect \
+		logs/retrain
 	@echo "✓ 初始化完成"
 
 ## ── 训练流水线 ────────────────────────────────────────────────
 train:
 	$(PYTHON) pipeline/stages/train.py
 
+train-detection:
+	$(PYTHON) pipeline/stages/train_detection.py
+
 pipeline:
-	@echo "运行完整MLOps流水线..."
-	dvc repro
-	@echo "✓ 流水线执行完毕"
+	@echo "运行原始完整MLOps流水线..."
+	dvc repro preprocess train evaluate export_onnx convert_rknn register_model
+	@echo "✓ 原始流水线执行完毕"
 
 pipeline-force:
-	dvc repro --force
+	dvc repro --force preprocess train evaluate export_onnx convert_rknn register_model
 
-diff:
-	dvc diff
+pipeline-detection:
+	@echo "运行 detection 完整MLOps流水线..."
+	dvc repro preprocess_detection train_detection evaluate_detection export_onnx_detection convert_rknn_detection register_model_detection
+	@echo "✓ detection 流水线执行完毕"
 
-params:
-	dvc params diff
+pipeline-detection-force:
+	dvc repro --force preprocess_detection train_detection evaluate_detection export_onnx_detection convert_rknn_detection register_model_detection
 
 ## ── 再训练调度 ────────────────────────────────────────────────
 retrain:
@@ -114,6 +130,10 @@ print(f'  触发: {should}'); print(f'  原因: {reason}')" 2>/dev/null || \
 deploy:
 	@echo "部署RKNN模型到边缘设备..."
 	bash edge/deploy/push.sh models/export/model.rknn $(DEVICE)
+
+deploy-detection:
+	@echo "部署 detection RKNN 模型到边缘设备..."
+	bash edge/deploy/push.sh models/export_detection/model.rknn $(DEVICE)
 
 ## ── API 测试 ──────────────────────────────────────────────────
 test-api:

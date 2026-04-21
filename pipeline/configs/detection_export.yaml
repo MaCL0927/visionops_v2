@@ -1,0 +1,12 @@
+export:
+  mode: ultralytics   # 可选: ultralytics / external
+  checkpoint_path: models/checkpoints_detection/best.pt
+  output_path: models/export_detection/model.onnx
+  opset: 12
+  imgsz: 640
+  simplify: true
+  dynamic: false
+
+external_export:
+  script_path: tools/export_yolov8_rknn_onnx.py
+  python_exec: python

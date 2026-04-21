@@ -114,3 +114,183 @@ stages:
     metrics:
       - models/metrics/registry_result.json:
           cache: false
+
+
+  # ─────────────────────────────────
+  # Detection Stage 1: 数据预处理
+  # ─────────────────────────────────
+  preprocess_detection:
+    cmd: python pipeline/stages/preprocess_detection.py
+    deps:
+      - pipeline/stages/preprocess_detection.py
+      - pipeline/configs/detection_data.yaml
+      - data/raw_detection/
+    params:
+      - pipeline/configs/detection_data.yaml:
+          - dataset.root
+          - dataset.yaml_path
+          - dataset.task
+          - dataset.class_names
+          - dataset.num_classes
+          - preprocess.copy_to_processed
+          - preprocess.processed_root
+          - preprocess.check_images
+          - preprocess.check_labels
+    outs:
+      - data/processed_detection/images/train/
+      - data/processed_detection/images/val/
+      - data/processed_detection/labels/train/
+      - data/processed_detection/labels/val/
+      - data/processed_detection/data.yaml
+      - data/processed_detection/dataset_stats.json
+
+  # ─────────────────────────────────
+  # Detection Stage 2: 模型训练
+  # ─────────────────────────────────
+  train_detection:
+    cmd: python pipeline/stages/train_detection.py
+    deps:
+      - pipeline/stages/train_detection.py
+      - pipeline/configs/detection_train.yaml
+      - data/processed_detection/data.yaml
+      - data/processed_detection/images/train/
+      - data/processed_detection/labels/train/
+      - data/processed_detection/images/val/
+      - data/processed_detection/labels/val/
+    params:
+      - pipeline/configs/detection_train.yaml:
+          - model.architecture
+          - model.weights
+          - model.num_classes
+          - model.pretrained
+          - dataset.yaml_path
+          - train.epochs
+          - train.batch_size
+          - train.img_size
+          - train.lr0
+          - train.device
+          - train.workers
+          - train.patience
+          - train.cache
+          - train.project
+          - train.name
+          - train.exist_ok
+          - mlflow.experiment_name
+          - mlflow.tracking_uri
+          - mlflow.log_artifacts
+          - mlflow.log_model
+          - output.checkpoint_dir
+          - output.metrics_dir
+    outs:
+      - models/checkpoints_detection/best.pt
+      - models/checkpoints_detection/last.pt
+    metrics:
+      - models/metrics_detection/train_metrics.json:
+          cache: false
+
+  # ─────────────────────────────────
+  # Detection Stage 3: 模型评估
+  # ─────────────────────────────────
+  evaluate_detection:
+    cmd: python pipeline/stages/evaluate_detection.py
+    deps:
+      - pipeline/stages/evaluate_detection.py
+      - pipeline/configs/detection_train.yaml
+      - pipeline/configs/detection_data.yaml
+      - models/checkpoints_detection/best.pt
+      - data/processed_detection/data.yaml
+      - data/processed_detection/images/val/
+      - data/processed_detection/labels/val/
+    outs:
+      - models/metrics_detection/eval_report.json
+    metrics:
+      - models/metrics_detection/eval_metrics.json:
+          cache: false
+
+  # ─────────────────────────────────
+  # Detection Stage 4: ONNX导出
+  # ─────────────────────────────────
+  export_onnx_detection:
+    cmd: python pipeline/stages/export_onnx_detection.py
+    deps:
+      - pipeline/stages/export_onnx_detection.py
+      - pipeline/configs/detection_export.yaml
+      - models/checkpoints_detection/best.pt
+    params:
+      - pipeline/configs/detection_export.yaml:
+          - export.mode
+          - export.checkpoint_path
+          - export.output_path
+          - export.opset
+          - export.imgsz
+          - export.simplify
+          - export.dynamic
+          - external_export.script_path
+          - external_export.python_exec
+    outs:
+      - models/export_detection/model.onnx
+      - models/export_detection/export_result.json
+
+  # ─────────────────────────────────
+  # Detection Stage 5: RKNN模型转换（RK3588）
+  # ─────────────────────────────────
+  convert_rknn_detection:
+    cmd: python pipeline/stages/convert_rknn_detection.py
+    deps:
+      - pipeline/stages/convert_rknn_detection.py
+      - pipeline/configs/detection_rknn.yaml
+      - models/export_detection/model.onnx
+      - data/processed_detection/images/val/
+    params:
+      - pipeline/configs/detection_rknn.yaml:
+          - target_platform
+          - quantization.do_quantization
+          - quantization.dataset
+          - quantization.dataset_size
+          - quantization.quantized_dtype
+          - quantization.pre_compile
+          - io_config.input_size_list
+          - io_config.mean_values
+          - io_config.std_values
+          - npu_core_mask
+          - perf_debug
+          - eval_mem
+          - output.onnx_model
+          - output.rknn_model
+          - output.perf_report
+    outs:
+      - models/export_detection/model.rknn
+      - models/export_detection/rknn_perf_report.json
+
+  # ─────────────────────────────────
+  # Detection Stage 6: 注册到MLflow Model Registry
+  # ─────────────────────────────────
+  register_model_detection:
+    cmd: python pipeline/stages/register_model_detection.py
+    deps:
+      - pipeline/stages/register_model_detection.py
+      - pipeline/configs/detection_mlops.yaml
+      - models/export_detection/model.rknn
+      - models/metrics_detection/eval_metrics.json
+      - models/metrics_detection/mlflow_run_id.txt
+    params:
+      - pipeline/configs/detection_mlops.yaml:
+          - registry.model_name
+          - registry.task
+          - registry.promotion_threshold.map50
+          - registry.promotion_threshold.map50_95
+          - registry.promotion_threshold.latency_ms
+          - registry.tags.platform
+          - registry.tags.quantized
+          - registry.tags.auto_registered
+          - registry.tags.task
+          - registry.tags.model_family
+          - paths.eval_metrics
+          - paths.train_metrics
+          - paths.mlflow_run_id
+          - paths.onnx_model
+          - paths.rknn_model
+          - paths.registry_result
+    metrics:
+      - models/metrics_detection/registry_result.json:
+          cache: false

@@ -1,0 +1,14 @@
+dataset:
+  root: data/raw_detection
+  yaml_path: data/raw_detection/data.yaml
+  task: detect
+  class_names:
+    - person
+    - smoke
+  num_classes: 2
+
+preprocess:
+  copy_to_processed: true
+  processed_root: data/processed_detection
+  check_images: true
+  check_labels: true

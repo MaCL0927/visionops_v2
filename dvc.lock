@@ -1,0 +1,311 @@
+schema: '2.0'
+stages:
+  preprocess_detection:
+    cmd: python pipeline/stages/preprocess_detection.py
+    deps:
+    - path: data/raw_detection/
+      hash: md5
+      md5: bb936db39337591ac0428e598e0b3f44.dir
+      size: 98567858
+      nfiles: 4507
+    - path: pipeline/configs/detection_data.yaml
+      hash: md5
+      md5: 8af623be13233e689e12fb1fb6db8d34
+      size: 273
+    - path: pipeline/stages/preprocess_detection.py
+      hash: md5
+      md5: 8550dadb05e45d82e60ab557a64ff5fe
+      size: 10667
+    params:
+      pipeline/configs/detection_data.yaml:
+        dataset.class_names:
+        - person
+        - smoke
+        dataset.num_classes: 2
+        dataset.root: data/raw_detection
+        dataset.task: detect
+        dataset.yaml_path: data/raw_detection/data.yaml
+        preprocess.check_images: true
+        preprocess.check_labels: true
+        preprocess.copy_to_processed: true
+        preprocess.processed_root: data/processed_detection
+    outs:
+    - path: data/processed_detection/data.yaml
+      hash: md5
+      md5: 9b6861245b262d17c9269461d470b78b
+      size: 97
+    - path: data/processed_detection/dataset_stats.json
+      hash: md5
+      md5: c5da8151c94dddbb3d4c47c5e6746617
+      size: 881
+    - path: data/processed_detection/images/train/
+      hash: md5
+      md5: 52f807a10fbc25011619b765b1d832ed.dir
+      size: 89436613
+      nfiles: 2058
+    - path: data/processed_detection/images/val/
+      hash: md5
+      md5: 85f814b3a622b4ce165f2e13abfae179.dir
+      size: 8935394
+      nfiles: 195
+    - path: data/processed_detection/labels/train/
+      hash: md5
+      md5: 51fe280b9dd1f8c0f90e7b9d1c9d7426.dir
+      size: 178395
+      nfiles: 2058
+    - path: data/processed_detection/labels/val/
+      hash: md5
+      md5: 2ec20ea9d653f67e5a1bb0bfce4f94fd.dir
+      size: 17365
+      nfiles: 195
+  train_detection:
+    cmd: python pipeline/stages/train_detection.py
+    deps:
+    - path: data/processed_detection/data.yaml
+      hash: md5
+      md5: 9b6861245b262d17c9269461d470b78b
+      size: 97
+    - path: data/processed_detection/images/train/
+      hash: md5
+      md5: 52f807a10fbc25011619b765b1d832ed.dir
+      size: 89436613
+      nfiles: 2058
+    - path: data/processed_detection/images/val/
+      hash: md5
+      md5: 85f814b3a622b4ce165f2e13abfae179.dir
+      size: 8935394
+      nfiles: 195
+    - path: data/processed_detection/labels/train/
+      hash: md5
+      md5: 51fe280b9dd1f8c0f90e7b9d1c9d7426.dir
+      size: 178395
+      nfiles: 2058
+    - path: data/processed_detection/labels/val/
+      hash: md5
+      md5: 2ec20ea9d653f67e5a1bb0bfce4f94fd.dir
+      size: 17365
+      nfiles: 195
+    - path: pipeline/configs/detection_train.yaml
+      hash: md5
+      md5: 843cb522de7ec54d72e2024fc8bbb9fb
+      size: 586
+    - path: pipeline/stages/train_detection.py
+      hash: md5
+      md5: c6db3025b90d6da50ed512957e9e5d7b
+      size: 9594
+    params:
+      pipeline/configs/detection_train.yaml:
+        dataset.yaml_path: data/processed_detection/data.yaml
+        mlflow.experiment_name: visionops-detection
+        mlflow.log_artifacts: true
+        mlflow.log_model: false
+        mlflow.tracking_uri: http://localhost:5000
+        model.architecture: yolov8n
+        model.num_classes: 2
+        model.pretrained: true
+        model.weights: models/pretrained/yolov8n.pt
+        output.checkpoint_dir: models/checkpoints_detection
+        output.metrics_dir: models/metrics_detection
+        train.batch_size: 16
+        train.cache: false
+        train.device: cuda
+        train.epochs: 5
+        train.exist_ok: true
+        train.img_size: 640
+        train.lr0: 0.001
+        train.name: visionops_detection
+        train.patience: 20
+        train.project: models/runs/detect
+        train.workers: 4
+    outs:
+    - path: models/checkpoints_detection/best.pt
+      hash: md5
+      md5: 30e52c224cf67c3e89cfbe3bf84bd8a2
+      size: 6262961
+    - path: models/checkpoints_detection/last.pt
+      hash: md5
+      md5: 30e52c224cf67c3e89cfbe3bf84bd8a2
+      size: 6262961
+    - path: models/metrics_detection/train_metrics.json
+      hash: md5
+      md5: c6d7b721d0d1895a4a246501cb7b73d2
+      size: 1128
+  evaluate_detection:
+    cmd: python pipeline/stages/evaluate_detection.py
+    deps:
+    - path: data/processed_detection/data.yaml
+      hash: md5
+      md5: 9b6861245b262d17c9269461d470b78b
+      size: 97
+    - path: data/processed_detection/images/val/
+      hash: md5
+      md5: 85f814b3a622b4ce165f2e13abfae179.dir
+      size: 8935394
+      nfiles: 195
+    - path: data/processed_detection/labels/val/
+      hash: md5
+      md5: 2ec20ea9d653f67e5a1bb0bfce4f94fd.dir
+      size: 17365
+      nfiles: 195
+    - path: models/checkpoints_detection/best.pt
+      hash: md5
+      md5: 30e52c224cf67c3e89cfbe3bf84bd8a2
+      size: 6262961
+    - path: pipeline/configs/detection_data.yaml
+      hash: md5
+      md5: 8af623be13233e689e12fb1fb6db8d34
+      size: 273
+    - path: pipeline/configs/detection_train.yaml
+      hash: md5
+      md5: 843cb522de7ec54d72e2024fc8bbb9fb
+      size: 586
+    - path: pipeline/stages/evaluate_detection.py
+      hash: md5
+      md5: dee1c317642740c571ba6fcc0a358a05
+      size: 5390
+    outs:
+    - path: models/metrics_detection/eval_metrics.json
+      hash: md5
+      md5: f17a00010dd76b4791498d47508e3b02
+      size: 570
+    - path: models/metrics_detection/eval_report.json
+      hash: md5
+      md5: ed53378a3e613217faef39f29eaf7574
+      size: 817
+  export_onnx_detection:
+    cmd: python pipeline/stages/export_onnx_detection.py
+    deps:
+    - path: models/checkpoints_detection/best.pt
+      hash: md5
+      md5: 30e52c224cf67c3e89cfbe3bf84bd8a2
+      size: 6262961
+    - path: pipeline/configs/detection_export.yaml
+      hash: md5
+      md5: d8a460ab116014182d2b575a24b8be7f
+      size: 315
+    - path: pipeline/stages/export_onnx_detection.py
+      hash: md5
+      md5: 4ba570bb8835f4cd72f3cd84baa2740f
+      size: 6205
+    params:
+      pipeline/configs/detection_export.yaml:
+        export.checkpoint_path: models/checkpoints_detection/best.pt
+        export.dynamic: false
+        export.imgsz: 640
+        export.mode: ultralytics
+        export.opset: 12
+        export.output_path: models/export_detection/model.onnx
+        export.simplify: true
+        external_export.python_exec: python
+        external_export.script_path: tools/export_yolov8_rknn_onnx.py
+    outs:
+    - path: models/export_detection/export_result.json
+      hash: md5
+      md5: 1f5f446d5ce7a3a6bc618159ac8c34d6
+      size: 595
+    - path: models/export_detection/model.onnx
+      hash: md5
+      md5: 703b5ed5b1ad85496069e89bbb03151c
+      size: 12266016
+  convert_rknn_detection:
+    cmd: python pipeline/stages/convert_rknn_detection.py
+    deps:
+    - path: data/processed_detection/images/val/
+      hash: md5
+      md5: 85f814b3a622b4ce165f2e13abfae179.dir
+      size: 8935394
+      nfiles: 195
+    - path: models/export_detection/model.onnx
+      hash: md5
+      md5: 703b5ed5b1ad85496069e89bbb03151c
+      size: 12266016
+    - path: pipeline/configs/detection_rknn.yaml
+      hash: md5
+      md5: 010fddb70aeaf0bd63bba7e119f32e55
+      size: 551
+    - path: pipeline/stages/convert_rknn_detection.py
+      hash: md5
+      md5: 4a90c9f0718679c280d2b1aadc681f15
+      size: 7541
+    params:
+      pipeline/configs/detection_rknn.yaml:
+        eval_mem: false
+        io_config.input_size_list:
+        - - 1
+          - 3
+          - 640
+          - 640
+        io_config.mean_values:
+        - - 0
+          - 0
+          - 0
+        io_config.std_values:
+        - - 255
+          - 255
+          - 255
+        npu_core_mask: RKNN_NPU_CORE_AUTO
+        output.onnx_model: models/export_detection/model.onnx
+        output.perf_report: models/export_detection/rknn_perf_report.json
+        output.rknn_model: models/export_detection/model.rknn
+        perf_debug: false
+        quantization.dataset: data/processed_detection/images/val
+        quantization.dataset_size: 100
+        quantization.do_quantization: true
+        quantization.pre_compile: false
+        quantization.quantized_dtype: asymmetric_quantized-8
+        target_platform: rk3588
+    outs:
+    - path: models/export_detection/model.rknn
+      hash: md5
+      md5: d1b945610125dcd4da2dffd4d2e8538f
+      size: 30
+    - path: models/export_detection/rknn_perf_report.json
+      hash: md5
+      md5: b14046cb160e09a4ed8281e94145ca6c
+      size: 344
+  register_model_detection:
+    cmd: python pipeline/stages/register_model_detection.py
+    deps:
+    - path: models/export_detection/model.rknn
+      hash: md5
+      md5: d1b945610125dcd4da2dffd4d2e8538f
+      size: 30
+    - path: models/metrics_detection/eval_metrics.json
+      hash: md5
+      md5: f17a00010dd76b4791498d47508e3b02
+      size: 570
+    - path: models/metrics_detection/mlflow_run_id.txt
+      hash: md5
+      md5: 615a11c2f61128887b21cde9c9fb6bde
+      size: 32
+    - path: pipeline/configs/detection_mlops.yaml
+      hash: md5
+      md5: 91052528af586250bb3d0de5ce390a58
+      size: 674
+    - path: pipeline/stages/register_model_detection.py
+      hash: md5
+      md5: 5908300398f1afe70bf396be53206e7f
+      size: 8362
+    params:
+      pipeline/configs/detection_mlops.yaml:
+        paths.eval_metrics: models/metrics_detection/eval_metrics.json
+        paths.mlflow_run_id: models/metrics_detection/mlflow_run_id.txt
+        paths.onnx_model: models/export_detection/model.onnx
+        paths.registry_result: models/metrics_detection/registry_result.json
+        paths.rknn_model: models/export_detection/model.rknn
+        paths.train_metrics: models/metrics_detection/train_metrics.json
+        registry.model_name: visionops-detector-detection
+        registry.promotion_threshold.latency_ms: 50
+        registry.promotion_threshold.map50: 0.7
+        registry.promotion_threshold.map50_95: 0.25
+        registry.tags.auto_registered: 'true'
+        registry.tags.model_family: yolov8
+        registry.tags.platform: rk3588
+        registry.tags.quantized: int8
+        registry.tags.task: detection
+        registry.task: detection
+    outs:
+    - path: models/metrics_detection/registry_result.json
+      hash: md5
+      md5: e8b39d33ced350e0c498f03cd89f43ff
+      size: 982

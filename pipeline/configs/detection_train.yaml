@@ -1,0 +1,31 @@
+model:
+  architecture: yolov8n
+  weights: models/pretrained/yolov8n.pt
+  num_classes: 2
+  pretrained: true
+
+dataset:
+  yaml_path: data/processed_detection/data.yaml
+
+train:
+  epochs: 5
+  batch_size: 16
+  img_size: 640
+  lr0: 0.001
+  device: cuda
+  workers: 4
+  patience: 20
+  cache: false
+  project: models/runs/detect
+  name: visionops_detection
+  exist_ok: true
+
+mlflow:
+  experiment_name: visionops-detection
+  tracking_uri: http://localhost:5000
+  log_artifacts: true
+  log_model: false
+
+output:
+  checkpoint_dir: models/checkpoints_detection
+  metrics_dir: models/metrics_detection
