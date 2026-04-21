@@ -10,6 +10,7 @@ on:
       - 'requirements.txt'
       - 'dvc.yaml'
       - 'docker-compose.yml'
+      - '.github/workflows/mlops_pipeline.yml'
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -73,10 +74,8 @@ jobs:
       - name: 安装依赖
         run: |
           pip install pytest pytest-cov --quiet
-          # 安装核心依赖（排除 GPU/RKNN 相关）
-          pip install \
-            mlflow pyyaml numpy requests fastapi httpx \
-            --quiet
+          # 安装核心依赖（排除 GPU / RKNN 相关）
+          pip install mlflow pyyaml numpy requests fastapi httpx --quiet
 
       - name: 运行单元测试
         run: |
@@ -94,11 +93,11 @@ jobs:
           fail_ci_if_error: false
 
   # ────────────────────────────────────────────────────────
-  # Job 3: DVC 流水线（训练+评估+RKNN转换）
+  # Job 3: Detection DVC 流水线
   # 仅在 main 分支 push 或手动触发时运行
   # ────────────────────────────────────────────────────────
   train-pipeline:
-    name: 训练流水线 (DVC repro)
+    name: Detection 训练流水线 (DVC repro)
     runs-on: ubuntu-latest
     needs: test
     if: |
@@ -108,10 +107,11 @@ jobs:
       AWS_ACCESS_KEY_ID: ${{ secrets.MINIO_ACCESS_KEY }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.MINIO_SECRET_KEY }}
       MLFLOW_S3_ENDPOINT_URL: ${{ secrets.MINIO_ENDPOINT }}
+
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # DVC 需要完整 git 历史
+          fetch-depth: 0
 
       - name: 设置 Python
         uses: actions/setup-python@v5
@@ -131,26 +131,39 @@ jobs:
       - name: 拉取 DVC 数据
         run: dvc pull --run-cache || echo "DVC 数据拉取失败（可能是首次运行）"
 
-      - name: 运行 DVC 流水线
+      - name: 运行 Detection DVC 流水线
         run: |
           if [ "${{ github.event.inputs.force_retrain }}" == "true" ]; then
             echo "强制重训练模式"
-            dvc repro --force
+            dvc repro --force \
+              preprocess_detection \
+              train_detection \
+              evaluate_detection \
+              export_onnx_detection \
+              convert_rknn_detection \
+              register_model_detection
           else
-            dvc repro
+            dvc repro \
+              preprocess_detection \
+              train_detection \
+              evaluate_detection \
+              export_onnx_detection \
+              convert_rknn_detection \
+              register_model_detection
           fi
 
       - name: 推送结果到 DVC 远端
         run: dvc push || echo "DVC push 失败（可能是无写权限）"
 
-      - name: 上传模型 artifacts
+      - name: 上传 detection 模型 artifacts
         uses: actions/upload-artifact@v4
         with:
           name: model-artifacts-${{ github.sha }}
           path: |
-            models/export/model.onnx
-            models/export/model.rknn
-            models/metrics/
+            models/export_detection/model.onnx
+            models/export_detection/model.rknn
+            models/export_detection/rknn_perf_report.json
+            models/metrics_detection/
           retention-days: 30
           if-no-files-found: warn
 
@@ -158,12 +171,13 @@ jobs:
   # Job 4: 模型注册质量门禁
   # ────────────────────────────────────────────────────────
   model-gate:
-    name: 模型质量门禁
+    name: Detection 模型质量门禁
     runs-on: ubuntu-latest
     needs: train-pipeline
     if: |
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'workflow_dispatch')
+
     steps:
       - uses: actions/checkout@v4
 
@@ -171,7 +185,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: model-artifacts-${{ github.sha }}
-          path: models/
+          path: .
 
       - name: 设置 Python
         uses: actions/setup-python@v5
@@ -181,34 +195,35 @@ jobs:
       - name: 安装依赖
         run: pip install mlflow pyyaml --quiet
 
-      - name: 检查评估指标
+      - name: 检查 detection 评估指标
         run: |
           python3 - <<'EOF'
-          import json, sys, yaml
+          import json
+          import sys
+          import yaml
 
-          # 读取评估指标
           try:
-              with open("models/metrics/eval_metrics.json") as f:
+              with open("models/metrics_detection/eval_metrics.json", "r", encoding="utf-8") as f:
                   metrics = json.load(f)
           except FileNotFoundError:
-              print("警告: eval_metrics.json 不存在，跳过质量检查")
+              print("警告: models/metrics_detection/eval_metrics.json 不存在，跳过质量检查")
               sys.exit(0)
 
-          # 读取晋升阈值
-          with open("pipeline/configs/mlops.yaml") as f:
+          with open("pipeline/configs/detection_mlops.yaml", "r", encoding="utf-8") as f:
               cfg = yaml.safe_load(f)
+
           thresholds = cfg["registry"]["promotion_threshold"]
 
-          acc = metrics.get("accuracy", metrics.get("mAP50", 0))
-          min_acc = thresholds.get("accuracy", 0.85)
+          map50 = metrics.get("map50", metrics.get("mAP50", 0))
+          min_map50 = thresholds.get("map50", 0.70)
 
-          print(f"模型精度: {acc:.4f} | 最低要求: {min_acc}")
+          print(f"模型 mAP50: {map50:.4f} | 最低要求: {min_map50:.4f}")
 
-          if acc < min_acc:
-              print(f"❌ 精度 {acc:.4f} 低于阈值 {min_acc}，阻止部署！")
+          if map50 < min_map50:
+              print(f"❌ mAP50 {map50:.4f} 低于阈值 {min_map50:.4f}，阻止部署！")
               sys.exit(1)
           else:
-              print(f"✅ 精度检查通过！")
+              print("✅ Detection 模型质量门禁通过！")
           EOF
 
       - name: 注册模型到 MLflow Registry
@@ -218,8 +233,8 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.MINIO_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.MINIO_SECRET_KEY }}
         run: |
-          python pipeline/stages/register_model.py || \
-          echo "模型注册失败（可能 MLflow 服务不可达），继续流水线"
+          python pipeline/stages/register_model_detection.py || \
+          echo "Detection 模型注册失败（可能 MLflow 服务不可达），继续流水线"
 
   # ────────────────────────────────────────────────────────
   # Job 5: 边缘设备部署
@@ -232,7 +247,8 @@ jobs:
     if: |
       (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
       (github.event_name == 'workflow_dispatch')
-    environment: production   # 需要手动审批（在 GitHub 仓库 Environments 配置）
+    environment: production
+
     steps:
       - uses: actions/checkout@v4
 
@@ -240,7 +256,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: model-artifacts-${{ github.sha }}
-          path: models/
+          path: .
 
       - name: 配置 SSH 密钥
         run: |
@@ -249,15 +265,15 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ secrets.EDGE_DEVICE_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
 
-      - name: 部署 RKNN 模型
+      - name: 部署 detection RKNN 模型
         run: |
           TARGET_DEVICE="${{ github.event.inputs.target_device }}"
           if [ -z "$TARGET_DEVICE" ]; then
             echo "部署到所有设备..."
-            bash edge/deploy/push.sh models/export/model.rknn
+            bash edge/deploy/push.sh models/export_detection/model.rknn
           else
             echo "部署到指定设备: $TARGET_DEVICE"
-            bash edge/deploy/push.sh models/export/model.rknn "$TARGET_DEVICE"
+            bash edge/deploy/push.sh models/export_detection/model.rknn "$TARGET_DEVICE"
           fi
 
       - name: 部署完成通知
@@ -265,4 +281,4 @@ jobs:
         run: |
           STATUS="${{ job.status }}"
           echo "部署状态: $STATUS"
-          # 可在此添加 Slack/钉钉 通知
+          # 可在此添加 Slack / 钉钉通知

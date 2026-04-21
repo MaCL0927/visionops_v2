@@ -1,40 +1,42 @@
 # VisionOps
 
-> 端到端视觉AI软件平台 — 服务器训练 × RK3588 NPU边缘推理 × 全自动 MLOps 管理
+> 端到端视觉 AI 软件平台  
+> 当前主线：**YOLOv8 Detection**  
+> 服务器训练 × ONNX 导出 × RK3588 RKNN 边缘部署 × 全自动 MLOps 管理
 
-```
-服务器端                        边缘端 (RK3588)
-┌─────────────────────────┐    ┌──────────────────────────┐
-│  数据预处理              │    │  rknnlite2 推理引擎       │
-│  YOLOv8/MobileNetV3训练  │───▶│  INT8量化 NPU加速        │
-│  ONNX → RKNN 转换        │    │  FastAPI 推理服务 :8080   │
-│  MLflow 实验追踪         │    │  Prometheus 指标 :9091   │
-│  MLflow Model Registry  │◀───│  数据漂移检测 + 上报      │
-│  DVC 数据版本管理        │    │  systemd 自启动服务       │
-│  MinIO 模型/数据存储     │    └──────────────────────────┘
-│  FastAPI 后端 :8000      │
-│  Grafana 监控 :3000      │
-│  自动再训练调度器        │
-└─────────────────────────┘
-           │
-           ▼
-   GitHub Actions CI/CD
-   Lint → 测试 → 训练 → 质量门禁 → 边缘部署
-```
+```text
+服务器端                                                边缘端（RK3588）
+┌──────────────────────────────────────┐              ┌──────────────────────────────┐
+│ 检测数据预处理                       │              │ rknnlite2 推理引擎           │
+│ YOLOv8 Detection 训练                │ ───────────▶ │ INT8 量化 NPU 加速           │
+│ ONNX → RKNN 转换                     │              │ FastAPI 推理服务 :8080       │
+│ MLflow 实验追踪                      │              │ Prometheus 指标 :9091        │
+│ MLflow Model Registry                │ ◀─────────── │ 数据漂移检测 + 上报          │
+│ DVC 数据版本管理                     │              │ systemd 自启动服务           │
+│ MinIO 模型/数据存储                  │              └──────────────────────────────┘
+│ FastAPI 后端 :8000                   │
+│ Grafana 监控 :3000                   │
+│ 自动再训练调度器                     │
+└──────────────────────────────────────┘
+                      │
+                      ▼
+              GitHub Actions CI/CD
+        Lint → 测试 → 训练 → 质量门禁 → 边缘部署
+        
 
 ## 技术栈
 
-| 层级 | 技术 |
-|------|------|
-| 模型训练 | PyTorch 2.x, YOLOv8 (ultralytics), MobileNetV3, EfficientNet |
-| 模型格式 | PyTorch → ONNX (opset 12) → RKNN (INT8量化) |
-| 边缘推理 | rknnlite2, RK3588 NPU (3-core, 6 TOPS) |
-| 实验追踪 | MLflow 2.13 + PostgreSQL 后端 |
-| 数据版本 | DVC + MinIO (S3兼容) |
-| 服务后端 | FastAPI + uvicorn |
-| 监控告警 | Prometheus + Grafana |
-| CI/CD | GitHub Actions |
-| 容器化 | Docker Compose |
+| 层级    | 技术                                |
+| ----- | --------------------------------- |
+| 模型训练  | PyTorch 2.x, YOLOv8 (Ultralytics) |
+| 模型格式  | PyTorch → ONNX → RKNN             |
+| 边缘推理  | rknnlite2, RK3588 NPU             |
+| 实验追踪  | MLflow                            |
+| 数据版本  | DVC + MinIO                       |
+| 服务后端  | FastAPI + Uvicorn                 |
+| 监控告警  | Prometheus + Grafana              |
+| CI/CD | GitHub Actions                    |
+| 容器化   | Docker Compose                    |
 
 ---
 
@@ -42,26 +44,28 @@
 
 ### 前置条件
 
-- Docker + Docker Compose
-- Python 3.11+
-- （可选）NVIDIA GPU + CUDA（加速训练）
+Docker + Docker Compose
+Python 3.11+
+可选：NVIDIA GPU + CUDA（用于训练加速）
+可选：独立的 RKNN 转换环境（推荐，不建议污染训练主环境）
 
 ### 1. 启动 MLOps 基础服务
 
 ```bash
-cd visionops
+cd visionops_v2
 make up
 ```
 
 服务端口：
 
-| 服务 | 地址 | 凭证 |
-|------|------|------|
-| MLflow UI | http://localhost:5000 | — |
-| VisionOps API | http://localhost:8000/docs | — |
-| MinIO Console | http://localhost:9001 | minioadmin / minioadmin123 |
-| Grafana | http://localhost:3000 | admin / visionops123 |
-| Prometheus | http://localhost:9090 | — |
+| 服务            | 地址                                                       | 凭证                         |
+| ------------- | -------------------------------------------------------- | -------------------------- |
+| MLflow UI     | [http://localhost:5000](http://localhost:5000)           | —                          |
+| VisionOps API | [http://localhost:8000/docs](http://localhost:8000/docs) | —                          |
+| MinIO Console | [http://localhost:9001](http://localhost:9001)           | minioadmin / minioadmin123 |
+| Grafana       | [http://localhost:3000](http://localhost:3000)           | admin / visionops123       |
+| Prometheus    | [http://localhost:9090](http://localhost:9090)           | —                          |
+
 
 ### 2. 初始化项目
 
@@ -71,48 +75,75 @@ make init          # 初始化 DVC + MinIO buckets + 目录结构
 
 ### 3. 准备数据
 
-将原始图像放入 `data/raw/`，支持以下结构：
+将 YOLO 检测数据放入：：
 
 ```
-data/raw/
-├── class_a/
-│   ├── img001.jpg
-│   └── ...
-└── class_b/
-    └── ...
+data/raw_detection/
+├── images/
+│   ├── train/
+│   └── val/
+├── labels/
+│   ├── train/
+│   └── val/
+└── data.yaml
+```
+其中：
+
+images/train、images/val 为训练/验证图像
+labels/train、labels/val 为对应 YOLO 标签
+data.yaml 中的 names 需与检测任务类别一致
+
+说明：仓库默认已将 data/ 与 models/ 加入 .gitignore，因此 GitHub 上不会包含你的本地数据与训练产物；克隆仓库后需要在本地自行准备。
+
+### 4. 配置 detection 流水线参数
+
+主要配置文件位于：
+```
+pipeline/configs/
+├── detection_data.yaml
+├── detection_train.yaml
+├── detection_export.yaml
+├── detection_rknn.yaml
+└── detection_mlops.yaml
 ```
 
-或直接放入图像文件（无类别结构）。
+你通常需要修改的是：
 
-### 4. 配置训练参数
+detection_data.yaml：数据路径、类别数、预处理开关
+detection_train.yaml：模型结构、训练超参数
+detection_export.yaml：ONNX 导出参数
+detection_rknn.yaml：RKNN 转换目标平台与量化参数
+detection_mlops.yaml：模型注册、晋升阈值、边缘设备信息
 
-编辑 `pipeline/configs/train.yaml`：
-
-```yaml
-model:
-  architecture: yolov8n   # yolov8n/s/m, mobilenetv3, efficientnet_b0
-  num_classes: 10
-
-train:
-  epochs: 100
-  batch_size: 16
-  lr: 0.001
-```
-
-### 5. 运行完整流水线
+### 5. 运行完整 detection 流水线
 
 ```bash
 make pipeline
-# 等价于: dvc repro
+```
+等价于
+```bash
+dvc repro \
+  preprocess_detection \
+  train_detection \
+  evaluate_detection \
+  export_onnx_detection \
+  convert_rknn_detection \
+  register_model_detection
 ```
 
 流水线自动执行：
-1. **数据预处理** — resize, 增强, 训练/验证集划分
-2. **模型训练** — 自动记录实验到 MLflow
-3. **模型评估** — 计算 mAP/accuracy
+1. **检测数据预处理** — resize, 增强, 训练/验证集划分
+2. **YOLOv8 检测模型训练** — 自动记录实验到 MLflow
+3. **检测指标评估** — 计算 mAP/accuracy
 4. **ONNX 导出** — opset 12, 静态 shape
 5. **RKNN 转换** — INT8量化（需要 rknn-toolkit2 x86环境）
-6. **模型注册** — 满足阈值自动晋升 Production
+6. **MLflow Registry 注册** — 满足阈值自动晋升 Production
+
+强制重跑所有 detection stage：
+
+```bash
+make pipeline-force
+```
 
 ### 6. 部署到 RK3588 设备
 
@@ -124,20 +155,56 @@ make deploy
 make deploy DEVICE=rk3588-001
 ```
 
+Detection 主线输出目录
+
+典型输出如下：
+```bash
+data/processed_detection/
+├── images/
+├── labels/
+├── data.yaml
+└── dataset_stats.json
+
+models/checkpoints_detection/
+models/export_detection/
+├── model.onnx
+├── model.rknn
+└── rknn_perf_report.json
+
+models/metrics_detection/
+├── eval_metrics.json
+├── train_metrics.json
+└── registry_result.json
+```
+
 ---
 
 ## 配置参考
 
-### 模型晋升阈值 (`pipeline/configs/mlops.yaml`)
+### 模型晋升阈值
+
+编辑：
+
+pipeline/configs/detection_mlops.yaml
 
 ```yaml
 registry:
   promotion_threshold:
-    accuracy: 0.85      # mAP50 >= 0.85 才自动晋升 Production
-    latency_ms: 50      # NPU推理延迟 <= 50ms
+    map50: 0.70
+    map50_95: 0.45
+    latency_ms: 50
 ```
+含义：
 
-### RKNN 转换 (`pipeline/configs/rknn.yaml`)
+map50 达到阈值才允许自动晋升
+map50_95 用于更严格的质量控制
+latency_ms 用于约束边缘部署时延
+
+### RKNN 转换
+
+编辑：
+
+pipeline/configs/detection_rknn.yaml
 
 ```yaml
 target_platform: rk3588
@@ -146,7 +213,11 @@ quantization:
   dataset_size: 100     # 校准图像数量
 ```
 
-### 边缘设备注册 (`pipeline/configs/mlops.yaml`)
+### 边缘设备注册
+
+编辑：
+
+pipeline/configs/detection_mlops.yaml
 
 ```yaml
 edge_devices:
