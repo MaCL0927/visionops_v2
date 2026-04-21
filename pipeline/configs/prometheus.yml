@@ -1,0 +1,30 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # MLflow服务器指标
+  - job_name: mlflow
+    static_configs:
+      - targets: ["mlflow:5000"]
+
+  # VisionOps API Server
+  - job_name: visionops-api
+    static_configs:
+      - targets: ["api:8000"]
+    metrics_path: /metrics
+
+  # RK3588边缘设备推理指标
+  # （需要在mlops.yaml中注册设备后，手动添加对应IP）
+  - job_name: edge-inference
+    static_configs:
+      - targets:
+          - "192.168.1.100:9091"   # rk3588-001
+          # - "192.168.1.101:9091" # rk3588-002
+    metrics_path: /metrics
+    scrape_interval: 5s            # 边缘设备更频繁采集
+
+  # Prometheus自身
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

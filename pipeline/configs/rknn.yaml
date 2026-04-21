@@ -1,0 +1,28 @@
+# RKNN模型转换配置（针对RK3588）
+target_platform: rk3588         # rk3566 / rk3568 / rk3588
+
+# 量化配置（量化可显著提升NPU推理速度）
+quantization:
+  do_quantization: true
+  dataset: data/processed/val/  # 校准数据集路径（随机采样100张）
+  dataset_size: 100
+  quantized_dtype: asymmetric_quantized-8  # 8bit量化
+  pre_compile: false            # 是否预编译（需要连接设备）
+
+# 输入/输出配置
+io_config:
+  input_size_list: [[1, 3, 640, 640]]  # [batch, channel, H, W]
+  mean_values: [[123.675, 116.28, 103.53]]
+  std_values: [[58.395, 57.12, 57.375]]
+
+# NPU核心配置（RK3588有三个NPU核心）
+npu_core_mask: RKNN_NPU_CORE_AUTO  # AUTO / CORE_0 / CORE_1 / CORE_2 / CORE_0_1_2
+
+# 性能测试
+perf_debug: false
+eval_mem: false
+
+# 输出路径
+output:
+  rknn_model: models/export/model.rknn
+  perf_report: models/export/rknn_perf_report.json

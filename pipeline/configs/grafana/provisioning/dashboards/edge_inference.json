@@ -1,0 +1,124 @@
+{
+  "title": "VisionOps Edge Inference",
+  "uid": "visionops-edge",
+  "version": 1,
+  "schemaVersion": 36,
+  "tags": ["visionops", "edge", "rk3588"],
+  "timezone": "browser",
+  "time": { "from": "now-1h", "to": "now" },
+  "refresh": "10s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "推理延迟 P50 / P95 / P99 (ms)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "visionops_inference_latency_ms{quantile=\"0.5\"}",
+          "legendFormat": "P50"
+        },
+        {
+          "expr": "visionops_inference_latency_ms{quantile=\"0.95\"}",
+          "legendFormat": "P95"
+        },
+        {
+          "expr": "visionops_inference_latency_ms{quantile=\"0.99\"}",
+          "legendFormat": "P99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 40 },
+              { "color": "red", "value": 60 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "吞吐量 (FPS)",
+      "type": "stat",
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "expr": "visionops_throughput_fps",
+          "legendFormat": "FPS"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 15 },
+              { "color": "green", "value": 20 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "累计推理总数",
+      "type": "stat",
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "expr": "visionops_inference_total",
+          "legendFormat": "Total"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" }
+      }
+    },
+    {
+      "id": 4,
+      "title": "推理错误数",
+      "type": "stat",
+      "gridPos": { "x": 12, "y": 4, "w": 6, "h": 4 },
+      "targets": [
+        {
+          "expr": "visionops_inference_errors",
+          "legendFormat": "Errors"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 5,
+      "title": "平均推理延迟趋势",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 8, "w": 24, "h": 7 },
+      "targets": [
+        {
+          "expr": "visionops_inference_latency_mean",
+          "legendFormat": "Mean Latency (ms)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": { "lineWidth": 2, "fillOpacity": 10 }
+        }
+      }
+    }
+  ]
+}

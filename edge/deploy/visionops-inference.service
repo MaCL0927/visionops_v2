@@ -1,0 +1,42 @@
+[Unit]
+Description=VisionOps RK3588 Edge Inference Service
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/visionops
+
+# 环境变量
+Environment="DEVICE_ID=rk3588-001"
+Environment="SERVER_URL=http://192.168.1.1:8000"
+Environment="MODEL_PATH=/opt/visionops/models/current.rknn"
+Environment="NPU_CORE=auto"
+Environment="NUM_CLASSES=10"
+
+# 推理服务主进程
+ExecStart=/opt/visionops/venv/bin/python /opt/visionops/edge/inference/engine.py \
+    --model ${MODEL_PATH} \
+    --host 0.0.0.0 \
+    --port 8080 \
+    --npu-core ${NPU_CORE} \
+    --num-classes ${NUM_CLASSES}
+
+# 重启策略
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# 资源限制
+TimeoutStartSec=30
+TimeoutStopSec=10
+
+# 日志
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=visionops-inference
+
+[Install]
+WantedBy=multi-user.target

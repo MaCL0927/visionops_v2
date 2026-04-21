@@ -1,0 +1,35 @@
+# MLOps管理配置
+registry:
+  model_name: visionops-detector
+  # 自动晋升到Production的阈值
+  promotion_threshold:
+    accuracy: 0.85             # mAP50 >= 0.85 才注册为Production
+    latency_ms: 50             # 推理延迟 <= 50ms (RK3588 NPU目标)
+    confidence: 0.70
+
+# 边缘设备注册表
+edge_devices:
+  - id: rk3588-001
+    host: 192.168.1.100
+    port: 22
+    user: root
+    deploy_path: /opt/visionops/models/
+    service_name: visionops-inference
+  # 添加更多设备...
+  # - id: rk3588-002
+  #   host: 192.168.1.101
+
+# 自动再训练触发条件
+retraining:
+  enabled: true
+  triggers:
+    accuracy_drop: 0.05        # 精度下降5%触发
+    data_drift_threshold: 0.1  # 数据分布偏移触发
+    new_data_size: 500         # 累积500条新数据触发
+  schedule: "0 2 * * 1"       # 每周一凌晨2点定时检查
+
+# 告警配置
+alerts:
+  slack_webhook: ""            # 填入Slack Webhook URL
+  email: ""                    # 填入告警邮件地址
+  metrics_window: 1h           # 监控窗口

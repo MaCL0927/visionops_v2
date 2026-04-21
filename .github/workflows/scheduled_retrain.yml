@@ -1,0 +1,74 @@
+name: 自动再训练检查
+
+on:
+  schedule:
+    # 每周一凌晨2点（UTC+8为每周一10:00，可按需调整时区）
+    - cron: '0 18 * * 0'   # UTC 周日 18:00 = 北京周一 02:00
+  workflow_dispatch:
+    inputs:
+      force_retrain:
+        description: '强制再训练（跳过条件检查）'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  check-and-retrain:
+    name: 再训练条件检查
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: 安装依赖
+        run: pip install mlflow pyyaml requests --quiet
+
+      - name: 配置 DVC 远端
+        run: |
+          pip install 'dvc[s3]' --quiet
+          dvc remote modify minio endpointurl ${{ secrets.MINIO_ENDPOINT }}
+          dvc remote modify minio access_key_id ${{ secrets.MINIO_ACCESS_KEY }}
+          dvc remote modify minio secret_access_key ${{ secrets.MINIO_SECRET_KEY }}
+
+      - name: 执行再训练条件检查
+        env:
+          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+          MLFLOW_S3_ENDPOINT_URL: ${{ secrets.MINIO_ENDPOINT }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.MINIO_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.MINIO_SECRET_KEY }}
+        run: |
+          if [ "${{ github.event.inputs.force_retrain }}" == "true" ]; then
+            echo "强制再训练模式..."
+            python server/mlops/retrain_scheduler.py --force
+          else
+            echo "条件检查模式..."
+            python server/mlops/retrain_scheduler.py --mode once
+          fi
+
+      - name: 如果触发了训练，运行完整流水线
+        env:
+          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.MINIO_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.MINIO_SECRET_KEY }}
+          MLFLOW_S3_ENDPOINT_URL: ${{ secrets.MINIO_ENDPOINT }}
+        run: |
+          # 检查是否有新的 DVC 变更（说明再训练已触发）
+          if dvc status 2>/dev/null | grep -q "changed"; then
+            echo "检测到流水线变更，触发完整训练..."
+            pip install -r requirements.txt --quiet
+            dvc pull --run-cache || true
+            dvc repro
+            dvc push || true
+          else
+            echo "无需重训练"
+          fi

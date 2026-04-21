@@ -1,0 +1,29 @@
+[Unit]
+Description=VisionOps RK3588 Edge Monitor Service
+After=network.target visionops-inference.service
+Wants=visionops-inference.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/visionops
+
+Environment="DEVICE_ID=rk3588-001"
+Environment="SERVER_URL=http://192.168.1.1:8000"
+Environment="INFERENCE_URL=http://localhost:8080"
+Environment="REPORT_INTERVAL=60"
+
+ExecStart=/opt/visionops/venv/bin/python /opt/visionops/edge/monitor/monitor.py \
+    --device-id ${DEVICE_ID} \
+    --server-url ${SERVER_URL} \
+    --interval ${REPORT_INTERVAL}
+
+Restart=always
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=visionops-monitor
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,24 @@
+# RK3588 边缘设备 Python 依赖
+# 安装方式: pip install -r requirements-edge.txt
+
+# ── 推理服务 ──
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9
+
+# ── 图像处理 ──
+numpy>=1.24.0
+opencv-python-headless>=4.8.0   # 无GUI版本，适合嵌入式
+
+# ── 系统监控 ──
+psutil>=5.9.0
+requests>=2.31.0
+
+# ── 配置 ──
+pyyaml>=6.0.0
+
+# ── RKNN推理运行时（ARM专用，x86无法安装）──
+# rknn-toolkit-lite2
+# 注：在 RK3588 ARM设备上运行以下命令手动安装：
+#   pip install rknn-toolkit-lite2
+# 或从 Rockchip 官方渠道获取对应版本

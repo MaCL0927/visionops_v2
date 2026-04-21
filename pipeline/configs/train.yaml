@@ -1,0 +1,40 @@
+# 模型训练配置
+model:
+  architecture: yolov8n        # 支持: yolov8n/s/m, mobilenetv3, efficientnet
+  num_classes: 10
+  pretrained: true
+  pretrained_weights: null     # null = 自动下载，或指定路径
+
+train:
+  epochs: 100
+  batch_size: 16
+  img_size: [640, 640]
+  lr: 0.001
+  optimizer: AdamW             # Adam / AdamW / SGD
+  lr_scheduler: cosine         # cosine / step / plateau
+  warmup_epochs: 3
+  weight_decay: 0.0005
+  early_stopping:
+    enabled: true
+    patience: 15
+    min_delta: 0.001
+
+# 混合精度训练（服务器端加速）
+amp: true
+device: cuda                   # cuda / cpu
+
+# MLflow追踪
+mlflow:
+  experiment_name: visionops-training
+  tracking_uri: http://localhost:5000
+  log_artifacts: true
+  log_model: true
+  tags:
+    project: visionops
+    platform: rk3588
+
+# 输出路径
+output:
+  checkpoint_dir: models/checkpoints/
+  metrics_dir: models/metrics/
+  save_period: 5               # 每N个epoch保存一次checkpoint

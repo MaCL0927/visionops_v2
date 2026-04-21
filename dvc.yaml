@@ -1,0 +1,116 @@
+stages:
+  # ─────────────────────────────────
+  # Stage 1: 数据预处理
+  # ─────────────────────────────────
+  preprocess:
+    cmd: python pipeline/stages/preprocess.py
+    deps:
+      - pipeline/stages/preprocess.py
+      - pipeline/configs/data.yaml
+      - data/raw/                         # DVC追踪的原始数据目录
+    params:
+      - pipeline/configs/data.yaml:
+          - preprocess.img_size
+          - preprocess.augment
+          - preprocess.val_split
+    outs:
+      - data/processed/train/
+      - data/processed/val/
+      - data/processed/dataset_stats.json
+
+  # ─────────────────────────────────
+  # Stage 2: 模型训练
+  # ─────────────────────────────────
+  train:
+    cmd: python pipeline/stages/train.py
+    deps:
+      - pipeline/stages/train.py
+      - pipeline/configs/train.yaml
+      - server/training/
+      - data/processed/train/
+      - data/processed/val/
+    params:
+      - pipeline/configs/train.yaml:
+          - model.architecture
+          - model.num_classes
+          - train.epochs
+          - train.batch_size
+          - train.lr
+          - train.optimizer
+    outs:
+      - models/checkpoints/best.pt
+      - models/checkpoints/last.pt
+    metrics:
+      - models/metrics/train_metrics.json:
+          cache: false
+
+  # ─────────────────────────────────
+  # Stage 3: 模型评估
+  # ─────────────────────────────────
+  evaluate:
+    cmd: python pipeline/stages/evaluate.py
+    deps:
+      - pipeline/stages/evaluate.py
+      - models/checkpoints/best.pt
+      - data/processed/val/
+    outs:
+      - models/metrics/eval_report.json
+      - models/metrics/confusion_matrix.png
+    metrics:
+      - models/metrics/eval_metrics.json:
+          cache: false
+
+  # ─────────────────────────────────
+  # Stage 4: ONNX导出
+  # ─────────────────────────────────
+  export_onnx:
+    cmd: python pipeline/stages/export_onnx.py
+    deps:
+      - pipeline/stages/export_onnx.py
+      - models/checkpoints/best.pt
+      - pipeline/configs/export.yaml
+    params:
+      - pipeline/configs/export.yaml:
+          - onnx.opset_version
+          - onnx.dynamic_axes
+          - onnx.input_size
+    outs:
+      - models/export/model.onnx
+
+  # ─────────────────────────────────
+  # Stage 5: RKNN模型转换（RK3588）
+  # ─────────────────────────────────
+  convert_rknn:
+    cmd: python pipeline/stages/convert_rknn.py
+    deps:
+      - pipeline/stages/convert_rknn.py
+      - models/export/model.onnx
+      - pipeline/configs/rknn.yaml
+      - data/processed/val/              # 量化校准数据集
+    params:
+      - pipeline/configs/rknn.yaml:
+          - target_platform
+          - quantization.do_quantization
+          - quantization.dataset
+          - quantization.pre_compile
+    outs:
+      - models/export/model.rknn
+      - models/export/rknn_perf_report.json
+
+  # ─────────────────────────────────
+  # Stage 6: 注册到MLflow Model Registry
+  # ─────────────────────────────────
+  register_model:
+    cmd: python pipeline/stages/register_model.py
+    deps:
+      - pipeline/stages/register_model.py
+      - models/export/model.rknn
+      - models/metrics/eval_metrics.json
+    params:
+      - pipeline/configs/mlops.yaml:
+          - registry.model_name
+          - registry.promotion_threshold.accuracy
+          - registry.promotion_threshold.latency_ms
+    metrics:
+      - models/metrics/registry_result.json:
+          cache: false
