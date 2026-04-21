@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import json
-import os
-import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import mlflow
 import yaml
@@ -17,259 +15,365 @@ def load_yaml(path: Path) -> dict:
         return yaml.safe_load(f)
 
 
+def load_json(path: Path) -> dict:
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
 def save_json(data: dict, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
-def load_json(path: Path) -> dict:
-    with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8").strip()
 
 
-def safe_float(value: Any, default: float = 0.0) -> float:
+def safe_get(d: Dict[str, Any], *keys: str, default=None):
+    cur = d
+    for k in keys:
+        if not isinstance(cur, dict) or k not in cur:
+            return default
+        cur = cur[k]
+    return cur
+
+
+def coerce_float(value: Any, default: Optional[float] = None) -> Optional[float]:
     try:
         return float(value)
-    except Exception:
+    except (TypeError, ValueError):
         return default
 
 
-def load_eval_metrics(cfg: dict) -> dict:
-    paths_cfg = cfg["paths"]
-    eval_metrics_path = Path(paths_cfg["eval_metrics"])
-    train_metrics_path = Path(paths_cfg["train_metrics"])
+def infer_rknn_report_path(paths_cfg: dict) -> Path:
+    # detection_mlops.yaml 目前未显式给出 rknn_report，
+    # 这里按 dvc.yaml 的 detection RKNN 输出约定推断：
+    # models/export_detection/rknn_perf_report.json
+    explicit = paths_cfg.get("rknn_report")
+    if explicit:
+        return Path(explicit)
 
-    if eval_metrics_path.exists():
-        return load_json(eval_metrics_path)
+    rknn_model = Path(paths_cfg["rknn_model"])
+    return rknn_model.parent / "rknn_perf_report.json"
 
-    # 如果没有 eval_metrics，退回 train_metrics
-    if train_metrics_path.exists():
-        data = load_json(train_metrics_path)
-        best_metrics = data.get("best_metrics", {})
-        return {
-            "task": "detection",
-            "map50": best_metrics.get("map50", 0.0),
-            "map50_95": best_metrics.get("map50_95", 0.0),
-            "precision": best_metrics.get("precision", 0.0),
-            "recall": best_metrics.get("recall", 0.0),
-            "source": "train_metrics",
+
+def resolve_rknn_source(paths_cfg: dict) -> Tuple[bool, Dict[str, Any]]:
+    """
+    判断 RKNN 是否可作为正式注册源：
+
+    可用条件：
+    1. rknn 文件存在
+    2. rknn perf report 存在
+    3. report.status != simulated
+    """
+    rknn_path = Path(paths_cfg["rknn_model"])
+    report_path = infer_rknn_report_path(paths_cfg)
+
+    if not rknn_path.exists():
+        return False, {
+            "reason": "rknn file not found",
+            "report_path": report_path.as_posix(),
         }
 
-    return {
-        "task": "detection",
-        "map50": 0.0,
-        "map50_95": 0.0,
-        "precision": 0.0,
-        "recall": 0.0,
-        "source": "none",
+    if not report_path.exists():
+        return False, {
+            "reason": "rknn perf report not found",
+            "report_path": report_path.as_posix(),
+        }
+
+    try:
+        report = load_json(report_path)
+    except Exception as e:
+        return False, {
+            "reason": f"failed to parse rknn perf report: {e}",
+            "report_path": report_path.as_posix(),
+        }
+
+    status = str(report.get("status", "")).lower()
+    deployable = report.get("deployable", None)
+
+    if status == "simulated":
+        return False, {
+            "reason": "rknn is simulated placeholder",
+            "report_path": report_path.as_posix(),
+            "status": status,
+            "deployable": deployable,
+            "report": report,
+        }
+
+    if deployable is False:
+        return False, {
+            "reason": "rknn report marks deployable=false",
+            "report_path": report_path.as_posix(),
+            "status": status,
+            "deployable": deployable,
+            "report": report,
+        }
+
+    return True, {
+        "reason": None,
+        "report_path": report_path.as_posix(),
+        "status": status or "ok",
+        "deployable": deployable,
+        "report": report,
     }
 
 
-def check_promotion_threshold(metrics: dict, thresholds: dict) -> Tuple[bool, str]:
-    map50 = safe_float(metrics.get("map50", 0.0))
-    map50_95 = safe_float(metrics.get("map50_95", 0.0))
-    latency_ms = metrics.get("latency_ms")
-
-    required_map50 = safe_float(thresholds.get("map50", 0.70))
-    required_map50_95 = safe_float(thresholds.get("map50_95", 0.25))
-    max_latency = safe_float(thresholds.get("latency_ms", 50))
-
-    if map50 < required_map50:
-        return False, f"mAP50 {map50:.4f} < 阈值 {required_map50:.4f}"
-
-    if map50_95 < required_map50_95:
-        return False, f"mAP50-95 {map50_95:.4f} < 阈值 {required_map50_95:.4f}"
-
-    if latency_ms is not None and safe_float(latency_ms) > max_latency:
-        return False, f"延迟 {latency_ms}ms > 阈值 {max_latency}ms"
-
-    return True, "所有检测指标满足晋升阈值"
+def ensure_registered_model_exists(client: MlflowClient, model_name: str) -> None:
+    try:
+        client.get_registered_model(model_name)
+        print(f"MLflow Registered Model 已存在: {model_name}")
+    except Exception:
+        client.create_registered_model(model_name)
+        print(f"已创建 MLflow Registered Model: {model_name}")
 
 
-def resolve_run_id(paths_cfg: dict) -> str | None:
-    run_id_path = Path(paths_cfg["mlflow_run_id"])
-    if run_id_path.exists():
-        return run_id_path.read_text(encoding="utf-8").strip()
-    return None
+def log_metrics_if_any(metrics: Dict[str, Any]) -> None:
+    for k, v in metrics.items():
+        if isinstance(v, (int, float)):
+            mlflow.log_metric(k, float(v))
+
+
+def log_params_if_any(params: Dict[str, Any]) -> None:
+    for k, v in params.items():
+        if v is None:
+            continue
+        if isinstance(v, (dict, list)):
+            mlflow.log_param(k, json.dumps(v, ensure_ascii=False))
+        else:
+            mlflow.log_param(k, v)
 
 
 def ensure_registration_run(
-    client: MlflowClient,
-    tracking_uri: str,
+    model_name: str,
+    run_id: str,
+    eval_metrics: dict,
+    train_metrics: dict,
     paths_cfg: dict,
-    metrics: dict,
+    registry_cfg: dict,
 ) -> str:
     """
-    如果训练阶段已经有 run_id，则直接复用。
-    如果没有，则新建一个 run 并上传 ONNX/RKNN 产物。
+    如果上游训练阶段已提供 mlflow_run_id，则直接复用。
+    否则新建一个注册专用 run，并补齐必要 artifact。
     """
-    run_id = resolve_run_id(paths_cfg)
     if run_id:
+        print(f"复用已有 MLflow run_id: {run_id}")
         return run_id
 
-    mlflow.set_tracking_uri(tracking_uri)
-    mlflow.set_experiment("visionops-detection-registration")
+    print("未找到上游 mlflow_run_id，创建注册专用 MLflow Run...")
+    with mlflow.start_run(run_name=f"register-{model_name}") as run:
+        created_run_id = run.info.run_id
 
-    onnx_path = Path(paths_cfg["onnx_model"])
-    rknn_path = Path(paths_cfg["rknn_model"])
+        log_metrics_if_any(eval_metrics)
+        log_params_if_any({
+            "task": registry_cfg.get("task", "detection"),
+            "model_name": model_name,
+            "source": "register_model_detection",
+            "auto_registered": True,
+        })
 
-    with mlflow.start_run(
-        run_name=f"register-detection-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
-    ) as run:
-        run_id = run.info.run_id
-
-        # 上传本地模型产物
-        if rknn_path.exists():
-            mlflow.log_artifact(str(rknn_path), artifact_path="rknn")
+        onnx_path = Path(paths_cfg["onnx_model"])
         if onnx_path.exists():
             mlflow.log_artifact(str(onnx_path), artifact_path="onnx")
 
-        # 记录关键指标
-        log_metrics = {}
-        for k in ["map50", "map50_95", "precision", "recall", "latency_ms"]:
-            if k in metrics:
-                try:
-                    log_metrics[k] = float(metrics[k])
-                except Exception:
-                    pass
-        if log_metrics:
-            mlflow.log_metrics(log_metrics)
+        use_rknn, rknn_info = resolve_rknn_source(paths_cfg)
+        rknn_path = Path(paths_cfg["rknn_model"])
+        if use_rknn and rknn_path.exists():
+            mlflow.log_artifact(str(rknn_path), artifact_path="rknn")
 
-        return run_id
+        eval_metrics_path = Path(paths_cfg["eval_metrics"])
+        if eval_metrics_path.exists():
+            mlflow.log_artifact(str(eval_metrics_path), artifact_path="metrics")
 
+        train_metrics_path = Path(paths_cfg.get("train_metrics", ""))
+        if train_metrics_path and train_metrics_path.exists():
+            mlflow.log_artifact(str(train_metrics_path), artifact_path="metrics")
 
-def ensure_registered_model(client: MlflowClient, model_name: str, description: str) -> None:
-    try:
-        client.get_registered_model(model_name)
-        print(f"已存在的注册模型: {model_name}")
-    except Exception:
-        client.create_registered_model(model_name, description=description)
-        print(f"创建新注册模型: {model_name}")
+        report_path = infer_rknn_report_path(paths_cfg)
+        if report_path.exists():
+            mlflow.log_artifact(str(report_path), artifact_path="rknn")
 
-
-def register_model(cfg: dict, metrics: dict) -> dict:
-    registry_cfg = cfg["registry"]
-    paths_cfg = cfg["paths"]
-
-    model_name = registry_cfg.get("model_name", "visionops-detector-detection")
-    tags = registry_cfg.get("tags", {})
-    thresholds = registry_cfg.get("promotion_threshold", {})
-
-    tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:5000")
-    mlflow.set_tracking_uri(tracking_uri)
-    client = MlflowClient()
-
-    run_id = ensure_registration_run(client, tracking_uri, paths_cfg, metrics)
-
-    rknn_path = Path(paths_cfg["rknn_model"])
-    onnx_path = Path(paths_cfg["onnx_model"])
-
-    print("\n注册 detection 模型到 MLflow Registry...")
-    print(f"模型名称: {model_name}")
-    print(f"Run ID: {run_id}")
-
-    ensure_registered_model(
-        client,
-        model_name=model_name,
-        description="VisionOps Detection 模型 | YOLOv8 | 目标平台: RK3588",
-    )
-
-    # 优先注册 RKNN 产物；如果没有，则退回 ONNX
-    if rknn_path.exists():
-        source_uri = f"runs:/{run_id}/rknn"
-        source_type = "rknn"
-    else:
-        source_uri = f"runs:/{run_id}/onnx"
-        source_type = "onnx"
-
-    mv = client.create_model_version(
-        name=model_name,
-        source=source_uri,
-        run_id=run_id,
-        description=(
-            f"自动注册 detection 模型 | "
-            f"mAP50={metrics.get('map50', 'N/A')} | "
-            f"mAP50-95={metrics.get('map50_95', 'N/A')} | "
-            f"{datetime.now().isoformat()}"
-        ),
-    )
-    version = mv.version
-    print(f"创建版本: {version}")
-    print(f"注册源: {source_type} -> {source_uri}")
-
-    can_promote, reason = check_promotion_threshold(metrics, thresholds)
-
-    if can_promote:
-        client.transition_model_version_stage(
-            name=model_name,
-            version=version,
-            stage="Production",
-            archive_existing_versions=True,
-        )
-        stage = "Production"
-        print(f"✓ 模型晋升到 Production！原因: {reason}")
-    else:
-        client.transition_model_version_stage(
-            name=model_name,
-            version=version,
-            stage="Staging",
-        )
-        stage = "Staging"
-        print(f"⚠ 模型留在 Staging。原因: {reason}")
-
-    # 写标签
-    merged_tags = {
-        **tags,
-        "source_type": source_type,
-        "registered_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    }
-    for k, v in merged_tags.items():
-        client.set_model_version_tag(model_name, version, k, str(v))
-
-    result = {
-        "status": "success",
-        "task": "detection",
-        "model_name": model_name,
-        "version": version,
-        "stage": stage,
-        "promoted": can_promote,
-        "promotion_reason": reason,
-        "run_id": run_id,
-        "source_type": source_type,
-        "registered_at": datetime.now().isoformat(),
-        "metrics": metrics,
-    }
-    return result
+        print(f"已创建注册专用 run_id: {created_run_id}")
+        return created_run_id
 
 
 def main() -> None:
     cfg_path = Path("pipeline/configs/detection_mlops.yaml")
     cfg = load_yaml(cfg_path)
 
-    metrics = load_eval_metrics(cfg)
+    registry_cfg = cfg["registry"]
+    paths_cfg = cfg["paths"]
 
+    model_name = registry_cfg["model_name"]
+    task = registry_cfg.get("task", "detection")
+    tags = registry_cfg.get("tags", {})
+    thresholds = registry_cfg.get("promotion_threshold", {})
+
+    eval_metrics_path = Path(paths_cfg["eval_metrics"])
+    train_metrics_path = Path(paths_cfg.get("train_metrics", ""))
+    mlflow_run_id_path = Path(paths_cfg["mlflow_run_id"])
+    onnx_path = Path(paths_cfg["onnx_model"])
+    rknn_path = Path(paths_cfg["rknn_model"])
+    registry_result_path = Path(paths_cfg["registry_result"])
+
+    if not eval_metrics_path.exists():
+        raise FileNotFoundError(f"缺少评估指标文件: {eval_metrics_path}")
+    if not onnx_path.exists():
+        raise FileNotFoundError(f"缺少 ONNX 模型文件: {onnx_path}")
+
+    eval_metrics = load_json(eval_metrics_path)
+    train_metrics = load_json(train_metrics_path) if train_metrics_path.exists() else {}
+
+    tracking_uri = mlflow.get_tracking_uri()
     print("=" * 60)
-    print("Detection 模型注册到 MLflow Model Registry")
-    print("当前指标:")
-    print(json.dumps(metrics, indent=2, ensure_ascii=False))
+    print("Detection 模型注册开始")
+    print("=" * 60)
+    print(f"MLflow Tracking URI: {tracking_uri}")
+    print(f"Model Name: {model_name}")
+    print(f"Task: {task}")
+    print(f"Eval Metrics: {eval_metrics_path}")
+    print(f"ONNX Path: {onnx_path}")
+    print(f"RKNN Path: {rknn_path}")
     print("=" * 60)
 
-    result = register_model(cfg, metrics)
+    upstream_run_id = read_text(mlflow_run_id_path) if mlflow_run_id_path.exists() else ""
+    run_id = ensure_registration_run(
+        model_name=model_name,
+        run_id=upstream_run_id,
+        eval_metrics=eval_metrics,
+        train_metrics=train_metrics,
+        paths_cfg=paths_cfg,
+        registry_cfg=registry_cfg,
+    )
 
-    registry_result_path = Path(cfg["paths"]["registry_result"])
+    use_rknn, rknn_info = resolve_rknn_source(paths_cfg)
+    if use_rknn:
+        source_uri = f"runs:/{run_id}/rknn"
+        source_type = "rknn"
+        print("检测到可用的正式 RKNN 产物，将优先注册 RKNN。")
+    else:
+        source_uri = f"runs:/{run_id}/onnx"
+        source_type = "onnx"
+        print(f"RKNN 不可用，回退为 ONNX 注册。原因: {rknn_info.get('reason')}")
+
+    client = MlflowClient()
+    ensure_registered_model_exists(client, model_name)
+
+    version = client.create_model_version(
+        name=model_name,
+        source=source_uri,
+        run_id=run_id,
+        tags={
+            **{k: str(v) for k, v in tags.items()},
+            "task": str(task),
+            "source_type": source_type,
+            "registered_at": datetime.now().isoformat(),
+            "auto_fallback_to_onnx": str(not use_rknn).lower(),
+        },
+    )
+
+    version_number = version.version
+    print(f"已创建模型版本: {model_name} v{version_number}")
+
+    # 给版本写说明性标签，方便 UI 检索
+    extra_tags = {
+        "map50": str(eval_metrics.get("map50", eval_metrics.get("mAP50", ""))),
+        "map50_95": str(eval_metrics.get("map50_95", eval_metrics.get("mAP50-95", ""))),
+        "precision": str(eval_metrics.get("precision", "")),
+        "recall": str(eval_metrics.get("recall", "")),
+        "rknn_usable": str(use_rknn).lower(),
+        "rknn_status": str(rknn_info.get("status", "")),
+    }
+    for k, v in extra_tags.items():
+        if v != "":
+            client.set_model_version_tag(model_name, version_number, k, v)
+
+    # 是否满足自动晋升阈值
+    map50 = coerce_float(eval_metrics.get("map50", eval_metrics.get("mAP50")), 0.0)
+    map50_95 = coerce_float(eval_metrics.get("map50_95", eval_metrics.get("mAP50-95")), 0.0)
+    latency_ms = coerce_float(
+        safe_get(rknn_info, "report", "latency_ms"),
+        None,
+    )
+
+    min_map50 = coerce_float(thresholds.get("map50"), 0.0)
+    min_map50_95 = coerce_float(thresholds.get("map50_95"), 0.0)
+    max_latency_ms = coerce_float(thresholds.get("latency_ms"), None)
+
+    passed = True
+    reasons = []
+
+    if map50 is not None and min_map50 is not None and map50 < min_map50:
+        passed = False
+        reasons.append(f"map50={map50:.4f} < {min_map50:.4f}")
+
+    if map50_95 is not None and min_map50_95 is not None and map50_95 < min_map50_95:
+        passed = False
+        reasons.append(f"map50_95={map50_95:.4f} < {min_map50_95:.4f}")
+
+    if (
+        max_latency_ms is not None
+        and latency_ms is not None
+        and latency_ms > max_latency_ms
+    ):
+        passed = False
+        reasons.append(f"latency_ms={latency_ms:.4f} > {max_latency_ms:.4f}")
+
+    stage_to_set = "Staging" if passed else "None"
+    if passed:
+        client.transition_model_version_stage(
+            name=model_name,
+            version=version_number,
+            stage="Staging",
+            archive_existing_versions=False,
+        )
+        print(f"模型版本 v{version_number} 已晋升到 Staging")
+    else:
+        print("模型版本未自动晋升到 Staging")
+        if reasons:
+            print("原因：")
+            for r in reasons:
+                print(f" - {r}")
+
+    result = {
+        "success": True,
+        "model_name": model_name,
+        "task": task,
+        "run_id": run_id,
+        "version": version_number,
+        "source_uri": source_uri,
+        "source_type": source_type,
+        "stage": stage_to_set,
+        "rknn_usable": use_rknn,
+        "rknn_status": rknn_info.get("status"),
+        "rknn_report_path": rknn_info.get("report_path"),
+        "rknn_fallback_reason": None if use_rknn else rknn_info.get("reason"),
+        "thresholds": {
+            "map50": min_map50,
+            "map50_95": min_map50_95,
+            "latency_ms": max_latency_ms,
+        },
+        "metrics": {
+            "map50": map50,
+            "map50_95": map50_95,
+            "precision": coerce_float(eval_metrics.get("precision")),
+            "recall": coerce_float(eval_metrics.get("recall")),
+            "latency_ms": latency_ms,
+        },
+        "promotion_passed": passed,
+        "promotion_reasons": reasons,
+        "registered_at": datetime.now().isoformat(),
+    }
+
     save_json(result, registry_result_path)
 
-    print("\n" + "=" * 60)
-    print("✓ Detection 注册完成!")
-    print(f"模型: {result['model_name']} v{result['version']}")
-    print(f"阶段: {result['stage']}")
-    print(f"是否晋升 Production: {result['promoted']}")
+    print("=" * 60)
+    print("✓ Detection 模型注册完成")
+    print(f"版本: v{version_number}")
+    print(f"注册源: {source_type}")
     print(f"结果文件: {registry_result_path}")
     print("=" * 60)
-
-    # 不把“未晋升”当错误
-    sys.exit(0)
 
 
 if __name__ == "__main__":
