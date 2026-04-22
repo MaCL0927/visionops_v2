@@ -10,11 +10,13 @@ registry:
 # 边缘设备注册表
 edge_devices:
   - id: rk3588-001
-    host: 192.168.1.100
+    host: 192.168.1.200
     port: 22
-    user: root
+    user: ubuntu
     deploy_path: /opt/visionops/models/
     service_name: visionops-inference
+    health_url: http://localhost:8080/health
+    reload_url: http://localhost:8080/reload
   # 添加更多设备...
   # - id: rk3588-002
   #   host: 192.168.1.101

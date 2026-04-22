@@ -13,7 +13,7 @@ Environment="DEVICE_ID=rk3588-001"
 Environment="SERVER_URL=http://192.168.1.1:8000"
 Environment="MODEL_PATH=/opt/visionops/models/current.rknn"
 Environment="NPU_CORE=auto"
-Environment="NUM_CLASSES=10"
+Environment="NUM_CLASSES=2"
 
 # 推理服务主进程
 ExecStart=/opt/visionops/venv/bin/python /opt/visionops/edge/inference/engine.py \

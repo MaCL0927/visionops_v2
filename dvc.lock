@@ -14,8 +14,8 @@ stages:
       size: 273
     - path: pipeline/stages/preprocess_detection.py
       hash: md5
-      md5: 8550dadb05e45d82e60ab557a64ff5fe
-      size: 10667
+      md5: fd14456158c555b31633081517c5038a
+      size: 12424
     params:
       pipeline/configs/detection_data.yaml:
         dataset.class_names:
@@ -36,8 +36,8 @@ stages:
       size: 97
     - path: data/processed_detection/dataset_stats.json
       hash: md5
-      md5: c5da8151c94dddbb3d4c47c5e6746617
-      size: 881
+      md5: 4c5dd3f3ced7f06aa1cfc802f5c00a4d
+      size: 997
     - path: data/processed_detection/images/train/
       hash: md5
       md5: 52f807a10fbc25011619b765b1d832ed.dir
@@ -284,8 +284,8 @@ stages:
       size: 674
     - path: pipeline/stages/register_model_detection.py
       hash: md5
-      md5: 5908300398f1afe70bf396be53206e7f
-      size: 8362
+      md5: 35cf500642f3ea84b9a8c4289d0057e0
+      size: 12362
     params:
       pipeline/configs/detection_mlops.yaml:
         paths.eval_metrics: models/metrics_detection/eval_metrics.json
@@ -307,5 +307,5 @@ stages:
     outs:
     - path: models/metrics_detection/registry_result.json
       hash: md5
-      md5: e8b39d33ced350e0c498f03cd89f43ff
-      size: 982
+      md5: 05aee3c98b8a2026bef57625041eeebe
+      size: 783
