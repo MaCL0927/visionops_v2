@@ -1,6 +1,7 @@
 /data
 /models
 /tools
+/runs
 check0_base_optimize.onnx
 check2_correct_ops.onnx
 check3_fuse_ops.onnx

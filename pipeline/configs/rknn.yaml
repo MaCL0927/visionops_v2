@@ -4,7 +4,7 @@ target_platform: rk3588         # rk3566 / rk3568 / rk3588
 # 量化配置（量化可显著提升NPU推理速度）
 quantization:
   do_quantization: true
-  dataset: data/processed/val/  # 校准数据集路径（随机采样100张）
+  dataset: data/processed_detection/images/val  # 校准数据集路径（随机采样100张）
   dataset_size: 100
   quantized_dtype: asymmetric_quantized-8  # 8bit量化
   pre_compile: false            # 是否预编译（需要连接设备）

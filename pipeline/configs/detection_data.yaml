@@ -3,9 +3,13 @@ dataset:
   yaml_path: data/raw_detection/data.yaml
   task: detect
   class_names:
-    - person
-    - smoke
-  num_classes: 2
+    - 2wheelers
+    - auto
+    - bus
+    - car
+    - pedestrian
+    - truck
+  num_classes: 6
 
 preprocess:
   copy_to_processed: true

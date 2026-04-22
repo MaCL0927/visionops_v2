@@ -25,7 +25,7 @@ MONITOR_SERVICE_PATH="/etc/systemd/system/visionops-monitor.service"
 
 DEFAULT_MODEL_PATH="${MODEL_DIR}/current.rknn"
 DEFAULT_NPU_CORE="auto"
-DEFAULT_NUM_CLASSES="2"
+DEFAULT_NUM_CLASSES="6"
 DEFAULT_PORT="8080"
 DEFAULT_METRICS_PORT="9091"
 DEFAULT_REPORT_INTERVAL="60"
@@ -282,6 +282,7 @@ print_summary() {
   log_info "  1. 从训练机部署模型:"
   log_info "     bash edge/deploy/push.sh models/export_detection/model.rknn ${DEVICE_ID}"
   log_info "  2. 手动启动服务:"
+  log_info "     sudo systemctl daemon-reload"
   log_info "     sudo systemctl restart visionops-inference"
   if [[ -f "${MONITOR_SERVICE_PATH}" ]]; then
     log_info "     sudo systemctl restart visionops-monitor"
