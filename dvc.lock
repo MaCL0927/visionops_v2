@@ -98,8 +98,8 @@ stages:
     deps:
     - path: data/processed_detection/data.yaml
       hash: md5
-      md5: fede52fbce8102e7dfcf26c1eccac7fb
-      size: 145
+      md5: d78400116a9cf22ab6a0838dc365a4de
+      size: 144
     - path: data/processed_detection/images/val/
       hash: md5
       md5: 2e5091347509e0e240be8fca3a09a1ab.dir
@@ -112,29 +112,25 @@ stages:
       nfiles: 67
     - path: models/checkpoints_detection/best.pt
       hash: md5
-      md5: 22bd0badb4e0cd545d6c0c75a952324d
+      md5: 552160d1b090e9eccc241b38ec744253
       size: 6235441
-    - path: pipeline/configs/detection_data.yaml
+    - path: pipeline/configs/detection_train.generated.yaml
       hash: md5
-      md5: 1c255a51ee5a33ec09baf9a424f462ec
-      size: 324
-    - path: pipeline/configs/detection_train.yaml
-      hash: md5
-      md5: 843cb522de7ec54d72e2024fc8bbb9fb
-      size: 586
+      md5: 17cc9e8f3a2f0d61bdd090c8953b1fbc
+      size: 580
     - path: pipeline/stages/evaluate_detection.py
       hash: md5
-      md5: dee1c317642740c571ba6fcc0a358a05
-      size: 5390
+      md5: 3d213975caf5af3c4e4a83655cfa4585
+      size: 5452
     outs:
     - path: models/metrics_detection/eval_metrics.json
       hash: md5
-      md5: fb41d6a8fb5bcf254cebb1e53f1edbba
-      size: 990
+      md5: aadb7b0160046767ab2ae331db255401
+      size: 988
     - path: models/metrics_detection/eval_report.json
       hash: md5
-      md5: f9c534564dc4998c846cf382f84f9032
-      size: 1179
+      md5: 167d719e6e1b96386b42e322fb845e19
+      size: 1178
   export_onnx_detection:
     cmd: python pipeline/stages/export_onnx_detection.py
     deps:
@@ -197,11 +193,11 @@ stages:
       size: 30
     - path: models/metrics_detection/eval_metrics.json
       hash: md5
-      md5: fb41d6a8fb5bcf254cebb1e53f1edbba
-      size: 990
+      md5: aadb7b0160046767ab2ae331db255401
+      size: 988
     - path: models/metrics_detection/mlflow_run_id.txt
       hash: md5
-      md5: 01dbb04c38011daa4e8106f9432ff7a5
+      md5: b2381f97f64bb53d0a699b770ec5b4bf
       size: 32
     - path: pipeline/configs/detection_mlops.yaml
       hash: md5
@@ -232,8 +228,8 @@ stages:
     outs:
     - path: models/metrics_detection/registry_result.json
       hash: md5
-      md5: 50595c8c800c1698820c9ac7c50b31a1
-      size: 812
+      md5: 0373ca9faa0f88e6aa871751870a283d
+      size: 782
   render_task_config:
     cmd: python pipeline/utils/render_task_config.py
     deps:
