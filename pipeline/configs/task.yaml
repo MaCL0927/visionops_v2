@@ -54,6 +54,7 @@ external_export:
   script_path: tools/export_yolov8_rknn_onnx.py
 
 rknn:
+  python_exec: /home/pc/anaconda3/envs/rknn311/bin/python
   target_platform: rk3588
   onnx_model: models/export_detection/model.onnx
   rknn_model: models/export_detection/model.rknn
@@ -71,7 +72,7 @@ rknn:
     input_size_list: [[1, 3, 640, 640]]
 
   build:
-    do_quantization: true
+    do_quantization: false
     optimization_level: 3
 
   runtime:

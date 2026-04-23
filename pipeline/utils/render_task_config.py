@@ -135,6 +135,7 @@ def build_detection_rknn(cfg: dict) -> dict:
     rknn_cfg = cfg["rknn"]
 
     return {
+        "python_exec": rknn_cfg["python_exec"],
         "target_platform": rknn_cfg["target_platform"],
         "output": {
             "onnx_model": rknn_cfg["onnx_model"],
@@ -142,7 +143,6 @@ def build_detection_rknn(cfg: dict) -> dict:
             "perf_report": rknn_cfg["perf_report"],
         },
         "quantization": {
-            "do_quantization": rknn_cfg["build"]["do_quantization"],
             "dataset": rknn_cfg["quantization"]["dataset"],
             "dataset_size": rknn_cfg["quantization"]["dataset_size"],
             "quantized_dtype": rknn_cfg["quantization"]["quantized_dtype"],
@@ -152,9 +152,14 @@ def build_detection_rknn(cfg: dict) -> dict:
             "std_values": rknn_cfg["input"]["std_values"],
             "input_size_list": [[1, 3, imgsz, imgsz]],
         },
-        "optimization_level": rknn_cfg["build"]["optimization_level"],
-        "perf_debug": rknn_cfg["runtime"]["perf_debug"],
-        "eval_mem": rknn_cfg["runtime"]["eval_mem"],
+        "build": {
+            "do_quantization": rknn_cfg["build"]["do_quantization"],
+            "optimization_level": rknn_cfg["build"]["optimization_level"],
+        },
+        "runtime": {
+            "perf_debug": rknn_cfg["runtime"]["perf_debug"],
+            "eval_mem": rknn_cfg["runtime"]["eval_mem"],
+        },
     }
 
 def build_class_names(cfg: dict) -> dict:

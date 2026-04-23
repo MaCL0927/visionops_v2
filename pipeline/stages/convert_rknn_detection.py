@@ -9,6 +9,7 @@ from typing import List
 
 import numpy as np
 import yaml
+import subprocess
 
 
 def load_config(path: str) -> dict:
@@ -21,6 +22,35 @@ def save_json(data: dict, path: Path) -> None:
     with path.open("w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
+def maybe_reexec_in_rknn_env(cfg: dict) -> None:
+    """
+    若当前进程不是 RKNN 内部执行，则自动切换到配置指定的 python_exec 重新执行本脚本。
+    通过环境变量 VISIONOPS_RKNN_INTERNAL=1 防止无限递归。
+    """
+    if os.environ.get("VISIONOPS_RKNN_INTERNAL") == "1":
+        return
+
+    python_exec = cfg.get("python_exec")
+    if not python_exec:
+        raise RuntimeError("RKNN 配置缺少 python_exec，无法切换到 RKNN 环境执行")
+
+    python_path = Path(python_exec)
+    if not python_path.exists():
+        raise FileNotFoundError(f"RKNN Python 不存在: {python_exec}")
+
+    env = os.environ.copy()
+    env["VISIONOPS_RKNN_INTERNAL"] = "1"
+
+    cmd = [str(python_path), __file__]
+
+    print("=" * 60)
+    print(">>> 当前不在 RKNN 执行环境，自动切换解释器")
+    print(f">>> python_exec: {python_exec}")
+    print(f">>> cmd: {' '.join(cmd)}")
+    print("=" * 60)
+
+    result = subprocess.run(cmd, env=env)
+    raise SystemExit(result.returncode)
 
 def load_calibration_dataset(dataset_path: str, size: int = 100, img_size: List[int] | None = None):
     """
@@ -91,7 +121,8 @@ def simulate_conversion(cfg: dict) -> dict:
 def convert_to_rknn(cfg: dict) -> dict:
     try:
         from rknn.api import RKNN
-    except ImportError:
+    except ImportError as e:
+        print(f"警告: 当前解释器中未安装 rknn-toolkit2: {e}")
         return simulate_conversion(cfg)
 
     output_cfg = cfg["output"]
@@ -138,7 +169,8 @@ def convert_to_rknn(cfg: dict) -> dict:
     if ret != 0:
         raise RuntimeError(f"rknn.load_onnx() 失败: {ret}")
 
-    do_quantization = quant_cfg.get("do_quantization", True)
+    build_cfg = cfg.get("build", {})
+    do_quantization = build_cfg.get("do_quantization", False)
 
     if do_quantization:
         print("\n>>> 准备量化校准数据...")
@@ -217,7 +249,9 @@ def main() -> None:
     if not Path(cfg_path).exists():
         cfg_path = "pipeline/configs/detection_rknn.yaml"
     cfg = load_config(cfg_path)
-
+    
+    maybe_reexec_in_rknn_env(cfg)
+    
     print(f"RKNN配置文件: {cfg_path}")
 
     onnx_path = cfg["output"]["onnx_model"]
@@ -246,3 +280,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

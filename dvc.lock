@@ -169,28 +169,28 @@ stages:
       size: 12269187
     - path: pipeline/configs/detection_rknn.generated.yaml
       hash: md5
-      md5: 4260a3f4aadb3ff562fc9df7d2077155
-      size: 538
+      md5: 2d3f308e21da988d8e27bbbf19545e0e
+      size: 617
     - path: pipeline/stages/convert_rknn_detection.py
       hash: md5
-      md5: 3b317d1ab8b4be84f313164d9a2699c7
-      size: 7775
+      md5: 054887643c500e690f4bbafa01504d42
+      size: 9256
     outs:
     - path: models/export_detection/model.rknn
       hash: md5
-      md5: d1b945610125dcd4da2dffd4d2e8538f
-      size: 30
+      md5: b37af953ab28bacb064058af351ca731
+      size: 7906294
     - path: models/export_detection/rknn_report.json
       hash: md5
-      md5: 2b196051fa59bec27ab648c9028d8b80
-      size: 344
+      md5: 324567cd7469bf254562523428263429
+      size: 372
   register_model_detection:
     cmd: python pipeline/stages/register_model_detection.py
     deps:
     - path: models/export_detection/model.rknn
       hash: md5
-      md5: d1b945610125dcd4da2dffd4d2e8538f
-      size: 30
+      md5: b37af953ab28bacb064058af351ca731
+      size: 7906294
     - path: models/metrics_detection/eval_metrics.json
       hash: md5
       md5: aadb7b0160046767ab2ae331db255401
@@ -228,7 +228,7 @@ stages:
     outs:
     - path: models/metrics_detection/registry_result.json
       hash: md5
-      md5: 0373ca9faa0f88e6aa871751870a283d
+      md5: 9758d34c05709deec2af4026ca1e2c76
       size: 782
   render_task_config:
     cmd: python pipeline/utils/render_task_config.py
@@ -239,12 +239,12 @@ stages:
       size: 132
     - path: pipeline/configs/task.yaml
       hash: md5
-      md5: 4dc0751598782bb189b56d80d8d64cba
-      size: 1863
+      md5: f313328952897cf7c4c522cd50932205
+      size: 1922
     - path: pipeline/utils/render_task_config.py
       hash: md5
-      md5: 576b0ac54f427032c8e627e245985d4d
-      size: 6935
+      md5: d584c7da564efb4c2a534d25f82ef2dd
+      size: 7057
     outs:
     - path: edge/runtime/class_names.yaml
       hash: md5
@@ -264,8 +264,8 @@ stages:
       size: 280
     - path: pipeline/configs/detection_rknn.generated.yaml
       hash: md5
-      md5: 4260a3f4aadb3ff562fc9df7d2077155
-      size: 538
+      md5: 2d3f308e21da988d8e27bbbf19545e0e
+      size: 617
     - path: pipeline/configs/detection_train.generated.yaml
       hash: md5
       md5: 17cc9e8f3a2f0d61bdd090c8953b1fbc
