@@ -66,7 +66,10 @@ def resolve_device(device_cfg: str) -> str | int:
 def main() -> None:
     from ultralytics import YOLO
 
-    cfg_path = Path("pipeline/configs/detection_train.yaml")
+    cfg_path = Path("pipeline/configs/detection_train.generated.yaml")
+    if not cfg_path.exists():
+        cfg_path = Path("pipeline/configs/detection_train.yaml")
+
     cfg = load_yaml(cfg_path)
 
     model_cfg = cfg["model"]

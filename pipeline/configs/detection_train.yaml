@@ -1,7 +1,7 @@
 model:
   architecture: yolov8n
   weights: models/pretrained/yolov8n.pt
-  num_classes: 2
+  num_classes: 6
   pretrained: true
 
 dataset:

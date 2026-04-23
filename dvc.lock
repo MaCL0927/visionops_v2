@@ -5,43 +5,26 @@ stages:
     deps:
     - path: data/raw_detection/
       hash: md5
-      md5: b6fca62e0435751fb75bce120caeebec.dir
-      size: 50551274
+      md5: c9d2f0b04b03ae952aff15cb70f8b842.dir
+      size: 50551266
       nfiles: 1259
-    - path: pipeline/configs/detection_data.yaml
+    - path: pipeline/configs/detection_data.generated.yaml
       hash: md5
-      md5: 1c255a51ee5a33ec09baf9a424f462ec
-      size: 324
+      md5: a9661169a4fa7f2ef308f805a8d81c04
+      size: 312
     - path: pipeline/stages/preprocess_detection.py
       hash: md5
-      md5: fd14456158c555b31633081517c5038a
-      size: 12424
-    params:
-      pipeline/configs/detection_data.yaml:
-        dataset.class_names:
-        - 2wheelers
-        - auto
-        - bus
-        - car
-        - pedestrian
-        - truck
-        dataset.num_classes: 6
-        dataset.root: data/raw_detection
-        dataset.task: detect
-        dataset.yaml_path: data/raw_detection/data.yaml
-        preprocess.check_images: true
-        preprocess.check_labels: true
-        preprocess.copy_to_processed: true
-        preprocess.processed_root: data/processed_detection
+      md5: 21a75eb6f09286783478117ff00fa0b8
+      size: 12528
     outs:
     - path: data/processed_detection/data.yaml
       hash: md5
-      md5: fede52fbce8102e7dfcf26c1eccac7fb
-      size: 145
+      md5: d78400116a9cf22ab6a0838dc365a4de
+      size: 144
     - path: data/processed_detection/dataset_stats.json
       hash: md5
-      md5: 94ae1b8f2733539bea1fa47e5ec68c6e
-      size: 1309
+      md5: 1814b427e66a0e101baae118c6b05e1d
+      size: 1305
     - path: data/processed_detection/images/train/
       hash: md5
       md5: cc3a5cde622251768db0fa027f2fc877.dir
@@ -67,8 +50,8 @@ stages:
     deps:
     - path: data/processed_detection/data.yaml
       hash: md5
-      md5: fede52fbce8102e7dfcf26c1eccac7fb
-      size: 145
+      md5: d78400116a9cf22ab6a0838dc365a4de
+      size: 144
     - path: data/processed_detection/images/train/
       hash: md5
       md5: cc3a5cde622251768db0fa027f2fc877.dir
@@ -89,50 +72,26 @@ stages:
       md5: 8b21144d8ece1720cf2c51e19e225f89.dir
       size: 120622
       nfiles: 67
-    - path: pipeline/configs/detection_train.yaml
+    - path: pipeline/configs/detection_train.generated.yaml
       hash: md5
-      md5: 843cb522de7ec54d72e2024fc8bbb9fb
-      size: 586
+      md5: 17cc9e8f3a2f0d61bdd090c8953b1fbc
+      size: 580
     - path: pipeline/stages/train_detection.py
       hash: md5
-      md5: c6db3025b90d6da50ed512957e9e5d7b
-      size: 9594
-    params:
-      pipeline/configs/detection_train.yaml:
-        dataset.yaml_path: data/processed_detection/data.yaml
-        mlflow.experiment_name: visionops-detection
-        mlflow.log_artifacts: true
-        mlflow.log_model: false
-        mlflow.tracking_uri: http://localhost:5000
-        model.architecture: yolov8n
-        model.num_classes: 2
-        model.pretrained: true
-        model.weights: models/pretrained/yolov8n.pt
-        output.checkpoint_dir: models/checkpoints_detection
-        output.metrics_dir: models/metrics_detection
-        train.batch_size: 16
-        train.cache: false
-        train.device: cuda
-        train.epochs: 5
-        train.exist_ok: true
-        train.img_size: 640
-        train.lr0: 0.001
-        train.name: visionops_detection
-        train.patience: 20
-        train.project: models/runs/detect
-        train.workers: 4
+      md5: b48f40148e95ebb304229bc5883da77d
+      size: 9700
     outs:
     - path: models/checkpoints_detection/best.pt
       hash: md5
-      md5: 22bd0badb4e0cd545d6c0c75a952324d
+      md5: 552160d1b090e9eccc241b38ec744253
       size: 6235441
     - path: models/checkpoints_detection/last.pt
       hash: md5
-      md5: 22bd0badb4e0cd545d6c0c75a952324d
+      md5: 552160d1b090e9eccc241b38ec744253
       size: 6235441
     - path: models/metrics_detection/train_metrics.json
       hash: md5
-      md5: cf93815ea37843d8d22477fe2cda403e
+      md5: 1ddf319e1423f3bd5c360959de8b47e0
       size: 1130
   evaluate_detection:
     cmd: python pipeline/stages/evaluate_detection.py
@@ -181,36 +140,25 @@ stages:
     deps:
     - path: models/checkpoints_detection/best.pt
       hash: md5
-      md5: 22bd0badb4e0cd545d6c0c75a952324d
+      md5: 552160d1b090e9eccc241b38ec744253
       size: 6235441
-    - path: pipeline/configs/detection_export.yaml
+    - path: pipeline/configs/detection_export.generated.yaml
       hash: md5
-      md5: d8a460ab116014182d2b575a24b8be7f
-      size: 315
+      md5: e15dd33afc019ef32e7f7082ba0a88df
+      size: 280
     - path: pipeline/stages/export_onnx_detection.py
       hash: md5
-      md5: 4ba570bb8835f4cd72f3cd84baa2740f
-      size: 6205
-    params:
-      pipeline/configs/detection_export.yaml:
-        export.checkpoint_path: models/checkpoints_detection/best.pt
-        export.dynamic: false
-        export.imgsz: 640
-        export.mode: ultralytics
-        export.opset: 12
-        export.output_path: models/export_detection/model.onnx
-        export.simplify: true
-        external_export.python_exec: python
-        external_export.script_path: tools/export_yolov8_rknn_onnx.py
+      md5: dfa4388b162927c022243da3d1299ceb
+      size: 6357
     outs:
     - path: models/export_detection/export_result.json
       hash: md5
-      md5: 300696f830d8e7e1ac43ff9a877bd2bf
+      md5: bbc878d9260f147b00940836198a79eb
       size: 595
     - path: models/export_detection/model.onnx
       hash: md5
-      md5: bba749b12ba5b5c72a4f29a29e6d49a2
-      size: 12269188
+      md5: 03c5c555c308438bcb0371b1d3ef39a0
+      size: 12269187
   convert_rknn_detection:
     cmd: python pipeline/stages/convert_rknn_detection.py
     deps:
@@ -221,52 +169,25 @@ stages:
       nfiles: 67
     - path: models/export_detection/model.onnx
       hash: md5
-      md5: bba749b12ba5b5c72a4f29a29e6d49a2
-      size: 12269188
-    - path: pipeline/configs/detection_rknn.yaml
+      md5: 03c5c555c308438bcb0371b1d3ef39a0
+      size: 12269187
+    - path: pipeline/configs/detection_rknn.generated.yaml
       hash: md5
-      md5: ae20387ca65d9697b5a7bf76cd278a0a
-      size: 552
+      md5: 4260a3f4aadb3ff562fc9df7d2077155
+      size: 538
     - path: pipeline/stages/convert_rknn_detection.py
       hash: md5
-      md5: 4a90c9f0718679c280d2b1aadc681f15
-      size: 7541
-    params:
-      pipeline/configs/detection_rknn.yaml:
-        eval_mem: false
-        io_config.input_size_list:
-        - - 1
-          - 3
-          - 640
-          - 640
-        io_config.mean_values:
-        - - 0
-          - 0
-          - 0
-        io_config.std_values:
-        - - 255
-          - 255
-          - 255
-        npu_core_mask: RKNN_NPU_CORE_AUTO
-        output.onnx_model: models/export_detection/model.onnx
-        output.perf_report: models/export_detection/rknn_perf_report.json
-        output.rknn_model: models/export_detection/model.rknn
-        perf_debug: false
-        quantization.dataset: data/processed_detection/images/val
-        quantization.dataset_size: 100
-        quantization.do_quantization: false
-        quantization.pre_compile: false
-        quantization.quantized_dtype: asymmetric_quantized-8
-        target_platform: rk3588
+      md5: 3b317d1ab8b4be84f313164d9a2699c7
+      size: 7775
     outs:
     - path: models/export_detection/model.rknn
       hash: md5
       md5: d1b945610125dcd4da2dffd4d2e8538f
       size: 30
-    - path: models/export_detection/rknn_perf_report.json
+    - path: models/export_detection/rknn_report.json
       hash: md5
-      md5: 1f294eb418c0a8dc939df476c530a7fe
-      size: 345
+      md5: 2b196051fa59bec27ab648c9028d8b80
+      size: 344
   register_model_detection:
     cmd: python pipeline/stages/register_model_detection.py
     deps:
@@ -313,3 +234,43 @@ stages:
       hash: md5
       md5: 50595c8c800c1698820c9ac7c50b31a1
       size: 812
+  render_task_config:
+    cmd: python pipeline/utils/render_task_config.py
+    deps:
+    - path: data/raw_detection/data.yaml
+      hash: md5
+      md5: 7ae2143011fbb7f749e1e83c1ff6ff5a
+      size: 132
+    - path: pipeline/configs/task.yaml
+      hash: md5
+      md5: 4dc0751598782bb189b56d80d8d64cba
+      size: 1863
+    - path: pipeline/utils/render_task_config.py
+      hash: md5
+      md5: 576b0ac54f427032c8e627e245985d4d
+      size: 6935
+    outs:
+    - path: edge/runtime/class_names.yaml
+      hash: md5
+      md5: 558865b99747ee56b30c2462f7e15617
+      size: 96
+    - path: edge/runtime/edge.env
+      hash: md5
+      md5: 4d162cd310344eae06b29f1263eee6d7
+      size: 238
+    - path: pipeline/configs/detection_data.generated.yaml
+      hash: md5
+      md5: a9661169a4fa7f2ef308f805a8d81c04
+      size: 312
+    - path: pipeline/configs/detection_export.generated.yaml
+      hash: md5
+      md5: e15dd33afc019ef32e7f7082ba0a88df
+      size: 280
+    - path: pipeline/configs/detection_rknn.generated.yaml
+      hash: md5
+      md5: 4260a3f4aadb3ff562fc9df7d2077155
+      size: 538
+    - path: pipeline/configs/detection_train.generated.yaml
+      hash: md5
+      md5: 17cc9e8f3a2f0d61bdd090c8953b1fbc
+      size: 580

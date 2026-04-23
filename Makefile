@@ -92,6 +92,9 @@ init:
 	@echo "  models/checkpoints models/export models/metrics"
 	@echo "✓ 初始化完成"
 
+render-task:
+	python pipeline/utils/render_task_config.py
+
 ## ── 训练流水线（默认主线：detection）──────────────────────────
 train: train-detection
 

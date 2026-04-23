@@ -24,14 +24,12 @@ INFERENCE_SERVICE_PATH="/etc/systemd/system/visionops-inference.service"
 MONITOR_SERVICE_PATH="/etc/systemd/system/visionops-monitor.service"
 
 DEFAULT_MODEL_PATH="${MODEL_DIR}/current.rknn"
-DEFAULT_NPU_CORE="auto"
-DEFAULT_NUM_CLASSES="6"
-DEFAULT_PORT="8080"
-DEFAULT_METRICS_PORT="9091"
 DEFAULT_REPORT_INTERVAL="60"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+GENERATED_ENV_FILE="${REPO_ROOT}/edge/runtime/edge.env"
 
 log_info()  { echo "[INFO] $*"; }
 log_ok()    { echo "[OK] $*"; }
@@ -51,6 +49,28 @@ ensure_root() {
     log_error "请使用 sudo 运行本脚本"
     exit 1
   fi
+}
+
+load_generated_runtime_env() {
+  if [[ -f "${GENERATED_ENV_FILE}" ]]; then
+    log_info "检测到生成的 runtime 配置: ${GENERATED_ENV_FILE}"
+    # shellcheck disable=SC1090
+    source "${GENERATED_ENV_FILE}"
+    log_ok "已加载 runtime 配置"
+  else
+    log_warn "未找到 ${GENERATED_ENV_FILE}，继续使用脚本内默认值"
+  fi
+}
+
+resolve_runtime_defaults() {
+  DEFAULT_NPU_CORE="${NPU_CORE:-auto}"
+  DEFAULT_NUM_CLASSES="${NUM_CLASSES:-2}"
+  DEFAULT_PORT="${PORT:-8080}"
+  DEFAULT_METRICS_PORT="${METRICS_PORT:-9091}"
+  DEFAULT_CLASS_NAMES_FILE="${CLASS_NAMES_FILE:-/opt/visionops/edge/runtime/class_names.yaml}"
+  DEFAULT_CONF_THRESHOLD="${CONF_THRESHOLD:-0.25}"
+  DEFAULT_NMS_THRESHOLD="${NMS_THRESHOLD:-0.45}"
+  DEFAULT_WARMUP_RUNS="${WARMUP_RUNS:-3}"
 }
 
 install_system_deps() {
@@ -149,6 +169,12 @@ INFERENCE_URL=http://localhost:${DEFAULT_PORT}
 REPORT_INTERVAL=${DEFAULT_REPORT_INTERVAL}
 NPU_CORE=${DEFAULT_NPU_CORE}
 NUM_CLASSES=${DEFAULT_NUM_CLASSES}
+CLASS_NAMES_FILE=${DEFAULT_CLASS_NAMES_FILE}
+PORT=${DEFAULT_PORT}
+METRICS_PORT=${DEFAULT_METRICS_PORT}
+CONF_THRESHOLD=${DEFAULT_CONF_THRESHOLD}
+NMS_THRESHOLD=${DEFAULT_NMS_THRESHOLD}
+WARMUP_RUNS=${DEFAULT_WARMUP_RUNS}
 EOF
   chmod 644 "${ENV_FILE}"
   log_ok "环境配置写入完成"
@@ -173,13 +199,24 @@ Environment="SERVER_URL=${SERVER_URL}"
 Environment="MODEL_PATH=${DEFAULT_MODEL_PATH}"
 Environment="NPU_CORE=${DEFAULT_NPU_CORE}"
 Environment="NUM_CLASSES=${DEFAULT_NUM_CLASSES}"
+Environment="CLASS_NAMES_FILE=${DEFAULT_CLASS_NAMES_FILE}"
+Environment="PORT=${DEFAULT_PORT}"
+Environment="METRICS_PORT=${DEFAULT_METRICS_PORT}"
+Environment="CONF_THRESHOLD=${DEFAULT_CONF_THRESHOLD}"
+Environment="NMS_THRESHOLD=${DEFAULT_NMS_THRESHOLD}"
+Environment="WARMUP_RUNS=${DEFAULT_WARMUP_RUNS}"
 
-ExecStart=${VENV_DIR}/bin/python ${EDGE_DST_DIR}/inference/engine.py \\
-    --model \${MODEL_PATH} \\
-    --host 0.0.0.0 \\
-    --port ${DEFAULT_PORT} \\
-    --npu-core \${NPU_CORE} \\
-    --num-classes \${NUM_CLASSES}
+ExecStart=${VENV_DIR}/bin/python ${EDGE_DST_DIR}/inference/engine.py \
+    --model \${MODEL_PATH} \
+    --host 0.0.0.0 \
+    --port \${PORT} \
+    --npu-core \${NPU_CORE} \
+    --num-classes \${NUM_CLASSES} \
+    --class-names-file \${CLASS_NAMES_FILE} \
+    --metrics-port \${METRICS_PORT} \
+    --conf-threshold \${CONF_THRESHOLD} \
+    --nms-threshold \${NMS_THRESHOLD} \
+    --warmup-runs \${WARMUP_RUNS}
 
 Restart=always
 RestartSec=5
@@ -304,6 +341,9 @@ main() {
   log_info "设备ID: ${DEVICE_ID}"
   log_info "服务器: ${SERVER_URL}"
   log_info "安装目录: ${INSTALL_DIR}"
+
+  load_generated_runtime_env
+  resolve_runtime_defaults
 
   install_system_deps
   create_dirs

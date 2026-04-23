@@ -116,13 +116,17 @@ def convert_to_rknn(cfg: dict) -> dict:
     input_size_list = io_cfg.get("input_size_list", [[1, 3, 640, 640]])
 
     print("\n>>> 配置 RKNN 参数...")
+    
+    optimization_level = cfg.get("optimization_level", 3)
+
     ret = rknn.config(
         mean_values=mean_values,
         std_values=std_values,
         target_platform=cfg["target_platform"],
         quantized_dtype=quant_cfg.get("quantized_dtype", "asymmetric_quantized-8"),
-        optimization_level=3,
+        optimization_level=optimization_level,
     )
+    
     if ret != 0:
         raise RuntimeError(f"rknn.config() 失败: {ret}")
 
@@ -209,8 +213,12 @@ def convert_to_rknn(cfg: dict) -> dict:
 
 
 def main() -> None:
-    cfg_path = "pipeline/configs/detection_rknn.yaml"
+    cfg_path = "pipeline/configs/detection_rknn.generated.yaml"
+    if not Path(cfg_path).exists():
+        cfg_path = "pipeline/configs/detection_rknn.yaml"
     cfg = load_config(cfg_path)
+
+    print(f"RKNN配置文件: {cfg_path}")
 
     onnx_path = cfg["output"]["onnx_model"]
     report_path = Path(cfg["output"]["perf_report"])

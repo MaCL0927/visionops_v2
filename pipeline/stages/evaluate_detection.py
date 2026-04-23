@@ -47,11 +47,11 @@ def extract_class_names(data_yaml: dict) -> List[str]:
 def main() -> None:
     from ultralytics import YOLO
 
-    train_cfg_path = Path("pipeline/configs/detection_train.yaml")
-    data_cfg_path = Path("pipeline/configs/detection_data.yaml")
-
+    train_cfg_path = Path("pipeline/configs/detection_train.generated.yaml")
+    if not train_cfg_path.exists():
+        train_cfg_path = Path("pipeline/configs/detection_train.yaml")
     train_cfg = load_yaml(train_cfg_path)
-    data_cfg = load_yaml(data_cfg_path)
+    print(f"评估配置文件: {train_cfg_path}")
 
     model_path = Path("models/checkpoints_detection/best.pt")
     dataset_yaml = Path(train_cfg["dataset"]["yaml_path"])

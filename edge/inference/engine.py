@@ -9,6 +9,7 @@ import os
 import time
 import logging
 import threading
+import yaml
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 from contextlib import asynccontextmanager
@@ -31,21 +32,19 @@ logger = logging.getLogger("visionops.inference")
 class InferenceConfig:
     model_path: str = "/opt/visionops/models/current.rknn"
     target_platform: str = "rk3588"
-    npu_core: str = "auto"  # auto / core_0 / core_0_1 / core_0_1_2
+    npu_core: str = "auto"
 
-    # 你的 detection 主线当前默认 640x640
     input_size: List[int] = field(default_factory=lambda: [640, 640])
 
-    # detection 配置
     class_names: List[str] = field(default_factory=lambda: ["person", "smoke"])
     num_classes: int = 2
+    class_names_file: Optional[str] = None
+
     conf_threshold: float = 0.25
     nms_threshold: float = 0.45
-
     metrics_port: int = 9091
     warmup_runs: int = 3
 
-    # 调试：是否打印 output shape
     debug_shapes: bool = True
 
 
@@ -181,6 +180,46 @@ def multiclass_nms(
         keep_all.extend(list(inds[keep]))
     return keep_all
 
+def load_class_names_config(path: Optional[str]) -> Tuple[Optional[List[str]], Optional[int]]:
+    if not path:
+        return None, None
+
+    p = Path(path)
+    if not p.exists():
+        logger.warning(f"类别配置文件不存在，继续使用默认类别配置: {p}")
+        return None, None
+
+    try:
+        with p.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except Exception as e:
+        logger.warning(f"读取类别配置文件失败，继续使用默认类别配置: {p}, err={e}")
+        return None, None
+
+    class_names = data.get("class_names")
+    num_classes = data.get("num_classes")
+
+    if not isinstance(class_names, list) or not class_names:
+        logger.warning(f"类别配置文件中的 class_names 无效: {p}")
+        return None, None
+
+    if num_classes is None:
+        num_classes = len(class_names)
+
+    try:
+        num_classes = int(num_classes)
+    except Exception:
+        logger.warning(f"类别配置文件中的 num_classes 无效: {p}")
+        return None, None
+
+    if len(class_names) != num_classes:
+        logger.warning(
+            f"class_names 与 num_classes 不一致，继续使用默认类别配置: "
+            f"len(class_names)={len(class_names)}, num_classes={num_classes}"
+        )
+        return None, None
+
+    return class_names, num_classes
 
 # ────────────────────────────────────────────────
 # RKNN 推理引擎
@@ -613,13 +652,15 @@ def create_app(config: Optional[InferenceConfig] = None):
     )
 
     @app.get("/health")
-    async def health():
+    def health():
         return {
-            "status": "ok" if engine.is_loaded else "model_not_loaded",
+            "status": "ok" if engine and engine.is_loaded else "error",
             "model_path": config.model_path,
             "platform": config.target_platform,
             "task": "detection",
+            "num_classes": config.num_classes,
             "class_names": config.class_names,
+            "class_names_file": config.class_names_file,
         }
 
     @app.post("/infer")
@@ -663,7 +704,39 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--npu-core", default="auto",
                         choices=["auto", "core_0", "core_1", "core_2", "core_0_1", "core_0_1_2"])
-    parser.add_argument("--num-classes", type=int, default=6)
+    parser.add_argument(
+        "--num-classes",
+        type=int,
+        default=int(os.getenv("NUM_CLASSES", "6")),
+    )
+
+    parser.add_argument(
+        "--class-names-file",
+        type=str,
+        default=os.getenv("CLASS_NAMES_FILE"),
+        help="类别配置文件路径，例如 /opt/visionops/edge/runtime/class_names.yaml",
+    )
+    parser.add_argument(
+        "--metrics-port",
+        type=int,
+        default=int(os.getenv("METRICS_PORT", "9091")),
+    )
+    parser.add_argument(
+        "--conf-threshold",
+        type=float,
+        default=float(os.getenv("CONF_THRESHOLD", "0.25")),
+    )
+    parser.add_argument(
+        "--nms-threshold",
+        type=float,
+        default=float(os.getenv("NMS_THRESHOLD", "0.45")),
+    )
+    parser.add_argument(
+        "--warmup-runs",
+        type=int,
+        default=int(os.getenv("WARMUP_RUNS", "3")),
+    )
+
     args = parser.parse_args()
 
     default_names = ["2wheelers", "auto", "bus", "car", "pedestrian", "truck"]
@@ -672,12 +745,31 @@ if __name__ == "__main__":
     else:
         class_names = [str(i) for i in range(args.num_classes)]
 
-    cfg = InferenceConfig(
+    config = InferenceConfig(
         model_path=args.model,
         npu_core=args.npu_core,
         num_classes=args.num_classes,
         class_names=class_names,
+        class_names_file=args.class_names_file,
+        conf_threshold=args.conf_threshold,
+        nms_threshold=args.nms_threshold,
+        metrics_port=args.metrics_port,
+        warmup_runs=args.warmup_runs,
     )
 
-    app = create_app(cfg)
+    file_class_names, file_num_classes = load_class_names_config(config.class_names_file)
+    if file_class_names is not None:
+        config.class_names = file_class_names
+        config.num_classes = file_num_classes
+        logger.info(
+            f"已从类别配置文件加载类别信息: "
+            f"num_classes={config.num_classes}, class_names={config.class_names}"
+        )
+    else:
+        logger.info(
+            f"未使用外部类别配置文件，继续使用当前配置: "
+            f"num_classes={config.num_classes}, class_names={config.class_names}"
+        )
+
+    app = create_app(config)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")

@@ -115,6 +115,23 @@ stages:
       - models/metrics/registry_result.json:
           cache: false
 
+  # ─────────────────────────────────
+  # Detection Stage 0: 生成派生文件
+  # ─────────────────────────────────
+
+  render_task_config:
+    cmd: python pipeline/utils/render_task_config.py
+    deps:
+      - pipeline/utils/render_task_config.py
+      - pipeline/configs/task.yaml
+      - data/raw_detection/data.yaml
+    outs:
+      - pipeline/configs/detection_data.generated.yaml
+      - pipeline/configs/detection_train.generated.yaml
+      - pipeline/configs/detection_export.generated.yaml
+      - pipeline/configs/detection_rknn.generated.yaml
+      - edge/runtime/class_names.yaml
+      - edge/runtime/edge.env
 
   # ─────────────────────────────────
   # Detection Stage 1: 数据预处理
@@ -123,19 +140,8 @@ stages:
     cmd: python pipeline/stages/preprocess_detection.py
     deps:
       - pipeline/stages/preprocess_detection.py
-      - pipeline/configs/detection_data.yaml
+      - pipeline/configs/detection_data.generated.yaml
       - data/raw_detection/
-    params:
-      - pipeline/configs/detection_data.yaml:
-          - dataset.root
-          - dataset.yaml_path
-          - dataset.task
-          - dataset.class_names
-          - dataset.num_classes
-          - preprocess.copy_to_processed
-          - preprocess.processed_root
-          - preprocess.check_images
-          - preprocess.check_labels
     outs:
       - data/processed_detection/images/train/
       - data/processed_detection/images/val/
@@ -151,36 +157,12 @@ stages:
     cmd: python pipeline/stages/train_detection.py
     deps:
       - pipeline/stages/train_detection.py
-      - pipeline/configs/detection_train.yaml
+      - pipeline/configs/detection_train.generated.yaml
       - data/processed_detection/data.yaml
       - data/processed_detection/images/train/
       - data/processed_detection/labels/train/
       - data/processed_detection/images/val/
       - data/processed_detection/labels/val/
-    params:
-      - pipeline/configs/detection_train.yaml:
-          - model.architecture
-          - model.weights
-          - model.num_classes
-          - model.pretrained
-          - dataset.yaml_path
-          - train.epochs
-          - train.batch_size
-          - train.img_size
-          - train.lr0
-          - train.device
-          - train.workers
-          - train.patience
-          - train.cache
-          - train.project
-          - train.name
-          - train.exist_ok
-          - mlflow.experiment_name
-          - mlflow.tracking_uri
-          - mlflow.log_artifacts
-          - mlflow.log_model
-          - output.checkpoint_dir
-          - output.metrics_dir
     outs:
       - models/checkpoints_detection/best.pt
       - models/checkpoints_detection/last.pt
@@ -195,8 +177,7 @@ stages:
     cmd: python pipeline/stages/evaluate_detection.py
     deps:
       - pipeline/stages/evaluate_detection.py
-      - pipeline/configs/detection_train.yaml
-      - pipeline/configs/detection_data.yaml
+      - pipeline/configs/detection_train.generated.yaml
       - models/checkpoints_detection/best.pt
       - data/processed_detection/data.yaml
       - data/processed_detection/images/val/
@@ -214,22 +195,12 @@ stages:
     cmd: python pipeline/stages/export_onnx_detection.py
     deps:
       - pipeline/stages/export_onnx_detection.py
-      - pipeline/configs/detection_export.yaml
+      - pipeline/configs/detection_export.generated.yaml
       - models/checkpoints_detection/best.pt
-    params:
-      - pipeline/configs/detection_export.yaml:
-          - export.mode
-          - export.checkpoint_path
-          - export.output_path
-          - export.opset
-          - export.imgsz
-          - export.simplify
-          - export.dynamic
-          - external_export.script_path
-          - external_export.python_exec
     outs:
       - models/export_detection/model.onnx
-      - models/export_detection/export_result.json
+      - models/export_detection/export_result.json:
+          cache: false
 
   # ─────────────────────────────────
   # Detection Stage 5: RKNN模型转换（RK3588）
@@ -238,29 +209,13 @@ stages:
     cmd: python pipeline/stages/convert_rknn_detection.py
     deps:
       - pipeline/stages/convert_rknn_detection.py
-      - pipeline/configs/detection_rknn.yaml
+      - pipeline/configs/detection_rknn.generated.yaml
       - models/export_detection/model.onnx
       - data/processed_detection/images/val/
-    params:
-      - pipeline/configs/detection_rknn.yaml:
-          - target_platform
-          - quantization.do_quantization
-          - quantization.dataset
-          - quantization.dataset_size
-          - quantization.quantized_dtype
-          - quantization.pre_compile
-          - io_config.input_size_list
-          - io_config.mean_values
-          - io_config.std_values
-          - npu_core_mask
-          - perf_debug
-          - eval_mem
-          - output.onnx_model
-          - output.rknn_model
-          - output.perf_report
     outs:
       - models/export_detection/model.rknn
-      - models/export_detection/rknn_perf_report.json
+      - models/export_detection/rknn_report.json:
+          cache: false
 
   # ─────────────────────────────────
   # Detection Stage 6: 注册到MLflow Model Registry

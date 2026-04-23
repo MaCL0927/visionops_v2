@@ -138,8 +138,12 @@ def validate_onnx(output_path: Path) -> dict:
 
 
 def main() -> None:
-    cfg_path = Path("pipeline/configs/detection_export.yaml")
+    cfg_path = Path("pipeline/configs/detection_export.generated.yaml")
+    if not cfg_path.exists():
+        cfg_path = Path("pipeline/configs/detection_export.yaml")
     cfg = load_yaml(cfg_path)
+
+    print(f"导出配置文件: {cfg_path}")
 
     export_cfg = cfg["export"]
     ext_cfg = cfg.get("external_export", {})

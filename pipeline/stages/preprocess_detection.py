@@ -214,7 +214,9 @@ def collect_split_info(
 
 
 def main() -> None:
-    cfg_path = Path("pipeline/configs/detection_data.yaml")
+    cfg_path = Path("pipeline/configs/detection_data.generated.yaml")
+    if not cfg_path.exists():
+        cfg_path = Path("pipeline/configs/detection_data.yaml")
     cfg = load_yaml(cfg_path)
 
     dataset_cfg = cfg["dataset"]
