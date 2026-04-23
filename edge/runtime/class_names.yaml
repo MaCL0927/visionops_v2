@@ -1,9 +1,0 @@
-task: detection
-class_names:
-- 2wheelers
-- auto
-- bus
-- car
-- pedestrian
-- truck
-num_classes: 6
