@@ -220,7 +220,174 @@ def load_class_names_config(path: Optional[str]) -> Tuple[Optional[List[str]], O
         return None, None
 
     return class_names, num_classes
+    
+def _dfl(position: np.ndarray) -> np.ndarray:
+    n, c, h, w = position.shape
+    p_num = 4
+    mc = c // p_num
 
+    x = position.reshape(n, p_num, mc, h, w)
+    x = np.exp(x - np.max(x, axis=2, keepdims=True))
+    x = x / np.sum(x, axis=2, keepdims=True)
+
+    acc = np.arange(mc, dtype=np.float32).reshape(1, 1, mc, 1, 1)
+    y = (x * acc).sum(axis=2)
+    return y
+
+
+def _rockchip_box_process(position: np.ndarray, img_size=(640, 640)) -> np.ndarray:
+    grid_h, grid_w = position.shape[2:4]
+
+    col, row = np.meshgrid(np.arange(grid_w), np.arange(grid_h))
+    col = col.reshape(1, 1, grid_h, grid_w)
+    row = row.reshape(1, 1, grid_h, grid_w)
+    grid = np.concatenate((col, row), axis=1).astype(np.float32)
+
+    stride = np.array(
+        [img_size[1] // grid_h, img_size[0] // grid_w],
+        dtype=np.float32,
+    ).reshape(1, 2, 1, 1)
+
+    position = _dfl(position)
+
+    box_xy1 = grid + 0.5 - position[:, 0:2, :, :]
+    box_xy2 = grid + 0.5 + position[:, 2:4, :, :]
+
+    xyxy = np.concatenate((box_xy1 * stride, box_xy2 * stride), axis=1)
+    return xyxy
+
+
+def _flatten_output(x: np.ndarray) -> np.ndarray:
+    ch = x.shape[1]
+    x = x.transpose(0, 2, 3, 1)
+    return x.reshape(-1, ch)
+
+
+def _decode_rockchip_yolov8_outputs(
+    outputs: List[np.ndarray],
+    num_classes: int,
+    conf_threshold: float,
+    iou_threshold: float,
+    meta: Dict[str, Any],
+    img_size: Tuple[int, int] = (640, 640),
+) -> Dict[str, Any]:
+    """
+    适配 airockchip/ultralytics_yolov8 导出的 RKNN 多输出格式。
+
+    典型输出顺序：
+    0: box_80  [1, 64, 80, 80]
+    1: cls_80  [1, 80, 80, 80]
+    2: sum_80  [1, 1, 80, 80]  可忽略
+    3: box_40
+    4: cls_40
+    5: sum_40
+    6: box_20
+    7: cls_20
+    8: sum_20
+    """
+    if outputs is None or len(outputs) < 6:
+        return {"predictions": [], "task": "detection"}
+
+    boxes_all = []
+    cls_all = []
+
+    # Rockchip YOLOv8 通常是每个尺度 3 个输出：box / cls / score_sum
+    if len(outputs) >= 9:
+        group_size = 3
+        branch_num = 3
+    else:
+        # 兼容只导出 box / cls 的情况
+        group_size = 2
+        branch_num = len(outputs) // 2
+
+    for i in range(branch_num):
+        box_out = outputs[group_size * i]
+        cls_out = outputs[group_size * i + 1]
+
+        if box_out.ndim != 4 or cls_out.ndim != 4:
+            logger.warning(
+                f"Rockchip YOLOv8 输出维度异常: "
+                f"box_out={box_out.shape}, cls_out={cls_out.shape}"
+            )
+            continue
+
+        boxes = _rockchip_box_process(box_out, img_size=img_size)
+        boxes = _flatten_output(boxes)
+
+        cls_scores = _flatten_output(cls_out)
+
+        if cls_scores.shape[1] > num_classes:
+            cls_scores = cls_scores[:, :num_classes]
+
+        # Rockchip 导出的 cls 分支通常已经带 sigmoid；
+        # 如果出现明显 logits，再做 sigmoid。
+        if cls_scores.max() > 1.0 or cls_scores.min() < 0.0:
+            cls_scores = sigmoid(cls_scores)
+
+        boxes_all.append(boxes)
+        cls_all.append(cls_scores)
+
+    if not boxes_all:
+        return {"predictions": [], "task": "detection"}
+
+    boxes = np.concatenate(boxes_all, axis=0)
+    cls_scores = np.concatenate(cls_all, axis=0)
+
+    class_ids = np.argmax(cls_scores, axis=1)
+    scores = cls_scores[np.arange(len(cls_scores)), class_ids]
+
+    keep_mask = scores >= conf_threshold
+    if not np.any(keep_mask):
+        return {"predictions": [], "task": "detection"}
+
+    boxes = boxes[keep_mask]
+    scores = scores[keep_mask]
+    class_ids = class_ids[keep_mask]
+
+    # 映射回原图
+    ratio = meta["ratio"]
+    dw, dh = meta["pad"]
+    orig_h, orig_w = meta["orig_shape"]
+
+    boxes[:, [0, 2]] -= dw
+    boxes[:, [1, 3]] -= dh
+    boxes /= max(ratio, 1e-6)
+
+    for i in range(len(boxes)):
+        boxes[i] = clip_box_xyxy(boxes[i], orig_w, orig_h)
+
+    wh = boxes[:, 2:4] - boxes[:, 0:2]
+    valid_mask = (wh[:, 0] > 2.0) & (wh[:, 1] > 2.0)
+    if not np.any(valid_mask):
+        return {"predictions": [], "task": "detection"}
+
+    boxes = boxes[valid_mask]
+    scores = scores[valid_mask]
+    class_ids = class_ids[valid_mask]
+
+    keep = multiclass_nms(
+        boxes=boxes,
+        scores=scores,
+        class_ids=class_ids,
+        iou_thresh=iou_threshold,
+    )
+
+    predictions = []
+    for i in keep:
+        cls_id = int(class_ids[i])
+        predictions.append({
+            "class_id": cls_id,
+            "class_name": str(cls_id),
+            "confidence": round(float(scores[i]), 4),
+            "bbox": [round(float(x), 2) for x in boxes[i].tolist()],
+        })
+
+    predictions.sort(key=lambda x: x["confidence"], reverse=True)
+
+    return {
+        "predictions": predictions,
+        "task": "detection",
+    }
 # ────────────────────────────────────────────────
 # RKNN 推理引擎
 # ────────────────────────────────────────────────
@@ -386,14 +553,14 @@ class RKNNInferenceEngine:
         """
         Detection 后处理入口。
 
-        当前专门适配：
-        output[0].shape == (1, 6, 8400)
+        支持两种格式：
+        1. 普通 Ultralytics 单输出:
+        [1, 4+C, 8400] 或 [1, 8400, 4+C]
 
-        解释方式：
-        - 先取 outputs[0][0] => (6, 8400)
-        - transpose => (8400, 6)
-        - 前4维: bbox
-        - 后2维: class logits / scores
+        2. Rockchip YOLOv8 多输出:
+        [box_80, cls_80, sum_80,
+            box_40, cls_40, sum_40,
+            box_20, cls_20, sum_20]
         """
         if outputs is None or len(outputs) == 0:
             return {
@@ -402,23 +569,50 @@ class RKNNInferenceEngine:
                 "message": "empty outputs",
             }
 
+        shape_info = [tuple(o.shape) for o in outputs]
+
+        # --------------------------------------------------
+        # Rockchip YOLOv8 多输出格式
+        # --------------------------------------------------
+        if len(outputs) >= 6:
+            logger.info(f"[POSTPROCESS] 使用 Rockchip YOLOv8 多输出后处理: {shape_info}")
+
+            result = _decode_rockchip_yolov8_outputs(
+                outputs=outputs,
+                num_classes=self.config.num_classes,
+                conf_threshold=self.config.conf_threshold,
+                iou_threshold=self.config.nms_threshold,
+                meta=meta,
+                img_size=tuple(self.config.input_size),
+            )
+
+            # 补 class_name
+            for pred in result.get("predictions", []):
+                cls_id = pred["class_id"]
+                pred["class_name"] = (
+                    self.config.class_names[cls_id]
+                    if cls_id < len(self.config.class_names)
+                    else str(cls_id)
+                )
+
+            return result
+
+        # --------------------------------------------------
+        # 单输出格式
+        # --------------------------------------------------
         out = outputs[0]
 
-        # 你当前确认的 RKNN 输出格式：(1, 6, 8400)
         if out.ndim == 3 and out.shape[0] == 1 and out.shape[1] == (4 + self.config.num_classes):
-            pred = out[0].transpose(1, 0)   # (8400, 6)
+            pred = out[0].transpose(1, 0)
             return self._decode_rknn_1x6x8400(pred, meta)
 
-        # 兼容另一种可能：(1, 8400, 6)
         if out.ndim == 3 and out.shape[0] == 1 and out.shape[2] == (4 + self.config.num_classes):
-            pred = out[0]   # (8400, 6)
+            pred = out[0]
             return self._decode_rknn_1x6x8400(pred, meta)
 
-        # 兼容旧的 flat 形式
         if out.ndim == 2 and out.shape[1] == (4 + self.config.num_classes):
             return self._decode_rknn_1x6x8400(out, meta)
 
-        shape_info = [tuple(o.shape) for o in outputs]
         logger.warning(f"未匹配到已实现的 detection 输出格式: {shape_info}")
         return {
             "predictions": [],

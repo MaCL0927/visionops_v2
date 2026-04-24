@@ -121,11 +121,10 @@ export:
   opset: 12
   simplify: true
   dynamic: false
-  mode: ultralytics
+  mode: rockchip
 
 external_export:
-  python_exec: python
-  script_path: tools/export_yolov8_rknn_onnx.py
+  yolo_exec: /home/pc/anaconda3/envs/pt2onnx/bin/yolo  # pt转onnx环境
 
 rknn:
   python_exec: /home/pc/anaconda3/envs/rknn311/bin/python
@@ -146,7 +145,7 @@ rknn:
     input_size_list: [[1, 3, 640, 640]]
 
   build:
-    do_quantization: false
+    do_quantization: true
     optimization_level: 3
 
   runtime:

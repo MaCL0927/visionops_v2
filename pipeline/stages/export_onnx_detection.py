@@ -113,6 +113,90 @@ def export_with_external_script(
         "stderr_tail": result.stderr[-2000:],
         "final_output_path": str(output_path),
     }
+    
+def export_with_rockchip_yolo(
+    checkpoint_path: Path,
+    output_path: Path,
+    imgsz: int,
+    yolo_exec: str,
+    project_dir: Path | None = None,
+) -> dict:
+    """
+    使用 airockchip/ultralytics_yolov8 环境中的 yolo CLI 导出 RKNN 友好的 ONNX。
+
+    等价于手动执行：
+        yolo export model=best.pt format=rknn
+
+    注意：
+    - airockchip 的 format=rknn 实际会先导出 RKNN 友好的 ONNX
+    - 这里最终只接收 .onnx，并统一移动到 output_path
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not Path(yolo_exec).exists():
+        raise FileNotFoundError(f"Rockchip yolo 命令不存在: {yolo_exec}")
+
+    before_onnx_files = set(Path(".").rglob("*.onnx"))
+
+    cmd = [
+        yolo_exec,
+        "export",
+        f"model={checkpoint_path}",
+        "format=rknn",
+        f"imgsz={imgsz}",
+    ]
+
+    print("执行 Rockchip YOLO 导出:")
+    print(" ".join(cmd))
+
+    result = subprocess.run(
+        cmd,
+        check=True,
+        capture_output=True,
+        text=True,
+        cwd=str(project_dir) if project_dir else None,
+    )
+
+    # 优先按 checkpoint 同目录推断
+    candidate_paths = [
+        checkpoint_path.with_suffix(".onnx"),
+        checkpoint_path.parent / f"{checkpoint_path.stem}.onnx",
+    ]
+
+    # 再搜索新生成的 onnx
+    after_onnx_files = set(Path(".").rglob("*.onnx"))
+    new_onnx_files = list(after_onnx_files - before_onnx_files)
+
+    candidate_paths.extend(new_onnx_files)
+
+    exported_path = None
+    for p in candidate_paths:
+        if p.exists():
+            exported_path = p
+            break
+
+    if exported_path is None:
+        stdout_tail = result.stdout[-3000:]
+        stderr_tail = result.stderr[-3000:]
+        raise FileNotFoundError(
+            "Rockchip YOLO 导出完成，但未找到 ONNX 文件。\n"
+            f"stdout_tail:\n{stdout_tail}\n"
+            f"stderr_tail:\n{stderr_tail}"
+        )
+
+    if output_path.exists():
+        output_path.unlink()
+
+    shutil.move(str(exported_path), str(output_path))
+
+    return {
+        "export_backend": "rockchip_yolo",
+        "yolo_exec": str(yolo_exec),
+        "raw_exported_path": str(exported_path),
+        "final_output_path": str(output_path),
+        "stdout_tail": result.stdout[-2000:],
+        "stderr_tail": result.stderr[-2000:],
+    }
 
 
 def validate_onnx(output_path: Path) -> dict:
@@ -190,6 +274,17 @@ def main() -> None:
             imgsz=imgsz,
             python_exec=str(ext_cfg.get("python_exec", "python")),
             script_path=Path(ext_cfg.get("script_path", "tools/export_yolov8_rknn_onnx.py")),
+        )
+    elif mode in ["rockchip", "rknn", "airockchip"]:
+        export_info = export_with_rockchip_yolo(
+            checkpoint_path=checkpoint_path,
+            output_path=output_path,
+            imgsz=imgsz,
+            yolo_exec=str(ext_cfg.get(
+                "yolo_exec",
+                "/home/pc/anaconda3/envs/pt2onnx/bin/yolo"
+            )),
+            project_dir=Path(ext_cfg["project_dir"]) if ext_cfg.get("project_dir") else None,
         )
     else:
         raise ValueError(f"不支持的导出模式: {mode}")
