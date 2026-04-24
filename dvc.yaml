@@ -227,25 +227,25 @@ stages:
       - pipeline/configs/detection_mlops.yaml
       - models/export_detection/model.rknn
       - models/metrics_detection/eval_metrics.json
-      - models/metrics_detection/mlflow_run_id.txt
+      - models/metrics_detection/train_metrics.json
     params:
       - pipeline/configs/detection_mlops.yaml:
-          - registry.model_name
-          - registry.task
-          - registry.promotion_threshold.map50
-          - registry.promotion_threshold.map50_95
-          - registry.promotion_threshold.latency_ms
-          - registry.tags.platform
-          - registry.tags.quantized
-          - registry.tags.auto_registered
-          - registry.tags.task
-          - registry.tags.model_family
-          - paths.eval_metrics
-          - paths.train_metrics
-          - paths.mlflow_run_id
-          - paths.onnx_model
-          - paths.rknn_model
-          - paths.registry_result
+        - registry.model_name
+        - registry.task
+        - registry.promotion_threshold.map50
+        - registry.promotion_threshold.map50_95
+        - registry.promotion_threshold.latency_ms
+        - registry.tags.platform
+        - registry.tags.quantized
+        - registry.tags.auto_registered
+        - registry.tags.task
+        - registry.tags.model_family
+        - paths.eval_metrics
+        - paths.train_metrics
+        - paths.mlflow_run_id
+        - paths.onnx_model
+        - paths.rknn_model
+        - paths.registry_result
     metrics:
       - models/metrics_detection/registry_result.json:
           cache: false

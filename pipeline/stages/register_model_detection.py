@@ -144,6 +144,25 @@ def log_params_if_any(params: Dict[str, Any]) -> None:
         else:
             mlflow.log_param(k, v)
 
+def resolve_upstream_run_id(
+    train_metrics: Dict[str, Any],
+    mlflow_run_id_path: Optional[Path],
+) -> Tuple[str, str]:
+    """
+    优先从 train_metrics.json 读取上游训练 run_id；
+    若没有，再从可选辅助文件 mlflow_run_id.txt 兜底读取。
+    返回: (run_id, source)
+    """
+    run_id_from_metrics = str(train_metrics.get("mlflow_run_id", "") or "").strip()
+    if run_id_from_metrics:
+        return run_id_from_metrics, "train_metrics.json"
+
+    if mlflow_run_id_path and mlflow_run_id_path.exists():
+        run_id_from_txt = read_text(mlflow_run_id_path)
+        if run_id_from_txt:
+            return run_id_from_txt, "mlflow_run_id.txt"
+
+    return "", ""
 
 def ensure_registration_run(
     model_name: str,
@@ -212,7 +231,8 @@ def main() -> None:
 
     eval_metrics_path = Path(paths_cfg["eval_metrics"])
     train_metrics_path = Path(paths_cfg.get("train_metrics", ""))
-    mlflow_run_id_path = Path(paths_cfg["mlflow_run_id"])
+    mlflow_run_id_raw = paths_cfg.get("mlflow_run_id", "")
+    mlflow_run_id_path = Path(mlflow_run_id_raw) if mlflow_run_id_raw else None
     onnx_path = Path(paths_cfg["onnx_model"])
     rknn_path = Path(paths_cfg["rknn_model"])
     registry_result_path = Path(paths_cfg["registry_result"])
@@ -237,7 +257,16 @@ def main() -> None:
     print(f"RKNN Path: {rknn_path}")
     print("=" * 60)
 
-    upstream_run_id = read_text(mlflow_run_id_path) if mlflow_run_id_path.exists() else ""
+    upstream_run_id, run_id_source = resolve_upstream_run_id(
+        train_metrics=train_metrics,
+        mlflow_run_id_path=mlflow_run_id_path,
+    )
+
+    if upstream_run_id:
+        print(f"检测到上游 MLflow run_id，来源: {run_id_source} -> {upstream_run_id}")
+    else:
+        print("未在 train_metrics.json 或辅助 txt 中找到上游 mlflow_run_id，将创建注册专用 MLflow Run...")
+
     run_id = ensure_registration_run(
         model_name=model_name,
         run_id=upstream_run_id,
