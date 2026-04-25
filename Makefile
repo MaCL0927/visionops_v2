@@ -83,13 +83,13 @@ init:
 	dvc remote modify minio secret_access_key minioadmin123
 	@echo "创建项目目录..."
 	mkdir -p \
+		data/raw data/processed \
 		data/raw_detection data/processed_detection \
+		models/checkpoints models/export models/metrics \
 		models/checkpoints_detection models/export_detection models/metrics_detection \
 		models/runs/detect \
 		logs/retrain
-	@echo "如需兼容 legacy/classification 流程，请手动创建："
-	@echo "  data/raw data/processed"
-	@echo "  models/checkpoints models/export models/metrics"
+	@echo "✓ classification/detection 目录已创建"
 	@echo "✓ 初始化完成"
 
 render-task:
@@ -113,17 +113,19 @@ pipeline-detection:
 pipeline-detection-force:
 	dvc repro --force preprocess_detection train_detection evaluate_detection export_onnx_detection convert_rknn_detection register_model_detection
 
-## ── legacy/classification 流水线 ─────────────────────────────
+## ── classification 流水线 ────────────────────────────────────
 train-classification:
 	$(PYTHON) pipeline/stages/train.py
 
 pipeline-classification:
-	@echo "运行 legacy/classification 完整 MLOps 流水线..."
+	@echo "运行 classification 完整 MLOps 流水线..."
 	dvc repro preprocess train evaluate export_onnx convert_rknn register_model
-	@echo "✓ legacy/classification 流水线执行完毕"
+	@echo "✓ classification 流水线执行完毕"
 
 pipeline-classification-force:
+	@echo "强制重跑 classification 完整 MLOps 流水线..."
 	dvc repro --force preprocess train evaluate export_onnx convert_rknn register_model
+	@echo "✓ classification 流水线强制执行完毕"
 
 ## ── 再训练调度 ────────────────────────────────────────────────
 retrain:
@@ -157,7 +159,7 @@ deploy-detection:
 	bash edge/deploy/push.sh models/export_detection/model.rknn $(DEVICE)
 
 deploy-classification:
-	@echo "部署 legacy/classification RKNN 模型到边缘设备..."
+	@echo "部署 classification RKNN 模型到边缘设备..."
 	bash edge/deploy/push.sh models/export/model.rknn $(DEVICE)
 
 ## ── API 测试 ──────────────────────────────────────────────────

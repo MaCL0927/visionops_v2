@@ -1,42 +1,66 @@
 stages:
   # ─────────────────────────────────
-  # Stage 1: 数据预处理
+  # Classification Stage 1: 数据预处理
   # ─────────────────────────────────
   preprocess:
     cmd: python pipeline/stages/preprocess.py
     deps:
       - pipeline/stages/preprocess.py
       - pipeline/configs/data.yaml
-      - data/raw/                         # DVC追踪的原始数据目录
+      - data/raw/
     params:
       - pipeline/configs/data.yaml:
           - preprocess.img_size
           - preprocess.augment
           - preprocess.val_split
+          - preprocess.resize
+          - preprocess.normalize
+          - preprocess.num_workers
+          - paths.raw_data
+          - paths.processed
     outs:
       - data/processed/train/
       - data/processed/val/
       - data/processed/dataset_stats.json
+      - data/processed/class_names.yaml
+      - edge/runtime/class_names_classification.yaml:
+          cache: false
 
   # ─────────────────────────────────
-  # Stage 2: 模型训练
+  # Classification Stage 2: 模型训练
   # ─────────────────────────────────
   train:
     cmd: python pipeline/stages/train.py
     deps:
       - pipeline/stages/train.py
+      - pipeline/configs/data.yaml
       - pipeline/configs/train.yaml
-      - server/training/
+      - server/training/model_utils.py
       - data/processed/train/
       - data/processed/val/
+      - data/processed/class_names.yaml
     params:
       - pipeline/configs/train.yaml:
           - model.architecture
           - model.num_classes
+          - model.pretrained
           - train.epochs
           - train.batch_size
+          - train.img_size
           - train.lr
           - train.optimizer
+          - train.lr_scheduler
+          - train.weight_decay
+          - early_stopping.enabled
+          - early_stopping.patience
+          - early_stopping.min_delta
+          - amp
+          - device
+          - output.checkpoint_dir
+          - output.metrics_dir
+      - pipeline/configs/data.yaml:
+          - preprocess.normalize
+          - preprocess.num_workers
     outs:
       - models/checkpoints/best.pt
       - models/checkpoints/last.pt
@@ -45,14 +69,18 @@ stages:
           cache: false
 
   # ─────────────────────────────────
-  # Stage 3: 模型评估
+  # Classification Stage 3: 模型评估
   # ─────────────────────────────────
   evaluate:
     cmd: python pipeline/stages/evaluate.py
     deps:
       - pipeline/stages/evaluate.py
+      - pipeline/configs/data.yaml
+      - pipeline/configs/train.yaml
+      - server/training/model_utils.py
       - models/checkpoints/best.pt
       - data/processed/val/
+      - data/processed/class_names.yaml
     outs:
       - models/metrics/eval_report.json
       - models/metrics/confusion_matrix.png
@@ -61,56 +89,80 @@ stages:
           cache: false
 
   # ─────────────────────────────────
-  # Stage 4: ONNX导出
+  # Classification Stage 4: ONNX 导出
   # ─────────────────────────────────
   export_onnx:
     cmd: python pipeline/stages/export_onnx.py
     deps:
       - pipeline/stages/export_onnx.py
-      - models/checkpoints/best.pt
+      - pipeline/configs/train.yaml
       - pipeline/configs/export.yaml
+      - server/training/model_utils.py
+      - models/checkpoints/best.pt
     params:
       - pipeline/configs/export.yaml:
           - onnx.opset_version
           - onnx.dynamic_axes
           - onnx.input_size
+          - onnx.simplify
     outs:
       - models/export/model.onnx
+      - models/export/export_result.json:
+          cache: false
 
   # ─────────────────────────────────
-  # Stage 5: RKNN模型转换（RK3588）
+  # Classification Stage 5: RKNN 模型转换
   # ─────────────────────────────────
   convert_rknn:
     cmd: python pipeline/stages/convert_rknn.py
     deps:
       - pipeline/stages/convert_rknn.py
-      - models/export/model.onnx
       - pipeline/configs/rknn.yaml
-      - data/processed/val/              # 量化校准数据集
+      - models/export/model.onnx
+      - data/processed/val/
     params:
       - pipeline/configs/rknn.yaml:
           - target_platform
+          - python_exec
           - quantization.do_quantization
           - quantization.dataset
+          - quantization.dataset_size
+          - quantization.quantized_dtype
           - quantization.pre_compile
+          - io_config.input_size_list
+          - io_config.mean_values
+          - io_config.std_values
+          - npu_core_mask
+          - perf_debug
+          - eval_mem
+          - check_output_shapes
+          - output.onnx_model
+          - output.rknn_model
+          - output.perf_report
     outs:
       - models/export/model.rknn
-      - models/export/rknn_perf_report.json
+      - models/export/rknn_perf_report.json:
+          cache: false
 
   # ─────────────────────────────────
-  # Stage 6: 注册到MLflow Model Registry
+  # Classification Stage 6: 模型注册
   # ─────────────────────────────────
   register_model:
     cmd: python pipeline/stages/register_model.py
     deps:
       - pipeline/stages/register_model.py
+      - pipeline/configs/mlops.yaml
+      - models/export/model.onnx
       - models/export/model.rknn
+      - models/export/rknn_perf_report.json
+      - models/export/export_result.json
       - models/metrics/eval_metrics.json
     params:
       - pipeline/configs/mlops.yaml:
           - registry.model_name
-          - registry.promotion_threshold.accuracy
-          - registry.promotion_threshold.latency_ms
+          - promotion_threshold.accuracy
+          - promotion_threshold.latency_ms
+          - promotion_threshold.confidence
     metrics:
       - models/metrics/registry_result.json:
           cache: false

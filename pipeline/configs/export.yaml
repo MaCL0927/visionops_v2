@@ -1,15 +1,16 @@
-# ONNX导出配置
+# 分类模型 ONNX 导出配置
 onnx:
-  opset_version: 12            # RKNN兼容性最佳：11 或 12
-  input_size: [1, 3, 640, 640] # [batch, channel, H, W]
-  dynamic_axes: null           # null=静态shape（RKNN要求），或指定动态轴
-  simplify: true               # 使用 onnx-simplifier 优化图结构
+  opset_version: 12
+  input_size: [1, 3, 224, 224]
+  dynamic_axes: null
+  simplify: true
 
-# YOLOv8专用导出参数（ultralytics.YOLO.export()）
+# YOLO 导出参数，仅 detection 分支使用
+# 分类分支不会使用这里
 yolo_export:
   format: onnx
   simplify: true
   opset: 12
   imgsz: 640
-  half: false                  # RKNN INT8量化阶段处理，此处保持FP32
-  dynamic: false               # RKNN要求静态shape
+  half: false
+  dynamic: false
