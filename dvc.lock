@@ -23,7 +23,7 @@ stages:
       size: 1165
     - path: data/processed_detection/dataset_stats.json
       hash: md5
-      md5: b30259261598e17878bcbc7aed564ea1
+      md5: f8bcc03d452a628112351f6af45c63a5
       size: 5570
     - path: data/processed_detection/images/train/
       hash: md5
@@ -83,15 +83,15 @@ stages:
     outs:
     - path: models/checkpoints_detection/best.pt
       hash: md5
-      md5: b0691a2b488c4283466d9be2a0821011
-      size: 6557809
+      md5: af60f15beb5502550bd10638b8ac564b
+      size: 6557937
     - path: models/checkpoints_detection/last.pt
       hash: md5
-      md5: 43371ee27966a077f68ff237cfd0a68c
-      size: 6557809
+      md5: ed3caca06874e778f41fb4eff10e9970
+      size: 6557937
     - path: models/metrics_detection/train_metrics.json
       hash: md5
-      md5: 04181cc1281d69e44d9f34cc51c6be71
+      md5: 8ddb6ecabaf5d4a39d861d2f34c97d38
       size: 1155
   evaluate_detection:
     cmd: python pipeline/stages/evaluate_detection.py
@@ -112,8 +112,8 @@ stages:
       nfiles: 28
     - path: models/checkpoints_detection/best.pt
       hash: md5
-      md5: b0691a2b488c4283466d9be2a0821011
-      size: 6557809
+      md5: af60f15beb5502550bd10638b8ac564b
+      size: 6557937
     - path: pipeline/configs/detection_train.generated.yaml
       hash: md5
       md5: 7f3f72aa0bc5bf0db2768a4540c50903
@@ -125,19 +125,19 @@ stages:
     outs:
     - path: models/metrics_detection/eval_metrics.json
       hash: md5
-      md5: 35064bfd84b4c4be996e4f01fc4f3aea
+      md5: 6e050750b58a51388da5a8abd8592c8e
       size: 8900
     - path: models/metrics_detection/eval_report.json
       hash: md5
-      md5: 1cf01d149344552542f18c022febf266
+      md5: ca60fce9a9e66d569ee0fddbaed06ba6
       size: 7989
   export_onnx_detection:
     cmd: python pipeline/stages/export_onnx_detection.py
     deps:
     - path: models/checkpoints_detection/best.pt
       hash: md5
-      md5: b0691a2b488c4283466d9be2a0821011
-      size: 6557809
+      md5: af60f15beb5502550bd10638b8ac564b
+      size: 6557937
     - path: pipeline/configs/detection_export.generated.yaml
       hash: md5
       md5: 702a4a620ca8c8ab5170c38166c57d96
@@ -149,7 +149,7 @@ stages:
     outs:
     - path: models/export_detection/export_result.json
       hash: md5
-      md5: d0bdb04a56ce835bf2c42600ebb78729
+      md5: bfdb50bb58fbf6e366bfabbbbcdeda25
       size: 2074
     - path: models/export_detection/model.onnx
       hash: md5
@@ -178,26 +178,26 @@ stages:
     outs:
     - path: models/export_detection/model.rknn
       hash: md5
-      md5: d59e4526864f56ed75fc8d16101860da
+      md5: 6649595c1bab83b06a9165b40777734d
       size: 4326347
     - path: models/export_detection/rknn_report.json
       hash: md5
-      md5: c67ee9fa91c21b5e4d134b5899710f95
+      md5: 25a78ee5ed7f1ab21f9c34b3e5a4aaf7
       size: 1546
   register_model_detection:
     cmd: python pipeline/stages/register_model_detection.py
     deps:
     - path: models/export_detection/model.rknn
       hash: md5
-      md5: 147be3831361e3757f928a0969489aaf
-      size: 4842704
+      md5: 6649595c1bab83b06a9165b40777734d
+      size: 4326347
     - path: models/metrics_detection/eval_metrics.json
       hash: md5
-      md5: 35064bfd84b4c4be996e4f01fc4f3aea
+      md5: 6e050750b58a51388da5a8abd8592c8e
       size: 8900
     - path: models/metrics_detection/train_metrics.json
       hash: md5
-      md5: 04181cc1281d69e44d9f34cc51c6be71
+      md5: 8ddb6ecabaf5d4a39d861d2f34c97d38
       size: 1155
     - path: pipeline/configs/detection_mlops.yaml
       hash: md5
@@ -228,7 +228,7 @@ stages:
     outs:
     - path: models/metrics_detection/registry_result.json
       hash: md5
-      md5: 6e0ce3b9a2175f1785d177f8c3481153
+      md5: d89c331b89b7b52f1b52b27519cb0131
       size: 754
   render_task_config:
     cmd: python pipeline/utils/render_task_config.py

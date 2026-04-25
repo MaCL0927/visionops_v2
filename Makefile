@@ -9,7 +9,8 @@
         retrain retrain-force retrain-loop check-triggers \
         test-api mlflow monitor minio \
         install install-edge \
-        clean-checkpoints dvc-push dvc-pull
+        clean-checkpoints dvc-push dvc-pull \
+		ingest-collected ingest-collected-force
 
 PYTHON ?= python
 MODEL_VERSION ?= latest
@@ -72,6 +73,13 @@ restart:
 
 logs:
 	docker compose logs -f $(SERVICE)
+
+# 接收边缘端压缩包并处理
+ingest-collected:
+	python server/data_ingest/ingest_uploaded_package.py --incoming-dir data/incoming
+
+ingest-collected-force:
+	python server/data_ingest/ingest_uploaded_package.py --incoming-dir data/incoming --overwrite
 
 ## ── 项目初始化 ────────────────────────────────────────────────
 init:
