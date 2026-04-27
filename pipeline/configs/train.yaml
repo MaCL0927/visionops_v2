@@ -1,7 +1,7 @@
 # 分类模型训练配置
 model:
   architecture: mobilenetv3
-  num_classes: 2
+  num_classes: 4
   pretrained: true
   pretrained_weights: null
 
@@ -16,7 +16,7 @@ train:
   weight_decay: 0.0005
 
 early_stopping:
-  enabled: true
+  enabled: false
   patience: 15
   min_delta: 0.001
 

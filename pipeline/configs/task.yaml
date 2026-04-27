@@ -98,7 +98,7 @@ model:
   input_size: 640
 
 train:
-  epochs: 20
+  epochs: 50
   batch_size: 16
   lr0: 0.001
   device: 0

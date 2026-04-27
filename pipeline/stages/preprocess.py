@@ -272,7 +272,7 @@ def write_edge_class_names(class_names: List[str]) -> None:
         "class_names": class_names,
     }
 
-    with open(edge_dir / "class_names_classification.yaml", "w", encoding="utf-8") as f:
+    with open(edge_dir / "class_names.yaml", "w", encoding="utf-8") as f:
         yaml.safe_dump(payload, f, allow_unicode=True, sort_keys=False)
 
 
@@ -403,7 +403,7 @@ def main() -> None:
     print(f"失败图像: {train_fail + val_fail}")
     print(f"统计文件: {processed_dir / 'dataset_stats.json'}")
     print(f"类别文件: {processed_dir / 'class_names.yaml'}")
-    print(f"边缘类别文件: edge/runtime/class_names_classification.yaml")
+    print(f"边缘类别文件: edge/runtime/class_names.yaml")
 
 
 if __name__ == "__main__":
