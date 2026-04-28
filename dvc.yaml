@@ -23,8 +23,7 @@ stages:
       - data/processed/val/
       - data/processed/dataset_stats.json
       - data/processed/class_names.yaml
-      - edge/runtime/class_names_classification.yaml:
-          cache: false
+
 
   # ─────────────────────────────────
   # Classification Stage 2: 模型训练

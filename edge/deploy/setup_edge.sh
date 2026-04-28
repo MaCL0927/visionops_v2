@@ -187,7 +187,7 @@ setup_python_env() {
     pyyaml \
     numpy \
     psutil \
-    opencv-python-headless
+    opencv-python-headless -i https://pypi.tuna.tsinghua.edu.cn/simple
 
   log_info "尝试安装 rknn-toolkit-lite2..."
   if pip install --no-cache-dir rknn-toolkit-lite2; then
