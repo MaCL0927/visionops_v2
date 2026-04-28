@@ -49,14 +49,16 @@ def _parse_meta(meta_path: Path) -> Dict[str, Any]:
     deploy_meta = data.get("deploy") if isinstance(data.get("deploy"), dict) else {}
 
     task = str(data.get("task") or model_meta.get("task") or "").strip().lower()
-    if task not in {"classification", "detection"}:
+    if task in {"obb", "oriented_detection", "rotated_detection", "yolo_obb", "yolov8_obb"}:
+        task = "obb_detection"
+    if task not in {"classification", "detection", "obb_detection"}:
         task = ""
 
     input_size = data.get("input_size") or model_meta.get("input_size") or []
     try:
         input_size = [int(input_size[0]), int(input_size[1])]
     except Exception:
-        input_size = [224, 224] if task == "classification" else ([640, 640] if task == "detection" else [])
+        input_size = [224, 224] if task == "classification" else ([640, 640] if task in {"detection", "obb_detection"} else [])
 
     class_names = _list_from_names(data.get("class_names") or model_meta.get("class_names"))
     try:
@@ -70,7 +72,7 @@ def _parse_meta(meta_path: Path) -> Dict[str, Any]:
     return {
         "raw": data,
         "task": task,
-        "task_label": "分类模型" if task == "classification" else ("检测模型" if task == "detection" else "未知任务"),
+        "task_label": "分类模型" if task == "classification" else ("检测模型" if task == "detection" else ("旋转框检测模型" if task == "obb_detection" else "未知任务")),
         "input_size": input_size,
         "num_classes": num_classes,
         "class_names": class_names,
@@ -88,7 +90,7 @@ def _model_label(index: int, task: str, has_meta: bool) -> str:
     if not has_meta:
         return "配置缺失"
     prefix = "最新模型" if index == 0 else "历史模型"
-    task_text = "分类" if task == "classification" else ("检测" if task == "detection" else "未知")
+    task_text = "分类" if task == "classification" else ("检测" if task == "detection" else ("旋转框检测" if task == "obb_detection" else "未知"))
     return f"{prefix} · {task_text}"
 
 

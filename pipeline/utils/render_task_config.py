@@ -323,18 +323,222 @@ def build_classification(cfg: dict[str, Any]) -> dict[Path, dict[str, Any]]:
         },
     }
 
+def build_obb_detection(cfg: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """
+    构建 OBB 旋转框检测任务的统一 generated 配置。
+
+    当前只完成第一步：
+    - 让 task.type=obb_detection 可以被识别
+    - 生成 pipeline/configs/generated/task.generated.yaml
+    - 生成 edge/runtime/class_names.yaml
+    - 生成 edge/runtime/edge.env
+
+    后续步骤再逐步实现：
+    - pipeline/tasks/obb/preprocess.py
+    - pipeline/tasks/obb/train.py
+    - pipeline/tasks/obb/evaluate.py
+    - pipeline/tasks/obb/export_onnx.py
+    - pipeline/tasks/obb/convert_rknn.py
+    - edge/inference/engine.py postprocess_obb
+    """
+    names = _class_names(cfg)
+
+    model = cfg.get("model", {})
+    train = cfg.get("train", {})
+    ds = cfg.get("dataset", {})
+    out = cfg.get("output", {})
+    export = cfg.get("export", {})
+    rknn = cfg.get("rknn", {})
+    mlflow = cfg.get("mlflow", {})
+
+    input_hw = _as_hw(model.get("input_size", 640), [640, 640])
+    img = int(input_hw[0])
+
+    raw_root = ds.get("raw_root", "data/raw_obb")
+    raw_yaml = ds.get("raw_yaml", "data/raw_obb/data.yaml")
+    processed_root = ds.get("processed_root", "data/processed_obb")
+    processed_yaml = ds.get("processed_yaml", "data/processed_obb/data.yaml")
+
+    checkpoint_dir = out.get("checkpoint_dir", "models/checkpoints_obb")
+    metrics_dir = out.get("metrics_dir", "models/metrics_obb")
+    export_dir = out.get("export_dir", "models/export_obb")
+
+    onnx_path = export.get("output_path", f"{export_dir}/model.onnx")
+    rknn_model = rknn.get("rknn_model", f"{export_dir}/model.rknn")
+    rknn_report = rknn.get("perf_report", f"{export_dir}/rknn_report.json")
+
+    return {
+        "preprocess": {
+            "dataset": {
+                "root": raw_root,
+                "yaml_path": raw_yaml,
+                "task": "obb",
+                "class_names": names,
+                "num_classes": len(names),
+                "label_format": "yolo_obb_8points",
+            },
+            "preprocess": {
+                "copy_to_processed": True,
+                "processed_root": processed_root,
+                "processed_yaml": processed_yaml,
+                "check_images": True,
+                "check_labels": True,
+                "expected_label_fields": 9,
+            },
+        },
+        "train": {
+            "model": {
+                "architecture": model.get("architecture", "yolov8n-obb"),
+                "weights": model.get("pretrained_weights", "yolov8n-obb.pt"),
+                "num_classes": len(names),
+                "pretrained": True,
+                "task": "obb",
+            },
+            "dataset": {
+                "yaml_path": processed_yaml,
+            },
+            "train": {
+                "epochs": train.get("epochs", 50),
+                "batch_size": train.get("batch_size", 16),
+                "img_size": img,
+                "lr0": train.get("lr0", 0.001),
+                "device": train.get("device", "cpu"),
+                "workers": train.get("workers", 4),
+                "patience": train.get("patience", 20),
+                "cache": train.get("cache", False),
+                "project": train.get("project", "models/runs/obb"),
+                "name": train.get("name", "visionops_obb"),
+                "exist_ok": train.get("exist_ok", True),
+            },
+            "mlflow": {
+                "experiment_name": mlflow.get("experiment_name", "visionops-obb"),
+                "tracking_uri": mlflow.get("tracking_uri", "http://localhost:5000"),
+                "log_artifacts": True,
+                "log_model": False,
+            },
+            "output": {
+                "checkpoint_dir": checkpoint_dir,
+                "metrics_dir": metrics_dir,
+            },
+        },
+        "evaluate": {
+            "model": {
+                "checkpoint_path": f"{checkpoint_dir}/best.pt",
+                "task": "obb",
+            },
+            "dataset": {
+                "yaml_path": processed_yaml,
+            },
+            "eval": {
+                "img_size": img,
+                "batch_size": train.get("batch_size", 16),
+                "device": train.get("device", "cpu"),
+            },
+            "output": {
+                "metrics_dir": metrics_dir,
+                "eval_metrics": f"{metrics_dir}/eval_metrics.json",
+            },
+        },
+        "export": {
+            "export": {
+                "checkpoint_path": export.get("checkpoint_path", f"{checkpoint_dir}/best.pt"),
+                "output_path": onnx_path,
+                "imgsz": export.get("imgsz", img),
+                "opset": export.get("opset", 12),
+                "simplify": export.get("simplify", True),
+                "dynamic": export.get("dynamic", False),
+                "mode": export.get("mode", "onnx"),
+                "task": "obb",
+                "yolo_exec": export.get("yolo_exec", "/home/pc/anaconda3/envs/pt2onnx/bin/yolo"),
+            },
+            "external_export": cfg.get("external_export", {}),
+        },
+        "convert_rknn": {
+            "python_exec": rknn.get("python_exec", "python"),
+            "target_platform": rknn.get("target_platform", "rk3588"),
+            "output": {
+                "onnx_model": rknn.get("onnx_model", onnx_path),
+                "rknn_model": rknn_model,
+                "perf_report": rknn_report,
+            },
+            "quantization": {
+                "dataset": rknn.get("quantization", {}).get("dataset", f"{processed_root}/images/val"),
+                "dataset_size": rknn.get("quantization", {}).get("dataset_size", 100),
+                "quantized_dtype": rknn.get("quantization", {}).get(
+                    "quantized_dtype",
+                    "asymmetric_quantized-8",
+                ),
+            },
+            "io_config": {
+                "mean_values": rknn.get("input", {}).get("mean_values", [[0, 0, 0]]),
+                "std_values": rknn.get("input", {}).get("std_values", [[255, 255, 255]]),
+                "input_size_list": [[1, 3, img, img]],
+            },
+            "build": {
+                "do_quantization": rknn.get("build", {}).get("do_quantization", True),
+                "optimization_level": rknn.get("build", {}).get("optimization_level", 3),
+            },
+            "runtime": {
+                "perf_debug": rknn.get("runtime", {}).get("perf_debug", False),
+                "eval_mem": rknn.get("runtime", {}).get("eval_mem", False),
+            },
+            "check_output_shapes": rknn.get("check_output_shapes", True),
+            "task": "obb_detection",
+            "bbox_type": "oriented_bbox",
+        },
+        "register_model": {
+            "registry": {
+                "model_name": mlflow.get("registered_model_name", "visionops-obb-rk3588"),
+                "task": "obb_detection",
+                "promotion_threshold": mlflow.get(
+                    "promotion_threshold",
+                    {
+                        "map50": 0.5,
+                        "map50_95": 0.3,
+                        "latency_ms": 150.0,
+                    },
+                ),
+                "tags": {
+                    "platform": rknn.get("target_platform", "rk3588"),
+                    "quantized": str(rknn.get("build", {}).get("do_quantization", True)).lower(),
+                    "auto_registered": "true",
+                    "task": "obb_detection",
+                    "bbox_type": "oriented_bbox",
+                    "model_family": model.get("architecture", "yolov8-obb"),
+                },
+            },
+            "paths": {
+                "eval_metrics": f"{metrics_dir}/eval_metrics.json",
+                "train_metrics": f"{metrics_dir}/train_metrics.json",
+                "mlflow_run_id": f"{metrics_dir}/mlflow_run_id.txt",
+                "onnx_model": onnx_path,
+                "rknn_model": rknn_model,
+                "convert_report": rknn_report,
+                "registry_result": f"{metrics_dir}/registry_result.json",
+            },
+        },
+    }
 
 def main() -> None:
     cfg = load_task_config()
     task_type = get_task_type(cfg)
+    
+    default_input = [224, 224] if task_type == "classification" else [640, 640]
+
     input_hw = _as_hw(
-        cfg.get("model", {}).get("input_size", [640, 640] if task_type == "detection" else [224, 224]),
-        [640, 640] if task_type == "detection" else [224, 224],
+        cfg.get("model", {}).get("input_size", default_input),
+        default_input,
     )
 
-    # 继续复用原来各任务的配置构建逻辑，但不再把它们散落成多个
-    # *_data.generated.yaml / *_train.generated.yaml 文件。
-    stage_files = build_detection(cfg) if task_type == "detection" else build_classification(cfg)
+    if task_type == "detection":
+        stage_files = build_detection(cfg)
+    elif task_type == "classification":
+        stage_files = build_classification(cfg)
+    elif task_type == "obb_detection":
+        stage_files = build_obb_detection(cfg)
+    else:
+        raise ValueError(f"不支持的任务类型: {task_type}")
+    
     legacy_to_stage = {
         "data": "preprocess",
         "train": "train",

@@ -67,7 +67,7 @@ def norm_names(v):
     return []
 
 task = str(first(data.get('task'), model_meta.get('task'), default='detection')).strip().lower()
-if task not in {'detection','classification'}:
+if task not in {'detection','classification','obb_detection'}:
     raise SystemExit(f"meta task 无效: {task}")
 input_size = first(data.get('input_size'), model_meta.get('input_size'), default=[224,224] if task == 'classification' else [640,640])
 if isinstance(input_size, str):

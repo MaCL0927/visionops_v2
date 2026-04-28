@@ -257,6 +257,25 @@ function escapeHtml(text){
   return String(text ?? '').replace(/[&<>'"]/g,(ch)=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
 }
 
+function normalizeTaskName(task){
+  const t=String(task || '').trim().toLowerCase();
+  if(['obb','obb_detection','oriented_detection','oriented_bbox_detection','rotated_detection','rotated_bbox_detection','yolo_obb','yolov8_obb'].includes(t)) return 'obb_detection';
+  if(['detect','detection','yolo_detection','object_detection'].includes(t)) return 'detection';
+  if(['cls','classify','classification','image_classification'].includes(t)) return 'classification';
+  return t;
+}
+function isDetectionLikeTask(task){
+  const t=normalizeTaskName(task);
+  return t==='detection' || t==='obb_detection';
+}
+function taskDisplayName(task){
+  const t=normalizeTaskName(task);
+  if(t==='classification') return '分类';
+  if(t==='detection') return '检测';
+  if(t==='obb_detection') return '旋转框检测';
+  return task || '未知';
+}
+
 let validationImages=[];
 let selectedImage=null;
 
@@ -423,6 +442,47 @@ function clearDetectionOverlay(){
   ctx.clearRect(0,0,canvas.width,canvas.height);
   canvas.style.display='none';
 }
+function getPredictionLabelPosition(pred){
+  const points=pred && pred.obb && Array.isArray(pred.obb.points) ? pred.obb.points : null;
+  if(points && points.length){
+    return points.reduce((best,p)=>{
+      const x=Number(p && p[0]);
+      const y=Number(p && p[1]);
+      if(!Number.isFinite(x) || !Number.isFinite(y)) return best;
+      if(!best) return [x,y];
+      if(y<best[1] || (y===best[1] && x<best[0])) return [x,y];
+      return best;
+    }, null) || [0,0];
+  }
+  const box=Array.isArray(pred && pred.bbox) ? pred.bbox.map(Number) : null;
+  if(box && box.length>=2 && Number.isFinite(box[0]) && Number.isFinite(box[1])) return [box[0],box[1]];
+  return [0,0];
+}
+function getValidObbPoints(pred, canvasWidth, canvasHeight){
+  const points=pred && pred.obb && Array.isArray(pred.obb.points) ? pred.obb.points : null;
+  if(!points || points.length<4) return null;
+  const normalized=[];
+  for(const p of points){
+    if(!Array.isArray(p) || p.length<2) return null;
+    const x=Number(p[0]);
+    const y=Number(p[1]);
+    if(!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    normalized.push([
+      Math.max(0, Math.min(canvasWidth, x)),
+      Math.max(0, Math.min(canvasHeight, y)),
+    ]);
+  }
+  return normalized;
+}
+function drawPolygonOverlay(ctx, points){
+  if(!points || points.length<4) return;
+  ctx.beginPath();
+  ctx.moveTo(points[0][0], points[0][1]);
+  for(let i=1;i<points.length;i++) ctx.lineTo(points[i][0], points[i][1]);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+}
 function drawDetectionOverlay(predictions=[]){
   const canvas=document.getElementById('detectionOverlayCanvas');
   const img=document.getElementById('resultPreviewImg');
@@ -447,27 +507,44 @@ function drawDetectionOverlay(predictions=[]){
   ctx.font=`${Math.max(18, Math.round(canvas.width/48))}px sans-serif`;
   ctx.textBaseline='top';
   predictions.forEach((pred)=>{
+    const obbPoints=getValidObbPoints(pred, canvas.width, canvas.height);
     const box=Array.isArray(pred.bbox) ? pred.bbox.map(Number) : null;
-    if(!box || box.length<4 || box.some((x)=>!Number.isFinite(x))) return;
-    const x1=Math.max(0, Math.min(canvas.width, box[0]));
-    const y1=Math.max(0, Math.min(canvas.height, box[1]));
-    const x2=Math.max(0, Math.min(canvas.width, box[2]));
-    const y2=Math.max(0, Math.min(canvas.height, box[3]));
-    const w=Math.max(0, x2-x1);
-    const h=Math.max(0, y2-y1);
-    if(w<2 || h<2) return;
+
+    let labelAnchor=null;
+    let hasShape=false;
+    ctx.strokeStyle=obbPoints ? '#06b6d4' : '#22c55e';
+    ctx.fillStyle=obbPoints ? 'rgba(6,182,212,.16)' : 'rgba(34,197,94,.18)';
+
+    if(obbPoints){
+      drawPolygonOverlay(ctx, obbPoints);
+      labelAnchor=getPredictionLabelPosition(pred);
+      hasShape=true;
+    }else if(box && box.length>=4 && !box.some((x)=>!Number.isFinite(x))){
+      const x1=Math.max(0, Math.min(canvas.width, box[0]));
+      const y1=Math.max(0, Math.min(canvas.height, box[1]));
+      const x2=Math.max(0, Math.min(canvas.width, box[2]));
+      const y2=Math.max(0, Math.min(canvas.height, box[3]));
+      const w=Math.max(0, x2-x1);
+      const h=Math.max(0, y2-y1);
+      if(w>=2 && h>=2){
+        ctx.fillRect(x1,y1,w,h);
+        ctx.strokeRect(x1,y1,w,h);
+        labelAnchor=[x1,y1];
+        hasShape=true;
+      }
+    }
+    if(!hasShape) return;
+
     const cls=String(pred.class_name ?? pred.class ?? pred.label ?? pred.class_id ?? '目标');
     const conf=Number(pred.confidence ?? pred.score);
     const label=Number.isFinite(conf) ? `${cls} ${(conf*100).toFixed(1)}%` : cls;
-    ctx.strokeStyle='#22c55e';
-    ctx.fillStyle='rgba(34,197,94,.18)';
-    ctx.fillRect(x1,y1,w,h);
-    ctx.strokeRect(x1,y1,w,h);
     const pad=Math.max(6, Math.round(canvas.width/180));
     const textW=ctx.measureText(label).width;
     const labelH=Math.max(24, Math.round(canvas.width/36));
-    const lx=x1;
-    const ly=Math.max(0, y1-labelH-2);
+    const anchorX=Number(labelAnchor && labelAnchor[0]);
+    const anchorY=Number(labelAnchor && labelAnchor[1]);
+    const lx=Math.max(0, Math.min(canvas.width-(textW+pad*2), Number.isFinite(anchorX) ? anchorX : 0));
+    const ly=Math.max(0, (Number.isFinite(anchorY) ? anchorY : 0)-labelH-2);
     ctx.fillStyle='rgba(15,23,42,.90)';
     ctx.fillRect(lx,ly,textW+pad*2,labelH);
     ctx.fillStyle='#fff';
@@ -490,7 +567,7 @@ function renderClassificationResult(data, options={}){
   const task=data.task || 'classification';
   const r=data.result || {};
   classificationResult.className='classification-result done';
-  if(task==='detection'){
+  if(isDetectionLikeTask(task)){
     const det=data.detection || {};
     const predictions=Array.isArray(data.predictions) ? data.predictions : [];
     window.__lastDetectionPredictions=predictions;
@@ -499,9 +576,10 @@ function renderClassificationResult(data, options={}){
       const v=Number(p.confidence ?? p.score);
       return Number.isFinite(v) ? Math.max(m,v) : m;
     }, -1);
-    resultClassName.textContent=`检测到 ${count} 个目标`;
+    const taskText=normalizeTaskName(task)==='obb_detection' ? '旋转框检测' : '检测';
+    resultClassName.textContent=`${taskText}到 ${count} 个目标`;
     const modeText = options.mode === 'realtime' ? '实时检测' : (options.mode === 'capture' ? '拍照检测' : '选图检测');
-    resultConfidence.textContent=maxConf>=0 ? `${modeText} · 最高置信度 ${(maxConf*100).toFixed(1)}%` : `${modeText} · 检测模型结果`;
+    resultConfidence.textContent=maxConf>=0 ? `${modeText} · ${taskText} · 最高置信度 ${(maxConf*100).toFixed(1)}%` : `${modeText} · ${taskText}模型结果`;
     resultLatency.textContent=`耗时 ${data.latency_ms ?? '--'} ms`;
     if(topkResult){
       const counts=det.class_counts || {};
@@ -511,7 +589,7 @@ function renderClassificationResult(data, options={}){
       topkResult.innerHTML='<b>类别统计</b>'+rows;
     }
     drawDetectionOverlay(predictions);
-    if(!options.silent) showToast(`检测完成：${count} 个目标`);
+    if(!options.silent) showToast(`${taskText}完成：${count} 个目标`);
     return;
   }
   window.__lastDetectionPredictions=[];

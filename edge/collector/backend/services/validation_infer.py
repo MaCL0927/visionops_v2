@@ -87,7 +87,9 @@ def _read_model_meta(model_path: Path) -> Dict[str, Any]:
 
     model_meta = data.get("model") if isinstance(data.get("model"), dict) else {}
     task = str(data.get("task") or model_meta.get("task") or "").strip().lower()
-    if task not in {"classification", "detection"}:
+    if task in {"obb", "oriented_detection", "rotated_detection", "yolo_obb", "yolov8_obb"}:
+        task = "obb_detection"
+    if task not in {"classification", "detection", "obb_detection"}:
         raise ValueError(f"模型配置缺少有效 task: {meta_path.name}")
 
     input_size = data.get("input_size") or model_meta.get("input_size")
@@ -528,11 +530,12 @@ def infer_image_with_model(model_name: str, image_path: Path) -> Dict[str, Any]:
     if task == "classification":
         base["result"] = _normalize_classification_result(raw)
         base["topk"] = raw.get("topk", [])
-    elif task == "detection":
+    elif task in {"detection", "obb_detection"}:
         base["predictions"] = raw.get("predictions", [])
         base["detection"] = _summarize_detection(raw)
+        task_text = "旋转框检测" if task == "obb_detection" else "检测"
         base["result"] = {
-            "class_name": f"检测到 {base['detection']['count']} 个目标",
+            "class_name": f"{task_text}到 {base['detection']['count']} 个目标",
             "confidence": None,
             "confidence_percent": "--",
         }

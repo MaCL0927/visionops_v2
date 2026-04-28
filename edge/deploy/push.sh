@@ -2,18 +2,19 @@
 set -euo pipefail
 
 # ============================================================
-# VisionOps Edge Deploy Script v6.1-task-aware-healthfix
+# VisionOps Edge Deploy Script v6.2-task-aware-obb
 # 零参数自动部署 / 版本化模型文件 / 同名 meta YAML
 #
 # 默认输入（v2 自动识别）：
 #   detection:      models/export_detection/model.rknn
 #   classification: models/export_classification/model.rknn
+#   obb_detection:  models/export_obb/model.rknn
 #   edge/runtime/class_names.yaml
 #   data/model_context/manifest.json（不存在时生成临时 manifest）
 #
 # 默认输出到边缘端：
-#   /opt/visionops/models/{device_id}_{customer_id}_{cls|det}_{timestamp}.rknn
-#   /opt/visionops/models/{device_id}_{customer_id}_{cls|det}_{timestamp}.yaml
+#   /opt/visionops/models/{device_id}_{customer_id}_{cls|det|obb}_{timestamp}.rknn
+#   /opt/visionops/models/{device_id}_{customer_id}_{cls|det|obb}_{timestamp}.yaml
 #
 # systemd 仍读取 /opt/visionops/.env，但 MODEL_PATH / CLASS_NAMES_FILE
 # 指向具体版本化模型，不再使用 current.rknn / backup_*.rknn，
@@ -61,6 +62,7 @@ usage() {
   模型:       根据 task.yaml / edge/runtime/class_names.yaml 自动选择
               detection      -> models/export_detection/model.rknn
               classification -> models/export_classification/model.rknn
+              obb_detection  -> models/export_obb/model.rknn
   类别配置:   edge/runtime/class_names.yaml
   数据集信息: data/model_context/manifest.json；不存在时自动生成临时 manifest
 
@@ -77,10 +79,10 @@ usage() {
   --edge-env <path>           覆盖默认 edge.env，用于读取端口/阈值等可选默认值
   --model-version <name>      覆盖自动生成的模型版本名，不带后缀
   --display-name <name>       写入 meta 的展示名称
-  --input-size "H,W"          覆盖 input_size；默认 classification=224,224，detection=640,640
+  --input-size "H,W"          覆盖 input_size；默认 classification=224,224，detection/obb_detection=640,640
   --topk <N>                  覆盖分类 topk
-  --conf-threshold <float>    覆盖检测置信度阈值
-  --nms-threshold <float>     覆盖检测 NMS 阈值
+  --conf-threshold <float>    覆盖检测/OBB 置信度阈值
+  --nms-threshold <float>     覆盖检测/OBB NMS 阈值
   --code                      部署模型时同时同步 edge/ 代码到板端
   --code-only                 只同步 edge/ 代码，不上传模型、不改 env/service、不重启
   --no-restart                只上传文件和更新 env/service，不重启推理服务
@@ -146,16 +148,26 @@ normalize_input_size_comma() {
 normalize_task() {
   local raw="$1"
   raw="$(echo "$raw" | tr '[:upper:]' '[:lower:]' | xargs)"
-  if [[ "$raw" != "detection" && "$raw" != "classification" ]]; then
-    log_error "edge/runtime/class_names.yaml 中 task 必须是 detection 或 classification，当前: ${raw}"
-    exit 1
-  fi
-  echo "$raw"
+  case "$raw" in
+    detection|detect|yolo_detection|object_detection) echo "detection" ;;
+    classification|classify|image_classification|cls) echo "classification" ;;
+    obb|obb_detection|oriented_detection|oriented_bbox_detection|rotated_detection|rotated_bbox_detection|yolo_obb|yolov8_obb) echo "obb_detection" ;;
+    *)
+      log_error "edge/runtime/class_names.yaml 中 task 必须是 detection、classification 或 obb_detection，当前: ${raw}"
+      exit 1
+      ;;
+  esac
 }
 
 task_short() {
   local task="$1"
-  if [[ "$task" == "classification" ]]; then echo "cls"; else echo "det"; fi
+  if [[ "$task" == "classification" ]]; then
+    echo "cls"
+  elif [[ "$task" == "obb_detection" ]]; then
+    echo "obb"
+  else
+    echo "det"
+  fi
 }
 
 
@@ -165,6 +177,7 @@ normalize_task_family_value() {
   case "$raw" in
     detection|detect|yolo_detection|object_detection) echo "detection" ;;
     classification|classify|image_classification|cls) echo "classification" ;;
+    obb|obb_detection|oriented_detection|oriented_bbox_detection|rotated_detection|rotated_bbox_detection|yolo_obb|yolov8_obb) echo "obb_detection" ;;
     *) echo "" ;;
   esac
 }
@@ -184,6 +197,8 @@ def norm(v):
         return "detection"
     if s in {"classification", "classify", "image_classification", "cls"}:
         return "classification"
+    if s in {"obb", "obb_detection", "oriented_detection", "oriented_bbox_detection", "rotated_detection", "rotated_bbox_detection", "yolo_obb", "yolov8_obb"}:
+        return "obb_detection"
     return ""
 
 for raw in sys.argv[1:]:
@@ -290,6 +305,10 @@ auto_prepare_inputs() {
     if [[ "$task_family" == "classification" ]]; then
       MODEL_PATH="$(choose_first_existing \
         "models/export_classification/model.rknn" \
+        "models/export/model.rknn")"
+    elif [[ "$task_family" == "obb_detection" ]]; then
+      MODEL_PATH="$(choose_first_existing \
+        "models/export_obb/model.rknn" \
         "models/export/model.rknn")"
     else
       MODEL_PATH="$(choose_first_existing \
@@ -470,11 +489,13 @@ def normalize_task_value(v):
         return "detection"
     if s in {"classification", "classify", "image_classification", "cls"}:
         return "classification"
+    if s in {"obb", "obb_detection", "oriented_detection", "oriented_bbox_detection", "rotated_detection", "rotated_bbox_detection", "yolo_obb", "yolov8_obb"}:
+        return "obb_detection"
     return ""
 
 task = normalize_task_value(class_cfg.get("task_type")) or normalize_task_value(class_cfg.get("task"))
 if not task:
-    fail(f"{class_file} 必须包含 task_type/task: classification 或 detection")
+    fail(f"{class_file} 必须包含 task_type/task: classification、detection 或 obb_detection")
 
 class_names = normalize_names(class_cfg.get("class_names", class_cfg.get("names")))
 if not class_names:
@@ -509,7 +530,7 @@ if not isinstance(counts, dict):
     counts = {}
 
 timestamp = find_timestamp(manifest)
-short = "cls" if task == "classification" else "det"
+short = "cls" if task == "classification" else ("obb" if task == "obb_detection" else "det")
 version_name = version_override or f"{sanitize(device_id)}_{sanitize(customer_id)}_{short}_{timestamp}"
 version_name = sanitize(version_name)
 
@@ -696,7 +717,7 @@ build_deploy_env() {
   env_report_interval="$(read_env_value REPORT_INTERVAL "$LOCAL_EDGE_ENV")"; [[ -n "$env_report_interval" ]] || env_report_interval="60"
 
   cat > "$out_file" <<EOF_ENV
-# Auto generated by edge/deploy/push.sh v5.3-a
+# Auto generated by edge/deploy/push.sh v6.2-task-aware-obb
 DEVICE_ID=${target_device}
 MODEL_PATH=${remote_model_path}
 INFERENCE_URL=http://localhost:${env_port}

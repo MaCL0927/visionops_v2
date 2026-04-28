@@ -9,6 +9,8 @@ def main() -> None:
         from pipeline.tasks.detection.convert_rknn import main as run
     elif task_type == "classification":
         from pipeline.tasks.classification.convert_rknn import main as run
+    elif task_type == "obb_detection":
+        from pipeline.tasks.obb.convert_rknn import main as run
     else:
         raise ValueError(f"不支持的任务类型: {task_type}")
     run()

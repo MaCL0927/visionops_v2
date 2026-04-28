@@ -47,4 +47,4 @@ VALIDATION_ENGINE_PATH = os.getenv(
 # v6.4+ 低频实时检测配置。前端默认每 1 秒请求一次单帧推理。
 VALIDATION_REALTIME_INTERVAL_MS = int(os.getenv("VISIONOPS_VALIDATION_REALTIME_INTERVAL_MS", "1000"))
 
-UI_VERSION = "v6.7-detection-capture-realtime"
+UI_VERSION = "v6.8-obb-polygon-validation"

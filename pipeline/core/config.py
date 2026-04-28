@@ -44,11 +44,28 @@ def load_stage_config(stage: str) -> dict[str, Any]:
 
 def normalize_task_type(task_type: str) -> str:
     t = str(task_type or "").strip().lower()
+
     if t in {"detect", "detection", "yolo_detection", "object_detection"}:
         return "detection"
+
     if t in {"cls", "classify", "classification", "image_classification"}:
         return "classification"
-    raise ValueError(f"不支持的 task.type: {task_type!r}，应为 detection 或 classification")
+
+    if t in {
+        "obb",
+        "obb_detection",
+        "oriented_detection",
+        "oriented_bbox_detection",
+        "rotated_detection",
+        "rotated_bbox_detection",
+        "yolo_obb",
+        "yolov8_obb",
+    }:
+        return "obb_detection"
+
+    raise ValueError(
+        f"不支持的 task.type: {task_type!r}，应为 detection、classification 或 obb_detection"
+    )
 
 
 def get_task_type(task_cfg: dict[str, Any] | None = None) -> str:

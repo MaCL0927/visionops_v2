@@ -1,11 +1,12 @@
 """
-RK3588 边缘推理引擎（Detection / Classification 通用版）
+RK3588 边缘推理引擎（Detection / Classification / OBB 通用版）
 
 功能：
 - 基于 rknnlite2 运行 RKNN 模型
 - FastAPI 推理服务
 - 支持 YOLO Detection 后处理
 - 支持 Image Classification 后处理
+- 支持 YOLOv8 OBB 旋转框后处理
 
 典型启动：
 
@@ -58,7 +59,7 @@ class InferenceConfig:
     target_platform: str = "rk3588"
 
     # 新增：任务类型。默认 detection，保证旧启动方式不受影响。
-    task: str = "detection"  # detection / classification
+    task: str = "detection"  # detection / classification / obb_detection
     npu_core: str = "auto"
 
     # detection 默认 [640, 640]；classification 建议启动时传 [224, 224]
@@ -81,9 +82,16 @@ class InferenceConfig:
 
     def normalized_task(self) -> str:
         task = str(self.task).lower().strip()
-        if task not in {"detection", "classification"}:
-            raise ValueError(f"不支持的 task: {self.task}")
-        return task
+        if task in {"detect", "detection", "yolo_detection", "object_detection"}:
+            return "detection"
+        if task in {"cls", "classify", "classification", "image_classification"}:
+            return "classification"
+        if task in {
+            "obb", "obb_detection", "oriented_detection", "oriented_bbox_detection",
+            "rotated_detection", "rotated_bbox_detection", "yolo_obb", "yolov8_obb",
+        }:
+            return "obb_detection"
+        raise ValueError(f"不支持的 task: {self.task}")
 
 
 # ────────────────────────────────────────────────
@@ -247,6 +255,256 @@ def multiclass_nms(
         keep = nms_xyxy(boxes[inds], scores[inds], iou_thresh)
         keep_all.extend(list(inds[keep]))
     return keep_all
+
+
+def normalize_yolo_single_output(
+    out: np.ndarray,
+    expected_channels: int,
+) -> np.ndarray:
+    """将 YOLO 单输出统一成 [N, C]，支持 [1,C,N] / [1,N,C] / [C,N] / [N,C]。"""
+    arr = np.asarray(out, dtype=np.float32)
+    if arr.ndim == 3:
+        arr = arr[0]
+    if arr.ndim != 2:
+        raise ValueError(f"不支持的 YOLO 单输出维度: {out.shape}")
+    if arr.shape[0] == expected_channels and arr.shape[1] != expected_channels:
+        arr = arr.T
+    elif arr.shape[1] == expected_channels:
+        pass
+    else:
+        raise ValueError(
+            f"YOLO 输出维度与预期不匹配: shape={out.shape}, expected_channels={expected_channels}"
+        )
+    return arr
+
+
+def angle_to_radians(angle: float) -> float:
+    a = float(angle)
+    if abs(a) > 2 * np.pi:
+        a = float(np.deg2rad(a))
+    return a
+
+
+def xywhr_to_points(cx: float, cy: float, w: float, h: float, angle: float) -> np.ndarray:
+    angle = angle_to_radians(angle)
+    cos_a = float(np.cos(angle))
+    sin_a = float(np.sin(angle))
+    dx = w / 2.0
+    dy = h / 2.0
+    corners = np.array([[-dx, -dy], [dx, -dy], [dx, dy], [-dx, dy]], dtype=np.float32)
+    rot = np.array([[cos_a, -sin_a], [sin_a, cos_a]], dtype=np.float32)
+    points = corners @ rot.T
+    points[:, 0] += cx
+    points[:, 1] += cy
+    return points
+
+
+def clip_points(points: np.ndarray, w: int, h: int) -> np.ndarray:
+    points[:, 0] = np.clip(points[:, 0], 0, w - 1)
+    points[:, 1] = np.clip(points[:, 1], 0, h - 1)
+    return points
+
+
+def points_to_xyxy(points: np.ndarray, w: int, h: int) -> np.ndarray:
+    box = np.array(
+        [float(np.min(points[:, 0])), float(np.min(points[:, 1])),
+         float(np.max(points[:, 0])), float(np.max(points[:, 1]))],
+        dtype=np.float32,
+    )
+    return clip_box_xyxy(box, w, h)
+
+
+def safe_class_name(class_names: List[str], cls_id: int) -> str:
+    return class_names[cls_id] if 0 <= cls_id < len(class_names) else str(cls_id)
+
+
+
+def softmax_np(x: np.ndarray, axis: int = -1) -> np.ndarray:
+    """数值稳定版 softmax，用于 DFL 解码。"""
+    x = np.asarray(x, dtype=np.float32)
+    x = x - np.max(x, axis=axis, keepdims=True)
+    e = np.exp(x)
+    return e / (np.sum(e, axis=axis, keepdims=True) + 1e-12)
+
+
+def make_grid_points(h: int, w: int) -> np.ndarray:
+    """生成 YOLO 特征图中心点，shape=[H*W, 2]，坐标单位为 grid。"""
+    yy, xx = np.meshgrid(np.arange(h), np.arange(w), indexing="ij")
+    points = np.stack([xx + 0.5, yy + 0.5], axis=-1).reshape(-1, 2)
+    return points.astype(np.float32)
+
+
+def dfl_decode_np(box_logits: np.ndarray, reg_max: int = 16) -> np.ndarray:
+    """
+    DFL 解码。
+
+    box_logits: [N, 4 * reg_max]
+    return: [N, 4]，分别为 l, t, r, b，单位为 grid。
+    """
+    box_logits = np.asarray(box_logits, dtype=np.float32)
+    n = box_logits.shape[0]
+    x = box_logits.reshape(n, 4, reg_max)
+    prob = softmax_np(x, axis=2)
+    proj = np.arange(reg_max, dtype=np.float32)
+    dist = (prob * proj).sum(axis=2)
+    return dist.astype(np.float32)
+
+
+def dist2rbox_np(
+    distances: np.ndarray,
+    angles: np.ndarray,
+    anchors: np.ndarray,
+    stride: float,
+) -> np.ndarray:
+    """
+    将 DFL 距离 + angle 解码为 xywhr。
+
+    distances: [N, 4]，l,t,r,b，单位 grid
+    angles: [N]，弧度
+    anchors: [N, 2]，grid center
+    stride: 8/16/32
+
+    return: [N, 5]，cx,cy,w,h,angle，坐标单位为 input pixels。
+    """
+    distances = np.asarray(distances, dtype=np.float32)
+    angles = np.asarray(angles, dtype=np.float32).reshape(-1)
+    anchors = np.asarray(anchors, dtype=np.float32)
+
+    lt = distances[:, 0:2]
+    rb = distances[:, 2:4]
+    wh = lt + rb
+    offset = (rb - lt) / 2.0
+
+    cos_a = np.cos(angles)
+    sin_a = np.sin(angles)
+    ox = offset[:, 0]
+    oy = offset[:, 1]
+
+    cx = ox * cos_a - oy * sin_a + anchors[:, 0]
+    cy = ox * sin_a + oy * cos_a + anchors[:, 1]
+
+    return np.stack(
+        [cx * stride, cy * stride, wh[:, 0] * stride, wh[:, 1] * stride, angles],
+        axis=1,
+    ).astype(np.float32)
+
+
+def is_rockchip_obb_outputs(outputs: List[np.ndarray], num_classes: int) -> bool:
+    """判断是否为 airockchip/ultralytics_yolov8 format=rknn 导出的 OBB 多输出结构。"""
+    if outputs is None or len(outputs) < 4:
+        return False
+    expected_c = 64 + int(num_classes)
+    has_heads = 0
+    has_angle = False
+    for out in outputs:
+        arr = np.asarray(out)
+        if arr.ndim == 4 and arr.shape[1] == expected_c and arr.shape[2] in {80, 40, 20}:
+            has_heads += 1
+        # angle 常见为 [1,1,8400]，有时 RKNN 可能返回 [1,1,1,8400]
+        if arr.ndim in {3, 4} and arr.shape[1] == 1 and int(np.prod(arr.shape[2:])) == 8400:
+            has_angle = True
+    return has_heads >= 3 and has_angle
+
+
+def decode_rockchip_obb_outputs(
+    outputs: List[np.ndarray],
+    num_classes: int,
+    input_size: Tuple[int, int],
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    解码 Rockchip YOLOv8-OBB RKNN 专用多输出。
+
+    典型输出：
+      [1, 64 + nc, 80, 80]
+      [1, 64 + nc, 40, 40]
+      [1, 64 + nc, 20, 20]
+      [1, 1, 8400]
+
+    其中 64=4*reg_max，reg_max=16；最后一个输出是 angle.sigmoid()。
+
+    return:
+      boxes_xywhr: [N, 5]，cx,cy,w,h,angle，坐标单位为 input pixels
+      class_scores: [N, nc]
+      angles: [N]
+    """
+    reg_max = 16
+    expected_c = reg_max * 4 + int(num_classes)
+
+    detect_heads: List[np.ndarray] = []
+    angle_out: Optional[np.ndarray] = None
+
+    for out in outputs:
+        arr = np.asarray(out, dtype=np.float32)
+        if arr.ndim == 4 and arr.shape[1] == expected_c:
+            detect_heads.append(arr)
+        elif arr.ndim in {3, 4} and arr.shape[1] == 1 and int(np.prod(arr.shape[2:])) == 8400:
+            angle_out = arr.reshape(arr.shape[0], 1, -1)
+
+    if len(detect_heads) != 3:
+        raise ValueError(
+            f"Rockchip OBB 应有 3 个检测头，实际得到 {len(detect_heads)} 个，"
+            f"shapes={[tuple(np.asarray(o).shape) for o in outputs]}"
+        )
+    if angle_out is None:
+        raise ValueError(
+            f"Rockchip OBB 缺少 angle 输出，shapes={[tuple(np.asarray(o).shape) for o in outputs]}"
+        )
+
+    # 按 80 -> 40 -> 20 排序，与 angle 的 8400 展平顺序对应。
+    detect_heads = sorted(detect_heads, key=lambda x: x.shape[2], reverse=True)
+    strides = [8.0, 16.0, 32.0]
+
+    angle_flat = angle_out.reshape(-1).astype(np.float32)
+    expected_n = sum(int(h.shape[2] * h.shape[3]) for h in detect_heads)
+    if angle_flat.size < expected_n:
+        raise ValueError(
+            f"angle 输出长度不足: got={angle_flat.size}, expected={expected_n}, "
+            f"shape={angle_out.shape}"
+        )
+    if angle_flat.size > expected_n:
+        angle_flat = angle_flat[:expected_n]
+
+    all_boxes: List[np.ndarray] = []
+    all_scores: List[np.ndarray] = []
+
+    start = 0
+    for head, stride in zip(detect_heads, strides):
+        _, c, h, w = head.shape
+        if c != expected_c:
+            raise ValueError(f"检测头通道数不匹配: got={c}, expected={expected_c}")
+
+        # [1, C, H, W] -> [H*W, C]
+        pred = head[0].transpose(1, 2, 0).reshape(-1, c)
+        n = pred.shape[0]
+        end = start + n
+
+        box_logits = pred[:, : reg_max * 4]
+        cls_logits = pred[:, reg_max * 4 : reg_max * 4 + num_classes]
+
+        # Rockchip OBB 的 Detect.forward(self, x, "Obb") 返回 raw cls logits。
+        class_scores = sigmoid(cls_logits)
+
+        # OBB.forward(format=rknn) 返回的是 angle.sigmoid()，需还原为官方角度定义。
+        angle_sigmoid = angle_flat[start:end]
+        angles = (angle_sigmoid - 0.25) * np.pi
+
+        distances = dfl_decode_np(box_logits, reg_max=reg_max)
+        anchors = make_grid_points(h, w)
+        boxes_xywhr = dist2rbox_np(
+            distances=distances,
+            angles=angles,
+            anchors=anchors,
+            stride=stride,
+        )
+
+        all_boxes.append(boxes_xywhr)
+        all_scores.append(class_scores)
+        start = end
+
+    boxes = np.concatenate(all_boxes, axis=0)
+    scores = np.concatenate(all_scores, axis=0)
+    angles = boxes[:, 4]
+    return boxes, scores, angles
 
 
 def parse_input_size(value: Optional[str], default: List[int]) -> List[int]:
@@ -624,12 +882,12 @@ class RKNNInferenceEngine:
             }
             return img, meta
 
-        # detection：保持原来的 letterbox + BGR -> RGB
+        # detection / obb_detection：保持 letterbox + BGR -> RGB
         img, ratio, (dw, dh) = self._letterbox(image, (h, w))
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
         meta = {
-            "task": "detection",
+            "task": task,
             "orig_shape": (orig_h, orig_w),
             "input_shape": (h, w),
             "ratio": ratio,
@@ -645,8 +903,16 @@ class RKNNInferenceEngine:
                 fake = np.random.randn(1, c).astype(np.float32)
                 return [fake]
 
-            # 模拟检测输出：[1, N, 5 + C]
             n = 20
+            if self.config.normalized_task() == "obb_detection":
+                # 模拟 OBB 输出：[1, 4 + C + 1, N]
+                fake = np.random.rand(1, 4 + c + 1, n).astype(np.float32)
+                fake[:, 0:4, :] *= float(self.config.input_size[0])
+                fake[:, 4:4 + c, :] = np.random.rand(1, c, n).astype(np.float32)
+                fake[:, 4 + c, :] = np.random.rand(1, n).astype(np.float32) * np.pi / 2
+                return [fake]
+
+            # 模拟检测输出：[1, N, 5 + C]
             fake = np.random.rand(1, n, 5 + c).astype(np.float32)
             return [fake]
 
@@ -675,10 +941,15 @@ class RKNNInferenceEngine:
             preprocessed, meta = self._preprocess(image)
             outputs = self._run_inference_raw(preprocessed)
 
-            if self.config.normalized_task() == "classification":
+            task = self.config.normalized_task()
+            if task == "classification":
                 result = self._postprocess_classification(outputs, meta)
-            else:
+            elif task == "detection":
                 result = self._postprocess_detection(outputs, meta)
+            elif task == "obb_detection":
+                result = self._postprocess_obb(outputs, meta)
+            else:
+                raise ValueError(f"不支持的任务类型: {task}")
 
             latency_ms = (time.perf_counter() - t0) * 1000
             self.metrics.record(latency_ms, success=True)
@@ -1017,6 +1288,234 @@ class RKNNInferenceEngine:
             "task": "detection",
         }
 
+    def _postprocess_obb(
+        self,
+        outputs: Optional[List[np.ndarray]],
+        meta: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        OBB 后处理。
+
+        同时兼容两种输出：
+        1. 普通 Ultralytics OBB 单输出：
+           [1, 4 + num_classes + 1, 8400]
+           例如 4 类时 [1, 9, 8400]
+
+        2. airockchip/ultralytics_yolov8 format=rknn 专用多输出：
+           [1, 64 + num_classes, 80, 80]
+           [1, 64 + num_classes, 40, 40]
+           [1, 64 + num_classes, 20, 20]
+           [1, 1, 8400]
+
+        当前版本仍使用水平外接框 NMS，返回 bbox + obb.points。
+        """
+        if outputs is None or len(outputs) == 0:
+            return {"predictions": [], "task": "obb_detection", "message": "empty outputs"}
+
+        shape_info = [tuple(np.asarray(o).shape) for o in outputs]
+        num_classes = int(self.config.num_classes)
+        expected_channels = 4 + num_classes + 1
+
+        if is_rockchip_obb_outputs(outputs, num_classes=num_classes):
+            if not self._postprocess_format_logged:
+                logger.info(
+                    f"[POSTPROCESS] 使用 Rockchip YOLOv8 OBB 多输出后处理: shapes={shape_info}"
+                )
+                self._postprocess_format_logged = True
+
+            boxes_xywhr, class_scores, angles = decode_rockchip_obb_outputs(
+                outputs=outputs,
+                num_classes=num_classes,
+                input_size=tuple(meta["input_shape"]),
+            )
+            boxes_xywh = boxes_xywhr[:, :4].astype(np.float32)
+            decode_format = "rockchip_yolov8_obb_multi_output"
+        else:
+            out = outputs[0]
+            if not self._postprocess_format_logged:
+                logger.info(
+                    f"[POSTPROCESS] 使用 OBB 单输出后处理: shapes={shape_info}, "
+                    f"expected_channels={expected_channels}"
+                )
+                self._postprocess_format_logged = True
+
+            preds = normalize_yolo_single_output(out, expected_channels=expected_channels)
+            if preds.shape[1] > expected_channels:
+                preds = preds[:, :expected_channels]
+
+            boxes_xywh = preds[:, 0:4].astype(np.float32)
+            class_scores = preds[:, 4:4 + num_classes].astype(np.float32)
+            angles = preds[:, 4 + num_classes].astype(np.float32)
+            decode_format = "ultralytics_obb_single_output"
+
+            # 普通单输出中 class_scores 通常已是 sigmoid 后概率；如果像 logits，则转 sigmoid。
+            if class_scores.size > 0 and (class_scores.max() > 1.0 or class_scores.min() < 0.0):
+                class_scores = sigmoid(class_scores)
+
+        if class_scores.size == 0:
+            return {
+                "predictions": [],
+                "task": "obb_detection",
+                "output_shapes": shape_info,
+                "decode_format": decode_format,
+                "message": "empty class scores",
+            }
+
+        class_ids = np.argmax(class_scores, axis=1)
+        scores = class_scores[np.arange(len(class_scores)), class_ids]
+
+        if os.getenv("OBB_DEBUG", "0") == "1":
+            logger.info(
+                "[OBB DEBUG] raw decoded stats: "
+                f"boxes_min={float(np.min(boxes_xywh)):.6f}, "
+                f"boxes_max={float(np.max(boxes_xywh)):.6f}, "
+                f"cls_min={float(np.min(class_scores)):.6f}, "
+                f"cls_max={float(np.max(class_scores)):.6f}, "
+                f"angle_min={float(np.min(angles)):.6f}, "
+                f"angle_max={float(np.max(angles)):.6f}, "
+                f"threshold={self.config.conf_threshold}, "
+                f"decode_format={decode_format}"
+            )
+            top_idx = scores.argsort()[::-1][:10]
+            logger.info(
+                "[OBB DEBUG] top10 scores: "
+                + ", ".join(
+                    [
+                        f"(score={float(scores[i]):.6f}, cls={int(class_ids[i])})"
+                        for i in top_idx
+                    ]
+                )
+            )
+
+        keep_mask = scores >= self.config.conf_threshold
+        if not np.any(keep_mask):
+            return {
+                "predictions": [],
+                "task": "obb_detection",
+                "output_shapes": shape_info,
+                "decode_format": decode_format,
+                "message": "no predictions above confidence threshold",
+                "debug": {
+                    "score_max": round(float(np.max(scores)), 6) if scores.size else None,
+                    "score_min": round(float(np.min(scores)), 6) if scores.size else None,
+                    "cls_score_max": round(float(np.max(class_scores)), 6) if class_scores.size else None,
+                    "cls_score_min": round(float(np.min(class_scores)), 6) if class_scores.size else None,
+                    "conf_threshold": self.config.conf_threshold,
+                },
+            }
+
+        boxes_xywh = boxes_xywh[keep_mask]
+        angles = angles[keep_mask]
+        scores = scores[keep_mask]
+        class_ids = class_ids[keep_mask]
+
+        ratio = float(meta["ratio"])
+        dw, dh = meta["pad"]
+        orig_h, orig_w = meta["orig_shape"]
+        input_h, input_w = meta["input_shape"]
+
+        # 单输出模型有时可能输出 0~1 归一化坐标；Rockchip 多输出解码后已是 input pixels。
+        if boxes_xywh.size > 0 and float(np.nanmax(boxes_xywh[:, 0:4])) <= 2.0:
+            boxes_xywh[:, [0, 2]] *= float(input_w)
+            boxes_xywh[:, [1, 3]] *= float(input_h)
+
+        obb_points_list: List[np.ndarray] = []
+        bbox_xyxy_list: List[np.ndarray] = []
+        valid_indices: List[int] = []
+
+        for i, (box, angle) in enumerate(zip(boxes_xywh, angles)):
+            cx, cy, bw, bh = [float(x) for x in box.tolist()]
+
+            # 映射回原图坐标。
+            cx = (cx - float(dw)) / max(ratio, 1e-6)
+            cy = (cy - float(dh)) / max(ratio, 1e-6)
+            bw = bw / max(ratio, 1e-6)
+            bh = bh / max(ratio, 1e-6)
+
+            if bw <= 2.0 or bh <= 2.0:
+                continue
+
+            points = xywhr_to_points(cx, cy, bw, bh, float(angle))
+            points = clip_points(points, orig_w, orig_h)
+            bbox = points_to_xyxy(points, orig_w, orig_h)
+
+            if bbox[2] - bbox[0] <= 2.0 or bbox[3] - bbox[1] <= 2.0:
+                continue
+
+            obb_points_list.append(points)
+            bbox_xyxy_list.append(bbox)
+            valid_indices.append(i)
+
+        if not bbox_xyxy_list:
+            return {
+                "predictions": [],
+                "task": "obb_detection",
+                "output_shapes": shape_info,
+                "decode_format": decode_format,
+                "message": "no valid obb boxes",
+            }
+
+        bboxes = np.stack(bbox_xyxy_list, axis=0)
+        valid_scores = scores[valid_indices]
+        valid_class_ids = class_ids[valid_indices]
+        valid_angles = angles[valid_indices]
+
+        keep = multiclass_nms(
+            boxes=bboxes,
+            scores=valid_scores,
+            class_ids=valid_class_ids,
+            iou_thresh=self.config.nms_threshold,
+        )
+
+        predictions: List[Dict[str, Any]] = []
+        for idx in keep:
+            cls_id = int(valid_class_ids[idx])
+            score = float(valid_scores[idx])
+            bbox = bboxes[idx]
+            points = obb_points_list[idx]
+            angle = float(valid_angles[idx])
+            cx = float(np.mean(points[:, 0]))
+            cy = float(np.mean(points[:, 1]))
+            edge_w = float(np.linalg.norm(points[1] - points[0]))
+            edge_h = float(np.linalg.norm(points[2] - points[1]))
+
+            predictions.append(
+                {
+                    "class_id": cls_id,
+                    "class_name": safe_class_name(self.config.class_names, cls_id),
+                    "confidence": round(score, 6),
+                    "bbox": [round(float(x), 2) for x in bbox.tolist()],
+                    "obb": {
+                        "cx": round(cx, 2),
+                        "cy": round(cy, 2),
+                        "w": round(edge_w, 2),
+                        "h": round(edge_h, 2),
+                        "angle": round(angle_to_radians(angle), 6),
+                        "angle_unit": "radian",
+                        "points": [
+                            [round(float(x), 2), round(float(y), 2)]
+                            for x, y in points.tolist()
+                        ],
+                    },
+                }
+            )
+
+        predictions.sort(key=lambda x: x["confidence"], reverse=True)
+        return {
+            "predictions": predictions,
+            "task": "obb_detection",
+            "num_classes": num_classes,
+            "class_names": self.config.class_names,
+            "output_shapes": shape_info,
+            "decode_format": decode_format,
+            "nms": {
+                "type": "horizontal_bbox_nms",
+                "iou_threshold": self.config.nms_threshold,
+                "note": "当前 OBB 初版使用水平外接框 NMS，后续可升级 rotated NMS",
+            },
+            "meta": meta,
+        }
+
     def release(self):
         if self.rknn and not self._simulate_mode:
             self.rknn.release()
@@ -1068,8 +1567,8 @@ def create_app(config: Optional[InferenceConfig] = None):
             "num_classes": config.num_classes,
             "class_names": config.class_names,
             "class_names_file": config.class_names_file,
-            "conf_threshold": config.conf_threshold if config.normalized_task() == "detection" else None,
-            "nms_threshold": config.nms_threshold if config.normalized_task() == "detection" else None,
+            "conf_threshold": config.conf_threshold if config.normalized_task() in {"detection", "obb_detection"} else None,
+            "nms_threshold": config.nms_threshold if config.normalized_task() in {"detection", "obb_detection"} else None,
             "topk": config.topk if config.normalized_task() == "classification" else None,
             "simulate_mode": engine._simulate_mode,
         }
@@ -1109,15 +1608,15 @@ if __name__ == "__main__":
     import argparse
     import uvicorn
 
-    parser = argparse.ArgumentParser(description="VisionOps RK3588 Detection / Classification Inference Service")
+    parser = argparse.ArgumentParser(description="VisionOps RK3588 Detection / Classification / OBB Inference Service")
     parser.add_argument("--model", default=os.getenv("MODEL_PATH", "/opt/visionops/models/current.rknn"))
     parser.add_argument("--host", default=os.getenv("HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.getenv("PORT", "8080")))
     parser.add_argument(
         "--task",
         default=os.getenv("TASK", "detection"),
-        choices=["detection", "classification"],
-        help="推理任务类型：detection 或 classification",
+        choices=["detection", "classification", "obb_detection", "obb"],
+        help="推理任务类型：detection、classification 或 obb_detection",
     )
     parser.add_argument(
         "--input-size",

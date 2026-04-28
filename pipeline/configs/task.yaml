@@ -1,57 +1,167 @@
 task:
-  name: classification
-  type: classification
+  name: detection
+  type: yolo_detection
 
 dataset:
-  raw_root: data/raw_classification
-  processed_root: data/processed_classification
-  val_split: 0.2
+  raw_root: data/raw_detection
+  raw_yaml: data/raw_detection/data.yaml
+  processed_root: data/processed_detection
+  processed_yaml: data/processed_detection/data.yaml
 
 classes:
-  names: [box, earphones, pen, phone]
-  num_classes: 4
+  names:
+  - person
+  - bicycle
+  - car
+  - motorcycle
+  - airplane
+  - bus
+  - train
+  - truck
+  - boat
+  - traffic light
+  - fire hydrant
+  - stop sign
+  - parking meter
+  - bench
+  - bird
+  - cat
+  - dog
+  - horse
+  - sheep
+  - cow
+  - elephant
+  - bear
+  - zebra
+  - giraffe
+  - backpack
+  - umbrella
+  - handbag
+  - tie
+  - suitcase
+  - frisbee
+  - skis
+  - snowboard
+  - sports ball
+  - kite
+  - baseball bat
+  - baseball glove
+  - skateboard
+  - surfboard
+  - tennis racket
+  - bottle
+  - wine glass
+  - cup
+  - fork
+  - knife
+  - spoon
+  - bowl
+  - banana
+  - apple
+  - sandwich
+  - orange
+  - broccoli
+  - carrot
+  - hot dog
+  - pizza
+  - donut
+  - cake
+  - chair
+  - couch
+  - potted plant
+  - bed
+  - dining table
+  - toilet
+  - tv
+  - laptop
+  - mouse
+  - remote
+  - keyboard
+  - cell phone
+  - microwave
+  - oven
+  - toaster
+  - sink
+  - refrigerator
+  - book
+  - clock
+  - vase
+  - scissors
+  - teddy bear
+  - hair drier
+  - toothbrush
+  num_classes: 80
 
 model:
-  architecture: mobilenetv3
-  pretrained: true
-  input_size: [224, 224]
+  architecture: yolov8n
+  pretrained_weights: models/pretrained/yolov8n.pt
+  input_size: 640
 
 train:
-  epochs: 30
+  epochs: 50
   batch_size: 16
-  lr: 0.001
-  device: cuda
+  lr0: 0.001
+  device: 0
   workers: 4
+  patience: 20
+  cache: false
+  project: models/runs/detect
+  name: visionops_detection
+  exist_ok: true
+
+output:
+  checkpoint_dir: models/checkpoints_detection
+  metrics_dir: models/metrics_detection
+  export_dir: models/export_detection
 
 export:
-  output_path: models/export_classification/model.onnx
+  checkpoint_path: models/checkpoints_detection/best.pt
+  output_path: models/export_detection/model.onnx
+  imgsz: 640
   opset: 12
-  simplify: false
+  simplify: true
+  dynamic: false
+  mode: rockchip
+
+external_export:
+  yolo_exec: /home/pc/anaconda3/envs/pt2onnx/bin/yolo  # pt转onnx环境
 
 rknn:
   python_exec: /home/pc/anaconda3/envs/rknn311/bin/python
   target_platform: rk3588
-  onnx_model: models/export_classification/model.onnx
-  rknn_model: models/export_classification/model.rknn
-  perf_report: models/export_classification/rknn_report.json
-  build:
-    do_quantization: false
+  onnx_model: models/export_detection/model.onnx
+  rknn_model: models/export_detection/model.rknn
+  perf_report: models/export_detection/rknn_report.json
+
   quantization:
-    dataset: data/processed_classification/val
+    enable: true
+    dataset: data/processed_detection/images/val
     dataset_size: 100
     quantized_dtype: asymmetric_quantized-8
 
-mlflow:
-  experiment_name: visionops-classification
-  registered_model_name: visionops-classification-rk3588
-  tracking_uri: http://localhost:5000
-  promotion_threshold:
-    accuracy: 0.8
-    latency_ms: 999999
+  input:
+    mean_values: [[0, 0, 0]]
+    std_values: [[255, 255, 255]]
+    input_size_list: [[1, 3, 640, 640]]
+
+  build:
+    do_quantization: true
+    optimization_level: 3
+
+  runtime:
+    perf_debug: false
+    eval_mem: false
 
 edge:
-  port: 8082
+  host: 0.0.0.0
+  port: 8080
   metrics_port: 9091
   npu_core: auto
-  topk: 5
+  conf_threshold: 0.25
+  nms_threshold: 0.45
   warmup_runs: 3
+
+runtime:
+  generated_dir: edge/runtime
+  class_names_file: edge/runtime/class_names.yaml
+  edge_env_file: edge/runtime/edge.env
