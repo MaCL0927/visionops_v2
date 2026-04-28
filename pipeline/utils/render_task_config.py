@@ -98,7 +98,7 @@ def build_detection(cfg: dict[str, Any]) -> dict[Path, dict[str, Any]]:
     img = int(_as_hw(model.get("input_size", 640), [640, 640])[0])
 
     return {
-        CONFIG_DIR / "detection_data.generated.yaml": {
+        "preprocess": {
             "dataset": {
                 "root": ds.get("raw_root", "data/raw_detection"),
                 "yaml_path": ds.get("raw_yaml", "data/raw_detection/data.yaml"),
@@ -113,7 +113,7 @@ def build_detection(cfg: dict[str, Any]) -> dict[Path, dict[str, Any]]:
                 "check_labels": True,
             },
         },
-        CONFIG_DIR / "detection_train.generated.yaml": {
+        "train": {
             "model": {
                 "architecture": model.get("architecture", "yolov8n"),
                 "weights": model.get("pretrained_weights", "yolov8n.pt"),
@@ -145,7 +145,7 @@ def build_detection(cfg: dict[str, Any]) -> dict[Path, dict[str, Any]]:
                 "metrics_dir": out.get("metrics_dir", "models/metrics_detection"),
             },
         },
-        CONFIG_DIR / "detection_export.generated.yaml": {
+        "export": {
             "export": {
                 "checkpoint_path": export.get("checkpoint_path", "models/checkpoints_detection/best.pt"),
                 "output_path": export.get("output_path", "models/export_detection/model.onnx"),
@@ -157,7 +157,7 @@ def build_detection(cfg: dict[str, Any]) -> dict[Path, dict[str, Any]]:
             },
             "external_export": cfg.get("external_export", {}),
         },
-        CONFIG_DIR / "detection_rknn.generated.yaml": {
+        "convert_rknn": {
             "python_exec": rknn.get("python_exec", "python"),
             "target_platform": rknn.get("target_platform", "rk3588"),
             "output": {
@@ -186,7 +186,7 @@ def build_detection(cfg: dict[str, Any]) -> dict[Path, dict[str, Any]]:
             "check_output_shapes": rknn.get("check_output_shapes", True),
             "perf_debug": rknn.get("runtime", {}).get("perf_debug", False),
         },
-        CONFIG_DIR / "detection_mlops.generated.yaml": {
+        "register_model": {
             "registry": {
                 "model_name": mlflow.get("registered_model_name", "visionops-detection-rk3588"),
                 "task": "detection",
@@ -227,7 +227,7 @@ def build_classification(cfg: dict[str, Any]) -> dict[Path, dict[str, Any]]:
     normalize = train.get("normalize", {"mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225]})
 
     return {
-        CONFIG_DIR / "classification_data.generated.yaml": {
+        "preprocess": {
             "preprocess": {
                 "img_size": input_hw,
                 "augment": train.get("augment", False),
@@ -242,7 +242,7 @@ def build_classification(cfg: dict[str, Any]) -> dict[Path, dict[str, Any]]:
             },
             "classes": {"names": names, "num_classes": len(names)},
         },
-        CONFIG_DIR / "classification_train.generated.yaml": {
+        "train": {
             "model": {
                 "architecture": model.get("architecture", "mobilenetv3"),
                 "num_classes": len(names),
@@ -269,7 +269,7 @@ def build_classification(cfg: dict[str, Any]) -> dict[Path, dict[str, Any]]:
                 "metrics_dir": "models/metrics_classification",
             },
         },
-        CONFIG_DIR / "classification_export.generated.yaml": {
+        "export": {
             "onnx": {
                 "opset_version": export.get("opset", export.get("opset_version", 12)),
                 "dynamic_axes": export.get("dynamic_axes"),
@@ -278,7 +278,7 @@ def build_classification(cfg: dict[str, Any]) -> dict[Path, dict[str, Any]]:
                 "output_path": export.get("output_path", "models/export_classification/model.onnx"),
             }
         },
-        CONFIG_DIR / "classification_rknn.generated.yaml": {
+        "convert_rknn": {
             "python_exec": rknn.get("python_exec", "python"),
             "target_platform": rknn.get("target_platform", "rk3588"),
             "quantization": {
@@ -305,7 +305,7 @@ def build_classification(cfg: dict[str, Any]) -> dict[Path, dict[str, Any]]:
             "eval_mem": False,
             "check_output_shapes": True,
         },
-        CONFIG_DIR / "classification_mlops.generated.yaml": {
+        "register_model": {
             "registry": {
                 "model_name": mlflow.get("registered_model_name", "visionops-classification-rk3588")
             },
@@ -331,14 +331,37 @@ def main() -> None:
         cfg.get("model", {}).get("input_size", [640, 640] if task_type == "detection" else [224, 224]),
         [640, 640] if task_type == "detection" else [224, 224],
     )
-    generated = build_detection(cfg) if task_type == "detection" else build_classification(cfg)
-    for path, data in generated.items():
-        save_yaml(data, path)
+
+    # 继续复用原来各任务的配置构建逻辑，但不再把它们散落成多个
+    # *_data.generated.yaml / *_train.generated.yaml 文件。
+    stage_files = build_detection(cfg) if task_type == "detection" else build_classification(cfg)
+    legacy_to_stage = {
+        "data": "preprocess",
+        "train": "train",
+        "export": "export",
+        "rknn": "convert_rknn",
+        "mlops": "register_model",
+    }
+
+    stages: dict[str, Any] = {}
+    for key, data in stage_files.items():
+        stage_name = legacy_to_stage.get(str(key), str(key))
+        stages[stage_name] = data
+
+    generated_payload = {
+        "task_type": task_type,
+        "source": "pipeline/configs/task.yaml",
+        "stages": stages,
+        "runtime": build_runtime_class_names(cfg, task_type, input_hw),
+    }
+
+    generated_path = CONFIG_DIR / "generated" / "task.generated.yaml"
+    save_yaml(generated_payload, generated_path)
     save_yaml(build_runtime_class_names(cfg, task_type, input_hw), RUNTIME_DIR / "class_names.yaml")
     write_text(RUNTIME_DIR / "edge.env", build_edge_env(cfg, task_type, input_hw))
 
     print("✓ generated:")
-    for p in list(generated.keys()) + [RUNTIME_DIR / "class_names.yaml", RUNTIME_DIR / "edge.env"]:
+    for p in [generated_path, RUNTIME_DIR / "class_names.yaml", RUNTIME_DIR / "edge.env"]:
         print(f"  - {p}")
 
 

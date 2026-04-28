@@ -57,6 +57,7 @@ render-task:
 	$(PYTHON) -m pipeline.utils.render_task_config
 
 clean-generated:
+	rm -rf pipeline/configs/generated
 	rm -f pipeline/configs/*.generated.yaml
 	rm -f edge/runtime/class_names.yaml edge/runtime/edge.env
 	@echo "✓ 已清理 generated 配置"
@@ -69,10 +70,11 @@ pipeline pipeline-task: render-task
 	$(PYTHON) -m pipeline.stages.convert_rknn
 	$(PYTHON) -m pipeline.stages.register_model
 
-pipeline-force: pipeline
+pipeline-force:
+	dvc repro --force register_model
 
-pipeline-dvc: render-task
-	dvc repro render_task_config preprocess train evaluate export_onnx convert_rknn register_model
+pipeline-dvc:
+	dvc repro register_model
 
 pipeline-detection: pipeline
 

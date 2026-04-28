@@ -4,6 +4,8 @@ import json
 import shutil
 from datetime import datetime
 from pathlib import Path
+
+from pipeline.core.config import load_stage_config
 from typing import Any, Dict, Optional
 
 import yaml
@@ -66,8 +68,7 @@ def resolve_device(device_cfg: str) -> str | int:
 def main() -> None:
     from ultralytics import YOLO
 
-    cfg_path = Path("pipeline/configs/detection_train.generated.yaml")
-    cfg = load_yaml(cfg_path)
+    cfg = load_stage_config("train")
 
     model_cfg = cfg["model"]
     dataset_cfg = cfg["dataset"]

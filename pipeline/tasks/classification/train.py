@@ -24,6 +24,8 @@ import json
 import sys
 from datetime import datetime
 from pathlib import Path
+
+from pipeline.core.config import load_stage_config
 from typing import Dict, List, Tuple
 
 import yaml
@@ -240,8 +242,8 @@ def build_scheduler(optimizer, train_cfg: dict):
 
 
 def main() -> None:
-    data_cfg = load_config("pipeline/configs/classification_data.generated.yaml")
-    train_cfg_all = load_config("pipeline/configs/classification_train.generated.yaml")
+    data_cfg = load_stage_config("preprocess")
+    train_cfg_all = load_stage_config("train")
 
     paths_cfg = data_cfg.get("paths", {})
     preprocess_cfg = data_cfg.get("preprocess", {})
@@ -283,9 +285,9 @@ def main() -> None:
     detected_num_classes = len(class_names)
     if configured_num_classes and configured_num_classes != detected_num_classes:
         raise ValueError(
-            f"classification_train.generated.yaml 中 num_classes={configured_num_classes}，"
+            f"generated/task.generated.yaml 中 num_classes={configured_num_classes}，"
             f"但数据集中识别到 {detected_num_classes} 类：{class_names}。\n"
-            "请修改 pipeline/configs/classification_train.generated.yaml 中的 model.num_classes。"
+            "请修改 pipeline/configs/generated/task.generated.yaml 中的 model.num_classes。"
         )
 
     num_classes = detected_num_classes

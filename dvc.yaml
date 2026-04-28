@@ -7,6 +7,8 @@ stages:
       - pipeline/core/io.py
       - pipeline/configs/task.yaml
     outs:
+      - pipeline/configs/generated/task.generated.yaml:
+          cache: false
       - edge/runtime/class_names.yaml:
           cache: false
       - edge/runtime/edge.env:
@@ -20,7 +22,7 @@ stages:
       - pipeline/tasks/classification/preprocess.py
       - pipeline/core/config.py
       - pipeline/core/io.py
-      - pipeline/configs/task.yaml
+      - pipeline/configs/generated/task.generated.yaml
 
   train:
     cmd: python -m pipeline.stages.train
@@ -30,7 +32,7 @@ stages:
       - pipeline/tasks/classification/train.py
       - pipeline/core/config.py
       - pipeline/core/io.py
-      - pipeline/configs/task.yaml
+      - pipeline/configs/generated/task.generated.yaml
 
   evaluate:
     cmd: python -m pipeline.stages.evaluate
@@ -40,7 +42,7 @@ stages:
       - pipeline/tasks/classification/evaluate.py
       - pipeline/core/config.py
       - pipeline/core/io.py
-      - pipeline/configs/task.yaml
+      - pipeline/configs/generated/task.generated.yaml
 
   export_onnx:
     cmd: python -m pipeline.stages.export_onnx
@@ -50,7 +52,7 @@ stages:
       - pipeline/tasks/classification/export_onnx.py
       - pipeline/core/config.py
       - pipeline/core/io.py
-      - pipeline/configs/task.yaml
+      - pipeline/configs/generated/task.generated.yaml
 
   convert_rknn:
     cmd: python -m pipeline.stages.convert_rknn
@@ -60,7 +62,7 @@ stages:
       - pipeline/tasks/classification/convert_rknn.py
       - pipeline/core/config.py
       - pipeline/core/io.py
-      - pipeline/configs/task.yaml
+      - pipeline/configs/generated/task.generated.yaml
 
   register_model:
     cmd: python -m pipeline.stages.register_model
@@ -70,4 +72,4 @@ stages:
       - pipeline/tasks/classification/register_model.py
       - pipeline/core/config.py
       - pipeline/core/io.py
-      - pipeline/configs/task.yaml
+      - pipeline/configs/generated/task.generated.yaml

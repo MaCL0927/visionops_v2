@@ -17,6 +17,8 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
+
+from pipeline.core.config import load_stage_config
 from typing import Dict, List, Tuple
 
 import yaml
@@ -181,8 +183,8 @@ def save_confusion_matrix_png(
 
 
 def main() -> None:
-    data_cfg = load_yaml("pipeline/configs/classification_data.generated.yaml")
-    train_cfg_all = load_yaml("pipeline/configs/classification_train.generated.yaml")
+    data_cfg = load_stage_config("preprocess")
+    train_cfg_all = load_stage_config("train")
 
     paths_cfg = data_cfg.get("paths", {})
     preprocess_cfg = data_cfg.get("preprocess", {})

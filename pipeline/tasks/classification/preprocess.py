@@ -40,6 +40,8 @@ import shutil
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+
+from pipeline.core.config import load_stage_config
 from typing import Dict, List, Tuple
 
 import yaml
@@ -277,7 +279,7 @@ def write_edge_class_names(class_names: List[str]) -> None:
 
 
 def main() -> None:
-    cfg = load_config("pipeline/configs/classification_data.generated.yaml")
+    cfg = load_stage_config("preprocess")
 
     preprocess_cfg = cfg.get("preprocess", {})
     paths_cfg = cfg.get("paths", {})

@@ -26,6 +26,8 @@ import tempfile
 from datetime import datetime
 from glob import glob
 from pathlib import Path
+
+from pipeline.core.config import load_stage_config
 from typing import List, Tuple
 
 import numpy as np
@@ -133,7 +135,7 @@ def load_calibration_dataset(
     if not image_files:
         raise FileNotFoundError(
             f"校准数据集路径中没有找到图像: {dataset_path}\n"
-            "请确认 pipeline/configs/classification_rknn.generated.yaml 中 quantization.dataset 指向 data/processed/val/"
+            "请确认 pipeline/configs/generated/task.generated.yaml 中 quantization.dataset 指向 data/processed/val/"
         )
 
     np.random.shuffle(image_files)
@@ -390,8 +392,8 @@ def convert_to_rknn(cfg: dict) -> dict:
 
 
 def main() -> None:
-    cfg_path = "pipeline/configs/classification_rknn.generated.yaml"
-    cfg = load_config(cfg_path)
+    cfg_path = "pipeline/configs/generated/task.generated.yaml:stages.convert_rknn"
+    cfg = load_stage_config("convert_rknn")
 
     maybe_reexec_in_rknn_env(cfg)
 

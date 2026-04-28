@@ -5,6 +5,8 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
+
+from pipeline.core.config import load_stage_config
 from typing import List
 
 import numpy as np
@@ -305,8 +307,8 @@ def convert_to_rknn(cfg: dict) -> dict:
 
 
 def main() -> None:
-    cfg_path = "pipeline/configs/detection_rknn.generated.yaml"
-    cfg = load_config(cfg_path)
+    cfg_path = "pipeline/configs/generated/task.generated.yaml:stages.convert_rknn"
+    cfg = load_stage_config("convert_rknn")
     
     maybe_reexec_in_rknn_env(cfg)
     

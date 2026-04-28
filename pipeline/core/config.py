@@ -8,6 +8,7 @@ from pipeline.core.io import load_yaml
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = PROJECT_ROOT / "pipeline" / "configs"
 TASK_CONFIG = CONFIG_DIR / "task.yaml"
+GENERATED_CONFIG = CONFIG_DIR / "generated" / "task.generated.yaml"
 
 
 def project_path(path: str | Path) -> Path:
@@ -27,6 +28,18 @@ def require_file(path: str | Path, hint: str | None = None) -> Path:
 
 def load_task_config() -> dict[str, Any]:
     return load_yaml(require_file(TASK_CONFIG, "请先创建 pipeline/configs/task.yaml"))
+
+
+def load_generated_config() -> dict[str, Any]:
+    return load_yaml(require_file(GENERATED_CONFIG, "请先运行 make render-task 或 dvc repro render_task_config"))
+
+
+def load_stage_config(stage: str) -> dict[str, Any]:
+    cfg = load_generated_config()
+    stages = cfg.get("stages", {})
+    if stage not in stages:
+        raise KeyError(f"generated 配置中缺少 stages.{stage}，请检查 render_task_config.py")
+    return stages[stage]
 
 
 def normalize_task_type(task_type: str) -> str:

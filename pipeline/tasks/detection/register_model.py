@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
+
+from pipeline.core.config import load_stage_config
 from typing import Any, Dict, Optional, Tuple
 
 import mlflow
@@ -188,7 +190,7 @@ def ensure_registration_run(
         log_params_if_any({
             "task": registry_cfg.get("task", "detection"),
             "model_name": model_name,
-            "source": "register_model_detection",
+            "source": "register_model",
             "auto_registered": True,
         })
 
@@ -218,8 +220,8 @@ def ensure_registration_run(
 
 
 def main() -> None:
-    cfg_path = Path("pipeline/configs/detection_mlops.generated.yaml")
-    cfg = load_yaml(cfg_path)
+    cfg_path = Path("pipeline/configs/generated/task.generated.yaml:stages.register_model")
+    cfg = load_stage_config("register_model")
 
     registry_cfg = cfg["registry"]
     paths_cfg = cfg["paths"]

@@ -259,14 +259,7 @@ select_config_file() {
   local task="$1"
   local candidates=()
   candidates+=("pipeline/configs/deploy.yaml")
-  candidates+=("pipeline/configs/deploy.yaml")
-  if [[ "$task" == "classification" ]]; then
-    candidates+=("pipeline/configs/legacy/classification/mlops.yaml")
-    candidates+=("pipeline/configs/classification_mlops.generated.yaml")
-  else
-    candidates+=("pipeline/configs/legacy/detection/detection_mlops.yaml")
-    candidates+=("pipeline/configs/detection_mlops.generated.yaml")
-  fi
+  candidates+=("pipeline/configs/generated/task.generated.yaml")
   candidates+=("pipeline/configs/task.yaml")
 
   local p

@@ -5,6 +5,8 @@ import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
+
+from pipeline.core.config import load_stage_config
 from typing import Any
 
 import yaml
@@ -222,12 +224,9 @@ def validate_onnx(output_path: Path) -> dict:
 
 
 def main() -> None:
-    cfg_path = Path("pipeline/configs/detection_export.generated.yaml")
-    if not cfg_path.exists():
-        cfg_path = Path("pipeline/configs/detection_export.yaml")
-    cfg = load_yaml(cfg_path)
+    cfg = load_stage_config("export")
 
-    print(f"导出配置文件: {cfg_path}")
+    print("导出配置: pipeline/configs/generated/task.generated.yaml:stages.export")
 
     export_cfg = cfg["export"]
     ext_cfg = cfg.get("external_export", {})

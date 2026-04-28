@@ -1,93 +1,57 @@
 task:
-  name: detection
-  type: yolo_detection
+  name: classification
+  type: classification
 
 dataset:
-  raw_root: data/raw_detection
-  raw_yaml: data/raw_detection/data.yaml
-  processed_root: data/processed_detection
-  processed_yaml: data/processed_detection/data.yaml
+  raw_root: data/raw_classification
+  processed_root: data/processed_classification
+  val_split: 0.2
 
 classes:
-  names:
-  - 2wheelers
-  - auto
-  - bus
-  - car
-  - pedestrian
-  - truck
-  num_classes: 6
+  names: [box, earphones, pen, phone]
+  num_classes: 4
 
 model:
-  architecture: yolov8n
-  pretrained_weights: models/pretrained/yolov8n.pt
-  input_size: 640
+  architecture: mobilenetv3
+  pretrained: true
+  input_size: [224, 224]
 
 train:
-  epochs: 50
+  epochs: 30
   batch_size: 16
-  lr0: 0.001
-  device: 0
+  lr: 0.001
+  device: cuda
   workers: 4
-  patience: 20
-  cache: false
-  project: models/runs/detect
-  name: visionops_detection
-  exist_ok: true
-
-output:
-  checkpoint_dir: models/checkpoints_detection
-  metrics_dir: models/metrics_detection
-  export_dir: models/export_detection
 
 export:
-  checkpoint_path: models/checkpoints_detection/best.pt
-  output_path: models/export_detection/model.onnx
-  imgsz: 640
+  output_path: models/export_classification/model.onnx
   opset: 12
-  simplify: true
-  dynamic: false
-  mode: rockchip
-
-external_export:
-  yolo_exec: /home/pc/anaconda3/envs/pt2onnx/bin/yolo  # pt转onnx环境
+  simplify: false
 
 rknn:
   python_exec: /home/pc/anaconda3/envs/rknn311/bin/python
   target_platform: rk3588
-  onnx_model: models/export_detection/model.onnx
-  rknn_model: models/export_detection/model.rknn
-  perf_report: models/export_detection/rknn_report.json
-
+  onnx_model: models/export_classification/model.onnx
+  rknn_model: models/export_classification/model.rknn
+  perf_report: models/export_classification/rknn_report.json
+  build:
+    do_quantization: false
   quantization:
-    enable: true
-    dataset: data/processed_detection/images/val
+    dataset: data/processed_classification/val
     dataset_size: 100
     quantized_dtype: asymmetric_quantized-8
 
-  input:
-    mean_values: [[0, 0, 0]]
-    std_values: [[255, 255, 255]]
-    input_size_list: [[1, 3, 640, 640]]
-
-  build:
-    do_quantization: true
-    optimization_level: 3
-
-  runtime:
-    perf_debug: false
-    eval_mem: false
+mlflow:
+  experiment_name: visionops-classification
+  registered_model_name: visionops-classification-rk3588
+  tracking_uri: http://localhost:5000
+  promotion_threshold:
+    accuracy: 0.8
+    latency_ms: 999999
 
 edge:
-  host: 0.0.0.0
-  port: 8080
+  port: 8082
   metrics_port: 9091
   npu_core: auto
-  conf_threshold: 0.25
-  nms_threshold: 0.45
+  topk: 5
   warmup_runs: 3
-
-runtime:
-  generated_dir: edge/runtime
-  class_names_file: edge/runtime/class_names.yaml
-  edge_env_file: edge/runtime/edge.env

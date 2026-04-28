@@ -5,6 +5,8 @@ import shutil
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
+
+from pipeline.core.config import load_stage_config
 from typing import Dict, List
 
 import yaml
@@ -214,8 +216,7 @@ def collect_split_info(
 
 
 def main() -> None:
-    cfg_path = Path("pipeline/configs/detection_data.generated.yaml")
-    cfg = load_yaml(cfg_path)
+    cfg = load_stage_config("preprocess")
 
     dataset_cfg = cfg["dataset"]
     preprocess_cfg = cfg.get("preprocess", {})
@@ -239,7 +240,7 @@ def main() -> None:
 
     if len(class_names) != num_classes:
         raise ValueError(
-            f"配置不一致：detection_data.generated.yaml 中 num_classes={num_classes}，"
+            f"配置不一致：generated/task.generated.yaml 中 num_classes={num_classes}，"
             f"但 data.yaml 中 names 数量为 {len(class_names)}"
         )
 

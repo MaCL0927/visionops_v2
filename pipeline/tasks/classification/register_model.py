@@ -19,6 +19,8 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
+
+from pipeline.core.config import load_stage_config
 from typing import Dict, Any, Optional
 
 import yaml
@@ -138,8 +140,8 @@ def safe_mlflow_register(
         import mlflow
         from mlflow.tracking import MlflowClient
 
-        mlops_cfg = load_yaml("pipeline/configs/classification_mlops.generated.yaml")
-        train_cfg = load_yaml("pipeline/configs/classification_train.generated.yaml")
+        mlops_cfg = load_stage_config("register_model")
+        train_cfg = load_stage_config("train")
 
         tracking_uri = train_cfg.get("mlflow", {}).get("tracking_uri", "http://localhost:5000")
         experiment_name = train_cfg.get("mlflow", {}).get("experiment_name", "visionops-classification")
@@ -219,7 +221,7 @@ def safe_mlflow_register(
 
 
 def main() -> None:
-    mlops_cfg = load_yaml("pipeline/configs/classification_mlops.generated.yaml")
+    mlops_cfg = load_stage_config("register_model")
 
     registry_cfg = mlops_cfg.get("registry", {})
     thresholds = mlops_cfg.get("promotion_threshold", {})

@@ -14,6 +14,8 @@ import json
 import sys
 from datetime import datetime
 from pathlib import Path
+
+from pipeline.core.config import load_stage_config
 from typing import List
 
 import yaml
@@ -67,8 +69,8 @@ def ensure_static_input_size(input_size) -> List[int]:
 
 
 def main() -> None:
-    train_cfg = load_yaml("pipeline/configs/classification_train.generated.yaml")
-    export_cfg = load_yaml("pipeline/configs/classification_export.generated.yaml")
+    train_cfg = load_stage_config("train")
+    export_cfg = load_stage_config("export")
 
     output_cfg = train_cfg.get("output", {})
     onnx_cfg = export_cfg.get("onnx", {})
@@ -114,7 +116,7 @@ def main() -> None:
     if dynamic_axes not in [None, "null"]:
         raise ValueError(
             "分类 RKNN 导出建议不要使用 dynamic_axes。\n"
-            "请将 pipeline/configs/export.yaml 中 onnx.dynamic_axes 设置为 null。"
+            "请将 pipeline/configs/task.yaml 中 export.dynamic_axes 设置为 null。"
         )
 
     if num_classes <= 0:

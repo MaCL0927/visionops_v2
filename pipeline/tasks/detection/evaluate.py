@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
+
+from pipeline.core.config import load_stage_config
 from typing import Any, Dict, List
 
 import yaml
@@ -47,9 +49,8 @@ def extract_class_names(data_yaml: dict) -> List[str]:
 def main() -> None:
     from ultralytics import YOLO
 
-    train_cfg_path = Path("pipeline/configs/detection_train.generated.yaml")
-    train_cfg = load_yaml(train_cfg_path)
-    print(f"评估配置文件: {train_cfg_path}")
+    train_cfg = load_stage_config("train")
+    print("评估配置: pipeline/configs/generated/task.generated.yaml:stages.train")
 
     model_path = Path("models/checkpoints_detection/best.pt")
     dataset_yaml = Path(train_cfg["dataset"]["yaml_path"])
