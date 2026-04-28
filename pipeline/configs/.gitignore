@@ -1,4 +1,1 @@
-/detection_data.generated.yaml
-/detection_train.generated.yaml
-/detection_export.generated.yaml
-/detection_rknn.generated.yaml
+*.generated.yaml

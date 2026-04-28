@@ -23,7 +23,7 @@ python edge/inference/engine.py \
   --task classification \
   --input-size 224 224 \
   --num-classes 2 \
-  --class-names-file /opt/visionops/edge/runtime/class_names_classification.yaml \
+  --class-names-file /opt/visionops/edge/runtime/class_names.yaml \
   --port 8080
 """
 

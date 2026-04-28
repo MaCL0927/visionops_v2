@@ -1,0 +1,57 @@
+task:
+  name: classification
+  type: classification
+
+dataset:
+  raw_root: data/raw_classification
+  processed_root: data/processed_classification
+  val_split: 0.2
+
+classes:
+  names: [box, earphones, pen, phone]
+  num_classes: 4
+
+model:
+  architecture: mobilenetv3
+  pretrained: true
+  input_size: [224, 224]
+
+train:
+  epochs: 30
+  batch_size: 16
+  lr: 0.001
+  device: cuda
+  workers: 4
+
+export:
+  output_path: models/export_classification/model.onnx
+  opset: 12
+  simplify: false
+
+rknn:
+  python_exec: /home/pc/anaconda3/envs/rknn311/bin/python
+  target_platform: rk3588
+  onnx_model: models/export_classification/model.onnx
+  rknn_model: models/export_classification/model.rknn
+  perf_report: models/export_classification/rknn_report.json
+  build:
+    do_quantization: false
+  quantization:
+    dataset: data/processed_classification/val
+    dataset_size: 100
+    quantized_dtype: asymmetric_quantized-8
+
+mlflow:
+  experiment_name: visionops-classification
+  registered_model_name: visionops-classification-rk3588
+  tracking_uri: http://localhost:5000
+  promotion_threshold:
+    accuracy: 0.8
+    latency_ms: 999999
+
+edge:
+  port: 8082
+  metrics_port: 9091
+  npu_core: auto
+  topk: 5
+  warmup_runs: 3

@@ -1,302 +1,73 @@
 stages:
-  # ─────────────────────────────────
-  # Classification Stage 1: 数据预处理
-  # ─────────────────────────────────
-  preprocess:
-    cmd: python pipeline/stages/preprocess.py
-    deps:
-      - pipeline/stages/preprocess.py
-      - pipeline/configs/data.yaml
-      - data/raw/
-    params:
-      - pipeline/configs/data.yaml:
-          - preprocess.img_size
-          - preprocess.augment
-          - preprocess.val_split
-          - preprocess.resize
-          - preprocess.normalize
-          - preprocess.num_workers
-          - paths.raw_data
-          - paths.processed
-    outs:
-      - data/processed/train/
-      - data/processed/val/
-      - data/processed/dataset_stats.json
-      - data/processed/class_names.yaml
-
-
-  # ─────────────────────────────────
-  # Classification Stage 2: 模型训练
-  # ─────────────────────────────────
-  train:
-    cmd: python pipeline/stages/train.py
-    deps:
-      - pipeline/stages/train.py
-      - pipeline/configs/data.yaml
-      - pipeline/configs/train.yaml
-      - server/training/model_utils.py
-      - data/processed/train/
-      - data/processed/val/
-      - data/processed/class_names.yaml
-    params:
-      - pipeline/configs/train.yaml:
-          - model.architecture
-          - model.num_classes
-          - model.pretrained
-          - train.epochs
-          - train.batch_size
-          - train.img_size
-          - train.lr
-          - train.optimizer
-          - train.lr_scheduler
-          - train.weight_decay
-          - early_stopping.enabled
-          - early_stopping.patience
-          - early_stopping.min_delta
-          - amp
-          - device
-          - output.checkpoint_dir
-          - output.metrics_dir
-      - pipeline/configs/data.yaml:
-          - preprocess.normalize
-          - preprocess.num_workers
-    outs:
-      - models/checkpoints/best.pt
-      - models/checkpoints/last.pt
-    metrics:
-      - models/metrics/train_metrics.json:
-          cache: false
-
-  # ─────────────────────────────────
-  # Classification Stage 3: 模型评估
-  # ─────────────────────────────────
-  evaluate:
-    cmd: python pipeline/stages/evaluate.py
-    deps:
-      - pipeline/stages/evaluate.py
-      - pipeline/configs/data.yaml
-      - pipeline/configs/train.yaml
-      - server/training/model_utils.py
-      - models/checkpoints/best.pt
-      - data/processed/val/
-      - data/processed/class_names.yaml
-    outs:
-      - models/metrics/eval_report.json
-      - models/metrics/confusion_matrix.png
-    metrics:
-      - models/metrics/eval_metrics.json:
-          cache: false
-
-  # ─────────────────────────────────
-  # Classification Stage 4: ONNX 导出
-  # ─────────────────────────────────
-  export_onnx:
-    cmd: python pipeline/stages/export_onnx.py
-    deps:
-      - pipeline/stages/export_onnx.py
-      - pipeline/configs/train.yaml
-      - pipeline/configs/export.yaml
-      - server/training/model_utils.py
-      - models/checkpoints/best.pt
-    params:
-      - pipeline/configs/export.yaml:
-          - onnx.opset_version
-          - onnx.dynamic_axes
-          - onnx.input_size
-          - onnx.simplify
-    outs:
-      - models/export/model.onnx
-      - models/export/export_result.json:
-          cache: false
-
-  # ─────────────────────────────────
-  # Classification Stage 5: RKNN 模型转换
-  # ─────────────────────────────────
-  convert_rknn:
-    cmd: python pipeline/stages/convert_rknn.py
-    deps:
-      - pipeline/stages/convert_rknn.py
-      - pipeline/configs/rknn.yaml
-      - models/export/model.onnx
-      - data/processed/val/
-    params:
-      - pipeline/configs/rknn.yaml:
-          - target_platform
-          - python_exec
-          - quantization.do_quantization
-          - quantization.dataset
-          - quantization.dataset_size
-          - quantization.quantized_dtype
-          - quantization.pre_compile
-          - io_config.input_size_list
-          - io_config.mean_values
-          - io_config.std_values
-          - npu_core_mask
-          - perf_debug
-          - eval_mem
-          - check_output_shapes
-          - output.onnx_model
-          - output.rknn_model
-          - output.perf_report
-    outs:
-      - models/export/model.rknn
-      - models/export/rknn_perf_report.json:
-          cache: false
-
-  # ─────────────────────────────────
-  # Classification Stage 6: 模型注册
-  # ─────────────────────────────────
-  register_model:
-    cmd: python pipeline/stages/register_model.py
-    deps:
-      - pipeline/stages/register_model.py
-      - pipeline/configs/mlops.yaml
-      - models/export/model.onnx
-      - models/export/model.rknn
-      - models/export/rknn_perf_report.json
-      - models/export/export_result.json
-      - models/metrics/eval_metrics.json
-    params:
-      - pipeline/configs/mlops.yaml:
-          - registry.model_name
-          - promotion_threshold.accuracy
-          - promotion_threshold.latency_ms
-          - promotion_threshold.confidence
-    metrics:
-      - models/metrics/registry_result.json:
-          cache: false
-
-  # ─────────────────────────────────
-  # Detection Stage 0: 生成派生文件
-  # ─────────────────────────────────
-
   render_task_config:
-    cmd: python pipeline/utils/render_task_config.py
+    cmd: python -m pipeline.utils.render_task_config
     deps:
       - pipeline/utils/render_task_config.py
+      - pipeline/core/config.py
+      - pipeline/core/io.py
       - pipeline/configs/task.yaml
-      - data/raw_detection/data.yaml
     outs:
-      - pipeline/configs/detection_data.generated.yaml
-      - pipeline/configs/detection_train.generated.yaml
-      - pipeline/configs/detection_export.generated.yaml
-      - pipeline/configs/detection_rknn.generated.yaml
-      - edge/runtime/class_names.yaml
-      - edge/runtime/edge.env
-
-  # ─────────────────────────────────
-  # Detection Stage 1: 数据预处理
-  # ─────────────────────────────────
-  preprocess_detection:
-    cmd: python pipeline/stages/preprocess_detection.py
-    deps:
-      - pipeline/stages/preprocess_detection.py
-      - pipeline/configs/detection_data.generated.yaml
-      - data/raw_detection/
-    outs:
-      - data/processed_detection/images/train/
-      - data/processed_detection/images/val/
-      - data/processed_detection/labels/train/
-      - data/processed_detection/labels/val/
-      - data/processed_detection/data.yaml
-      - data/processed_detection/dataset_stats.json
-
-  # ─────────────────────────────────
-  # Detection Stage 2: 模型训练
-  # ─────────────────────────────────
-  train_detection:
-    cmd: python pipeline/stages/train_detection.py
-    deps:
-      - pipeline/stages/train_detection.py
-      - pipeline/configs/detection_train.generated.yaml
-      - data/processed_detection/data.yaml
-      - data/processed_detection/images/train/
-      - data/processed_detection/labels/train/
-      - data/processed_detection/images/val/
-      - data/processed_detection/labels/val/
-    outs:
-      - models/checkpoints_detection/best.pt
-      - models/checkpoints_detection/last.pt
-    metrics:
-      - models/metrics_detection/train_metrics.json:
+      - edge/runtime/class_names.yaml:
+          cache: false
+      - edge/runtime/edge.env:
           cache: false
 
-  # ─────────────────────────────────
-  # Detection Stage 3: 模型评估
-  # ─────────────────────────────────
-  evaluate_detection:
-    cmd: python pipeline/stages/evaluate_detection.py
+  preprocess:
+    cmd: python -m pipeline.stages.preprocess
     deps:
-      - pipeline/stages/evaluate_detection.py
-      - pipeline/configs/detection_train.generated.yaml
-      - models/checkpoints_detection/best.pt
-      - data/processed_detection/data.yaml
-      - data/processed_detection/images/val/
-      - data/processed_detection/labels/val/
-    outs:
-      - models/metrics_detection/eval_report.json
-    metrics:
-      - models/metrics_detection/eval_metrics.json:
-          cache: false
+      - pipeline/stages/preprocess.py
+      - pipeline/tasks/detection/preprocess.py
+      - pipeline/tasks/classification/preprocess.py
+      - pipeline/core/config.py
+      - pipeline/core/io.py
+      - pipeline/configs/task.yaml
 
-  # ─────────────────────────────────
-  # Detection Stage 4: ONNX导出
-  # ─────────────────────────────────
-  export_onnx_detection:
-    cmd: python pipeline/stages/export_onnx_detection.py
+  train:
+    cmd: python -m pipeline.stages.train
     deps:
-      - pipeline/stages/export_onnx_detection.py
-      - pipeline/configs/detection_export.generated.yaml
-      - models/checkpoints_detection/best.pt
-    outs:
-      - models/export_detection/model.onnx
-      - models/export_detection/export_result.json:
-          cache: false
+      - pipeline/stages/train.py
+      - pipeline/tasks/detection/train.py
+      - pipeline/tasks/classification/train.py
+      - pipeline/core/config.py
+      - pipeline/core/io.py
+      - pipeline/configs/task.yaml
 
-  # ─────────────────────────────────
-  # Detection Stage 5: RKNN模型转换（RK3588）
-  # ─────────────────────────────────
-  convert_rknn_detection:
-    cmd: python pipeline/stages/convert_rknn_detection.py
+  evaluate:
+    cmd: python -m pipeline.stages.evaluate
     deps:
-      - pipeline/stages/convert_rknn_detection.py
-      - pipeline/configs/detection_rknn.generated.yaml
-      - models/export_detection/model.onnx
-      - data/processed_detection/images/val/
-    outs:
-      - models/export_detection/model.rknn
-      - models/export_detection/rknn_report.json:
-          cache: false
+      - pipeline/stages/evaluate.py
+      - pipeline/tasks/detection/evaluate.py
+      - pipeline/tasks/classification/evaluate.py
+      - pipeline/core/config.py
+      - pipeline/core/io.py
+      - pipeline/configs/task.yaml
 
-  # ─────────────────────────────────
-  # Detection Stage 6: 注册到MLflow Model Registry
-  # ─────────────────────────────────
-  register_model_detection:
-    cmd: python pipeline/stages/register_model_detection.py
+  export_onnx:
+    cmd: python -m pipeline.stages.export_onnx
     deps:
-      - pipeline/stages/register_model_detection.py
-      - pipeline/configs/detection_mlops.yaml
-      - models/export_detection/model.rknn
-      - models/metrics_detection/eval_metrics.json
-      - models/metrics_detection/train_metrics.json
-    params:
-      - pipeline/configs/detection_mlops.yaml:
-        - registry.model_name
-        - registry.task
-        - registry.promotion_threshold.map50
-        - registry.promotion_threshold.map50_95
-        - registry.promotion_threshold.latency_ms
-        - registry.tags.platform
-        - registry.tags.quantized
-        - registry.tags.auto_registered
-        - registry.tags.task
-        - registry.tags.model_family
-        - paths.eval_metrics
-        - paths.train_metrics
-        - paths.mlflow_run_id
-        - paths.onnx_model
-        - paths.rknn_model
-        - paths.registry_result
-    metrics:
-      - models/metrics_detection/registry_result.json:
-          cache: false
+      - pipeline/stages/export_onnx.py
+      - pipeline/tasks/detection/export_onnx.py
+      - pipeline/tasks/classification/export_onnx.py
+      - pipeline/core/config.py
+      - pipeline/core/io.py
+      - pipeline/configs/task.yaml
+
+  convert_rknn:
+    cmd: python -m pipeline.stages.convert_rknn
+    deps:
+      - pipeline/stages/convert_rknn.py
+      - pipeline/tasks/detection/convert_rknn.py
+      - pipeline/tasks/classification/convert_rknn.py
+      - pipeline/core/config.py
+      - pipeline/core/io.py
+      - pipeline/configs/task.yaml
+
+  register_model:
+    cmd: python -m pipeline.stages.register_model
+    deps:
+      - pipeline/stages/register_model.py
+      - pipeline/tasks/detection/register_model.py
+      - pipeline/tasks/classification/register_model.py
+      - pipeline/core/config.py
+      - pipeline/core/io.py
+      - pipeline/configs/task.yaml

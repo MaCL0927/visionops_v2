@@ -239,14 +239,14 @@ POST /api/refresh_models
 - `backup_时间.rknn` 会显示为历史模型，可手动选择进行对比测试。
 - 右侧新增“最近采集图片”列表，默认读取当前固定采集目录的 `all_images/`。
 - 点击图片后，点击“开始检测”，后端会使用选中模型启动独立验证推理服务，默认端口为 `8082`。
-- 分类验证固定使用 `classification` 任务，并优先读取 `/opt/visionops/edge/runtime/class_names_classification.yaml`。
+- 分类验证固定使用 `classification` 任务，并优先读取 `/opt/visionops/edge/runtime/class_names.yaml`。
 - 生产推理服务 `8080` 不会被 v6.2 修改；v6.2 只使用独立的验证服务端口。
 
 常用环境变量：
 
 ```bash
 export VISIONOPS_MODELS_DIR=/opt/visionops/models
-export VISIONOPS_CLASSIFICATION_CLASS_NAMES_FILE=/opt/visionops/edge/runtime/class_names_classification.yaml
+export VISIONOPS_CLASSIFICATION_CLASS_NAMES_FILE=/opt/visionops/edge/runtime/class_names.yaml
 export VISIONOPS_VALIDATION_INFER_PORT=8082
 export VISIONOPS_VALIDATION_ENGINE_PATH=/opt/visionops/edge/inference/engine.py
 export VISIONOPS_CLASSIFICATION_INPUT_SIZE=224,224
@@ -293,7 +293,7 @@ export VISIONOPS_VALIDATION_REALTIME_INTERVAL_MS=1000
 
 ## v6.5 更新说明：模型验证读取同名 YAML
 
-v6.5 起，模型验证页不再依赖全局 `class_names_classification.yaml`，而是读取 `/opt/visionops/models` 下的版本化模型对：
+v6.5 起，模型验证页不再依赖全局 `class_names.yaml`，而是读取 `/opt/visionops/models` 下的版本化模型对：
 
 ```text
 xxx.rknn

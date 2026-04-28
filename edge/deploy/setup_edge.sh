@@ -137,7 +137,7 @@ resolve_runtime_defaults() {
   if [[ -n "${CLASS_NAMES_FILE:-}" ]]; then
     DEFAULT_CLASS_NAMES_FILE="${CLASS_NAMES_FILE}"
   elif [[ "${DEFAULT_TASK}" == "classification" ]]; then
-    DEFAULT_CLASS_NAMES_FILE="${RUNTIME_DIR}/class_names_classification.yaml"
+    DEFAULT_CLASS_NAMES_FILE="${RUNTIME_DIR}/class_names.yaml"
   else
     DEFAULT_CLASS_NAMES_FILE="${RUNTIME_DIR}/class_names.yaml"
   fi
@@ -218,6 +218,15 @@ copy_helper_scripts() {
     chmod +x "${SCRIPT_DST_DIR}/push.sh"
   fi
 
+  for helper in stop_inference.sh switch_model.sh; do
+    if [[ -f "${SCRIPT_DIR}/${helper}" ]]; then
+      cp -f "${SCRIPT_DIR}/${helper}" "${SCRIPT_DST_DIR}/${helper}"
+      chmod +x "${SCRIPT_DST_DIR}/${helper}"
+      cp -f "${SCRIPT_DIR}/${helper}" "${EDGE_DST_DIR}/deploy/${helper}" 2>/dev/null || true
+      chmod +x "${EDGE_DST_DIR}/deploy/${helper}" 2>/dev/null || true
+    fi
+  done
+
   cp -f "${BASH_SOURCE[0]}" "${SCRIPT_DST_DIR}/setup_edge.sh"
   chmod +x "${SCRIPT_DST_DIR}/setup_edge.sh"
 
@@ -228,7 +237,7 @@ prepare_runtime_class_names() {
   log_info "准备 runtime 类别文件..."
 
   local detection_file="${RUNTIME_DIR}/class_names.yaml"
-  local classification_file="${RUNTIME_DIR}/class_names_classification.yaml"
+  local classification_file="${RUNTIME_DIR}/class_names.yaml"
 
   if [[ ! -f "${detection_file}" ]]; then
     log_warn "未找到 detection 类别文件，创建兜底文件: ${detection_file}"
@@ -397,6 +406,26 @@ prepare_placeholder_model() {
   fi
 }
 
+configure_sudoers_for_switching() {
+  if [[ "${RUN_USER}" == "root" ]]; then
+    return
+  fi
+
+  local sudoers_file="/etc/sudoers.d/visionops-${RUN_USER}"
+  log_info "配置 ${RUN_USER} 的 VisionOps 免密 sudo，用于模型切换与释放推理端口..."
+
+  cat > "${sudoers_file}" <<EOF_SUDO
+${RUN_USER} ALL=(ALL) NOPASSWD: /bin/systemctl, /usr/bin/systemctl, /usr/bin/pkill, /bin/pkill, /usr/bin/fuser, /bin/fuser, /usr/bin/install, /bin/mkdir, /bin/cp, /bin/rm, /bin/kill, /usr/bin/kill
+EOF_SUDO
+  chmod 0440 "${sudoers_file}"
+
+  if command -v visudo >/dev/null 2>&1; then
+    visudo -cf "${sudoers_file}" >/dev/null
+  fi
+
+  log_ok "已配置免密 sudo: ${sudoers_file}"
+}
+
 fix_permissions() {
   log_info "修正目录权限..."
   chown -R "${RUN_USER}:${RUN_USER}" "${INSTALL_DIR}" || true
@@ -445,6 +474,8 @@ systemd 服务:
    sudo systemctl status visionops-inference
 5. 健康检查:
    curl http://localhost:${DEFAULT_PORT}/health
+6. 切换历史模型统一使用:
+   sudo bash ${EDGE_DST_DIR}/deploy/switch_model.sh <model.rknn> <meta.yaml> ${DEFAULT_PORT}
 
 若要测试 RTSP:
   ffprobe -rtsp_transport tcp "rtsp://admin:Abcd123_@192.168.2.64:554/Streaming/Channels/101"
@@ -473,6 +504,7 @@ main() {
   write_inference_service
   write_monitor_service
   prepare_placeholder_model
+  configure_sudoers_for_switching
   fix_permissions
   register_services
   print_summary

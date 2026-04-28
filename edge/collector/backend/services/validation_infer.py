@@ -340,6 +340,49 @@ def _read_last_log_lines(max_lines: int = 80) -> str:
         return ""
 
 
+
+def _resolve_switch_model_script() -> Path:
+    candidates = [
+        Path("/opt/visionops/edge/deploy/switch_model.sh"),
+        Path(__file__).resolve().parents[3] / "deploy" / "switch_model.sh",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p.resolve()
+    return candidates[0]
+
+
+def _switch_model_via_system_service(model_path: Path, meta_path: str) -> Dict[str, Any]:
+    """通过统一脚本切换当前 visionops-inference 服务，避免多个 engine.py 抢占同一端口。"""
+    script = _resolve_switch_model_script()
+    if not script.exists():
+        raise FileNotFoundError(f"未找到模型切换脚本: {script}")
+
+    cmd = [
+        "bash",
+        str(script),
+        str(model_path),
+        str(meta_path),
+        str(_validation_port()),
+        "visionops-inference",
+    ]
+    logger.info("切换验证模型: %s", " ".join(cmd))
+    result = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=max(30.0, float(VALIDATION_INFER_TIMEOUT_SEC) + 20.0),
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "切换模型失败。请确认板端当前用户具备免密 sudo，且 stop_inference.sh/switch_model.sh 已同步。\n"
+            f"命令: {' '.join(cmd)}\n"
+            f"输出:\n{result.stdout}"
+        )
+    health = _json_get(_health_url(), timeout=2.0)
+    return {"health": health, "stdout": result.stdout}
+
 def ensure_validation_engine(model_name: str) -> Dict[str, Any]:
     global _validation_process, _validation_log_file, _loaded_model_name, _loaded_model_path, _loaded_meta_path, _loaded_task
 
@@ -347,9 +390,6 @@ def ensure_validation_engine(model_name: str) -> Dict[str, Any]:
     meta = _read_model_meta(model_path)
     meta_path = meta["path"]
     task = meta["task"]
-    engine_path = _resolve_engine_path()
-    if not engine_path.exists():
-        raise FileNotFoundError(f"未找到推理引擎 engine.py: {engine_path}")
 
     # 1) 如果当前端口已经是目标模型，则直接复用。
     try:
@@ -361,95 +401,33 @@ def ensure_validation_engine(model_name: str) -> Dict[str, Any]:
             _loaded_task = task
             return {"reused": True, "health": health, "model_path": str(model_path), "meta": meta}
         logger.info(
-            "验证端口已有服务但不是目标模型，将切换。current_model=%s, current_task=%s, target_model=%s, target_task=%s",
+            "验证端口已有服务但不是目标模型，将通过 switch_model.sh 切换。current_model=%s, current_task=%s, target_model=%s, target_task=%s",
             health.get("model_path"), health.get("task"), str(model_path), task,
         )
     except Exception:
-        # 端口未启动服务或健康检查失败，继续清理后启动。
+        # 端口未启动服务或健康检查失败，继续通过 switch_model.sh 切换。
         pass
 
-    # 2) 目标模型不匹配时，清理当前进程对象和端口残留 engine。
+    # 2) 统一通过 systemd 服务切换模型，不再由 collector 直接启动第二个 engine.py。
+    #    这可以避免检测/分类来回切换时多个 engine.py 抢占同一端口。
     _stop_validation_process()
-    _kill_validation_engine_on_port()
+    switched = _switch_model_via_system_service(model_path, meta_path)
+    health = switched.get("health", {})
+    if not _health_matches_model(health, model_path, meta_path, task):
+        raise RuntimeError(
+            "切换后健康检查与目标模型不一致："
+            f"health.model_path={health.get('model_path')}, "
+            f"health.class_names_file={health.get('class_names_file')}, "
+            f"health.task={health.get('task')}, "
+            f"target_model={model_path}, target_meta={meta_path}, target_task={task}"
+        )
 
-    unrelated = _port_has_unrelated_process()
-    if unrelated:
-        raise RuntimeError(unrelated)
-    if not _wait_validation_port_free(timeout=3.0):
-        raise RuntimeError(f"验证端口 {_validation_port()} 未能释放，请手动检查: ss -lntp | grep :{_validation_port()}")
-
-    # 3) 启动目标模型对应的验证 engine。
-    h, w = meta["input_size"]
-    cmd = [
-        sys.executable,
-        str(engine_path),
-        "--model", str(model_path),
-        "--task", task,
-        "--input-size", str(h), str(w),
-        "--num-classes", str(meta["num_classes"]),
-        "--class-names-file", meta_path,
-        "--port", str(_validation_port()),
-        "--host", "0.0.0.0",
-        "--npu-core", VALIDATION_NPU_CORE,
-        "--warmup-runs", str(VALIDATION_WARMUP_RUNS),
-    ]
-    if task == "classification":
-        cmd.extend(["--topk", str(meta["topk"])])
-    else:
-        cmd.extend(["--conf-threshold", str(meta["conf_threshold"]), "--nms-threshold", str(meta["nms_threshold"])])
-
-    logger.info("启动验证推理服务: %s", " ".join(cmd))
-    env = os.environ.copy()
-    env.setdefault("PYTHONUNBUFFERED", "1")
-    log_path = Path(f"/tmp/visionops_validation_engine_{_validation_port()}.log")
-    _validation_log_file = log_path.open("a", encoding="utf-8")
-    _validation_log_file.write("\n" + "=" * 80 + "\n")
-    _validation_log_file.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] start: {' '.join(cmd)}\n")
-    _validation_log_file.flush()
-
-    _validation_process = subprocess.Popen(
-        cmd,
-        cwd=str(engine_path.parent),
-        env=env,
-        stdout=_validation_log_file,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-    )
     _loaded_model_name = model_path.name
     _loaded_model_path = str(model_path)
     _loaded_meta_path = meta_path
     _loaded_task = task
-
-    # 4) readiness 必须严格匹配目标模型，不能只看 status=ok，避免误读旧服务。
-    deadline = time.time() + max(3.0, float(VALIDATION_INFER_TIMEOUT_SEC))
-    last_error = ""
-    while time.time() < deadline:
-        if _validation_process.poll() is not None:
-            log_tail = _read_last_log_lines()
-            _stop_validation_process()
-            raise RuntimeError(
-                "验证推理服务启动失败，进程已退出。"
-                + (f"最近日志:\n{log_tail}" if log_tail else "")
-            )
-        try:
-            health = _json_get(_health_url(), timeout=1.0)
-            if _health_matches_model(health, model_path, meta_path, task):
-                return {"reused": False, "health": health, "model_path": str(model_path), "meta": meta}
-            last_error = (
-                f"端口已响应但不是目标模型: "
-                f"health.model_path={health.get('model_path')}, "
-                f"health.class_names_file={health.get('class_names_file')}, "
-                f"health.task={health.get('task')}"
-            )
-        except Exception as e:
-            last_error = str(e)
-        time.sleep(0.4)
-
-    log_tail = _read_last_log_lines()
-    raise TimeoutError(
-        f"验证推理服务启动超时: {last_error}"
-        + (f"\n最近日志:\n{log_tail}" if log_tail else "")
-    )
+    _validation_process = None
+    return {"reused": False, "health": health, "model_path": str(model_path), "meta": meta}
 
 
 # ────────────────────────────────────────────────

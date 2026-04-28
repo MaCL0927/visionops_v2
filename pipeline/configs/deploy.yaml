@@ -1,0 +1,8 @@
+edge_devices:
+  - id: rk3588-001
+    host: 192.168.1.200
+    port: 22
+    user: ubuntu
+    deploy_path: /opt/visionops/models/
+    service_name: visionops-inference
+    health_url: http://localhost:8080/health
