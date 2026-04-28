@@ -1,0 +1,5 @@
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+# 可选：若需要后端读取 RTSP/USB 摄像头，请确保当前环境可 import cv2。
+# 在普通 x86 开发机可安装：opencv-python>=4.8.0
+PyYAML>=6.0

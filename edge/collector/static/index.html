@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VisionOps Edge Collector UI v6.5</title>
+  <link rel="stylesheet" href="/static/styles.css?v=v6_6" />
+</head>
+<body>
+  <header class="topbar">
+    <nav id="factoryTabs" class="factory-tabs">
+      <button class="top-tab active" data-page="calibrationPage">校验</button>
+      <button class="top-tab" data-page="collectPage">采集标注</button>
+      <button class="top-tab" data-page="validatePage">模型验证</button>
+    </nav>
+    <button id="modeToggle" class="mode-toggle">工厂模式</button>
+  </header>
+
+  <main class="shell">
+    <section id="factoryMode" class="mode-page active">
+      <section id="calibrationPage" class="page active">
+        <div class="two-col-layout">
+          <aside class="left-steps">
+            <button class="step-btn active" data-cal-step="positionCheck">
+              <span class="step-num">1</span>
+              <span class="step-text"><b>位置校验</b><em>标准图半透明叠加，对齐摄像头位置</em></span>
+            </button>
+            <button class="step-btn" data-cal-step="lightCheck">
+              <span class="step-num">2</span>
+              <span class="step-text"><b>光照校验</b><em>左侧标准图，右侧实时画面对比</em></span>
+            </button>
+            <div class="tip-card">
+              <b>操作说明</b>
+              <p id="calibrationTip">先完成摄像头位置校验，摄像头画面与半透明标准图对齐即可。</p>
+            </div>
+          </aside>
+
+          <section class="content-card">
+            <section id="positionCheck" class="subscreen active">
+              <div class="screen-head">
+                <div>
+                  <div class="kicker">校验 / 第 1 步</div>
+                  <h1>摄像头位置校验</h1>
+                  <p>标准图以半透明方式覆盖在实时画面上，工人根据重合情况调整摄像头位置。</p>
+                </div>
+                <div class="status-pill">位置校验中</div>
+              </div>
+              <div class="position-stage">
+                <div class="camera-base"></div>
+                <div class="standard-overlay">
+                  <div class="outline a"></div>
+                  <div class="outline b"></div>
+                  <div class="cross-line h"></div>
+                  <div class="cross-line v"></div>
+                  <span>半透明标准图</span>
+                </div>
+                <div class="floating-hint">调整摄像头，直到画面与标准图重合</div>
+              </div>
+            </section>
+
+            <section id="lightCheck" class="subscreen">
+              <div class="screen-head">
+                <div>
+                  <div class="kicker">校验 / 第 2 步</div>
+                  <h1>光照校验</h1>
+                  <p>左边显示标准图，右边显示实时画面，对比亮度与阴影是否一致。</p>
+                </div>
+                <div class="status-pill soft">光照对比</div>
+              </div>
+              <div class="compare-layout">
+                <div class="compare-card">
+                  <div class="compare-title">标准图</div>
+                  <div class="reference-stage bright"></div>
+                </div>
+                <div class="compare-card">
+                  <div class="compare-title">实时摄像头画面</div>
+                  <div class="reference-stage live"></div>
+                </div>
+              </div>
+            </section>
+          </section>
+        </div>
+      </section>
+
+      <section id="collectPage" class="page">
+        <div class="two-col-layout">
+          <aside class="left-steps">
+            <button class="step-btn active" data-collect-step="captureStep">
+              <span class="step-num">1</span>
+              <span class="step-text"><b>拍照采集</b><em>取图 / 取正样本 / 取负样本</em></span>
+            </button>
+            <button class="step-btn" data-collect-step="uploadStep">
+              <span class="step-num">2</span>
+              <span class="step-text"><b>确认上传</b><em>查看三个文件夹并打包上传</em></span>
+            </button>
+            <div class="tip-card">
+              <b>数据存储</b>
+              <p>系统内部会维护三个固定文件夹：全部图片、正样本、负样本。点击不同按钮后，图片会直接进入对应文件夹。</p>
+            </div>
+          </aside>
+
+          <section class="content-card">
+            <section id="captureStep" class="subscreen active">
+              <div class="screen-head collect-head capture-head">
+                <div class="capture-title-block">
+                  <div class="kicker">采集标注 / 第 1 步</div>
+                  <h1>拍照采集</h1>
+                  <p>无需选择数据集，也无需双击画面。点击按钮后，系统会按“设备ID_用户ID_时间”命名；正/负样本会同步进入全部图片底库。</p>
+                </div>
+                <div class="capture-actions capture-actions-main">
+                  <button id="captureAllBtn" class="big-action secondary">取图</button>
+                  <button id="capturePositiveBtn" class="big-action primary">取正样本</button>
+                  <button id="captureNegativeBtn" class="big-action warning">取负样本</button>
+                </div>
+                <div class="stats-inline">
+                  <span>全部 <b id="allCount">0</b></span>
+                  <span>正样本 <b id="positiveCount">0</b></span>
+                  <span>负样本 <b id="negativeCount">0</b></span>
+                </div>
+              </div>
+              <div id="captureStage" class="camera-stage capture-fill">
+                <video id="cameraVideo" class="camera-video" autoplay playsinline muted></video>
+                <img id="backendCamera" class="camera-video" alt="后端摄像头 / RTSP 画面" />
+                <canvas id="captureCanvas" class="hidden-canvas"></canvas>
+                <div id="simulatedCamera" class="simulated-camera active">
+                  <div class="monitor-box a"></div>
+                  <div class="monitor-box b"></div>
+                </div>
+                <div class="camera-label"><b id="cameraStatusTitle">实时摄像头画面</b><span id="cameraStatusText">正在请求笔记本摄像头；失败时自动使用模拟画面</span></div>
+                <div class="double-hint">请点击上方按钮取图</div>
+              </div>
+            </section>
+
+            <section id="uploadStep" class="subscreen">
+              <div class="screen-head collect-head">
+                <div>
+                  <div class="kicker">采集标注 / 第 2 步</div>
+                  <div class="title-with-dataset">
+                    <h1>预览三个文件夹并上传</h1>
+                  </div>
+                  <p>确认无误后，系统只打包当前固定采集目录，不向工人暴露数据集选择。</p>
+                </div>
+                <button id="openUploadModal" class="big-action primary compact">打包并上传</button>
+              </div>
+
+              <div class="folder-card-strip">
+                <div class="folder-card active" data-folder-card="all"><b>全部图片</b><span>all_images/</span><em id="allFolderCount">0 张</em></div>
+                <div class="folder-card" data-folder-card="positive"><b>正样本</b><span>positive/</span><em id="posFolderCount">0 张</em></div>
+                <div class="folder-card" data-folder-card="negative"><b>负样本</b><span>negative/</span><em id="negFolderCount">0 张</em></div>
+              </div>
+
+              <div id="folderPreviewGrid" class="preview-grid"></div>
+            </section>
+          </section>
+        </div>
+      </section>
+
+      <section id="validatePage" class="page">
+        <div class="validate-layout">
+          <aside class="model-select">
+            <div class="section-title">
+              <div class="kicker">模型列表</div>
+              <h1>选择模型</h1>
+              <p>系统已自动选择最新模型，也可以选择历史模型查看分类效果。</p>
+            </div>
+            <div id="modelList" class="model-list">
+              <div class="empty-models">正在读取模型...</div>
+            </div>
+            <button id="refreshModels" class="big-action secondary">刷新模型</button>
+          </aside>
+
+          <section class="content-card validate-card">
+            <div class="screen-head validate-head">
+              <div>
+                <div class="kicker">模型验证 / v6.7</div>
+                <h1>检测模型选图 / 拍照 / 实时验证</h1>
+                <p>系统会根据模型同名 YAML 自动识别分类/检测任务。检测模型支持选图检测、拍照检测和实时检测，并在结果图上显示检测框。</p>
+              </div>
+              <div class="validate-action-row">
+                <button id="runSingleImageInfer" class="big-action validate-btn compact">选图检测</button>
+                <button id="captureAndInfer" class="big-action validate-btn compact">拍照检测</button>
+                <button id="realtimeInferToggle" class="big-action validate-btn compact" aria-pressed="false">实时检测</button>
+              </div>
+            </div>
+
+            <div class="single-infer-layout">
+              <section class="image-picker-panel">
+                <div class="panel-title-row">
+                  <div>
+                    <div class="kicker">测试图片</div>
+                    <h2>最近采集图片</h2>
+                  </div>
+                  <button id="refreshValidationImages" class="mini-btn">刷新图片</button>
+                </div>
+                <div id="validationImageGrid" class="validation-image-grid">
+                  <div class="empty-models">正在读取图片...</div>
+                </div>
+              </section>
+
+              <section class="infer-result-panel">
+                <div class="selected-info-card">
+                  <div><span>当前模型</span><b id="selectedModelName">自动选择最新模型</b></div>
+                  <div><span>当前图片</span><b id="selectedImageName">请先选择图片</b></div>
+                </div>
+
+                <div id="selectedImagePreview" class="selected-image-preview">
+                  <span>选择左侧图片或点击“拍照检测”后在这里预览</span>
+                </div>
+
+                <div id="classificationResult" class="classification-result idle">
+                  <span class="result-label">检测结果</span>
+                  <b id="resultClassName">等待检测</b>
+                  <em id="resultConfidence">置信度 --</em>
+                  <small id="resultLatency">耗时 --</small>
+                </div>
+
+                <div id="topkResult" class="topk-result"></div>
+              </section>
+            </div>
+          </section>
+        </div>
+      </section>
+    </section>
+
+    <section id="productionMode" class="mode-page">
+      <div class="production-wrap">
+        <div class="production-head">
+          <div>
+            <div class="kicker">生产模式</div>
+            <h1>实时监控检测画面</h1>
+            <p>该模式下隐藏校验、采集标注、模型验证页面，仅保留监控画面用于现场展示模型检测结果。</p>
+          </div>
+          <div class="status-pill">连续监控中</div>
+        </div>
+        <div class="production-stage">
+          <div class="camera-label"><b>生产线实时监控</b><span>模型结果叠加显示</span></div>
+          <div class="prod-box p1"><span>person 0.96</span></div>
+          <div class="prod-box p2"><span>forklift 0.91</span></div>
+          <div class="prod-box p3"><span>smoke 0.73</span></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="uploadModal" class="modal-mask">
+    <div class="dialog wide">
+      <div class="dialog-head">
+        <div>
+          <h2>上传确认</h2>
+          <p>关键字段默认填写，设备 ID 和客户 ID 为必填项；确认后会打包 all_images / positive / negative，并上传到电脑端 data 目录。</p>
+        </div>
+        <button id="closeUploadModal" class="close-btn">×</button>
+      </div>
+      <div class="form-grid">
+        <label>设备 ID<span class="required">*</span><input id="uploadDeviceId" value="rk3588-001" /><small>自动拉取设备 ID</small></label>
+        <label>客户 ID<span class="required">*</span><input id="uploadCustomerId" value="CUST-001" /></label>
+        <label>联系方式（选填）<input id="uploadContact" placeholder="例如：手机号、微信或邮箱" /></label>
+        <label class="full">备注<textarea id="uploadRemark" placeholder="可选，不会填可以留空"></textarea></label>
+      </div>
+      <div class="dialog-actions">
+        <button id="cancelUploadModal" class="big-action secondary compact">取消</button>
+        <button id="confirmUpload" class="big-action primary compact">确认上传</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="imageViewerModal" class="modal-mask">
+    <div class="dialog image-dialog">
+      <div class="dialog-head">
+        <div>
+          <h2 id="viewerTitle">图片预览</h2>
+          <p id="viewerSubtitle">点击删除会从当前文件夹中移除该图片。</p>
+        </div>
+        <button id="closeImageViewer" class="close-btn">×</button>
+      </div>
+      <img id="viewerImage" class="viewer-image" alt="放大预览" />
+      <div class="dialog-actions">
+        <button id="deleteViewerImage" class="big-action danger compact">删除图片</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+  <script src="/static/app.js?v=v6_6"></script>
+</body>
+</html>
