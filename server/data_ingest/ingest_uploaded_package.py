@@ -35,6 +35,60 @@ from typing import Any
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 REQUIRED_DIRS = ["all_images", "positive", "negative"]
 
+def sync_manifest_to_model_context(
+    package_dir: Path,
+    model_context_dir: Path = Path("data/model_context"),
+) -> Path:
+    """
+    将当前采集包的 manifest.json 同步到固定位置：
+    data/model_context/manifest.json
+
+    注意：
+    1. 原始 manifest 保留在 raw_collected/<package_name>/manifest.json
+    2. 固定 manifest 作为当前训练/部署上下文
+    """
+    src_manifest = package_dir / "manifest.json"
+
+    if not src_manifest.exists():
+        raise FileNotFoundError(f"未找到采集包 manifest.json: {src_manifest}")
+
+    model_context_dir.mkdir(parents=True, exist_ok=True)
+    dst_manifest = model_context_dir / "manifest.json"
+
+    with src_manifest.open("r", encoding="utf-8") as f:
+        manifest = json.load(f)
+
+    package_name = package_dir.name
+
+    # 尽量兼容不同字段名
+    device_id = (
+        manifest.get("device_id")
+        or manifest.get("equipment_id")
+        or manifest.get("edge_device_id")
+        or "unknown-device"
+    )
+
+    customer_id = (
+        manifest.get("customer_id")
+        or manifest.get("cust_id")
+        or manifest.get("user_id")
+        or "unknown-customer"
+    )
+
+    # 这里不要破坏原始字段，只追加标准字段
+    manifest["device_id"] = device_id
+    manifest["customer_id"] = customer_id
+    manifest["package_name"] = package_name
+    manifest["source_manifest"] = str(src_manifest)
+    manifest["model_context_updated_at"] = datetime.now().isoformat(timespec="seconds")
+
+    with dst_manifest.open("w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+
+    print(f"[OK] 已同步 manifest 到固定位置: {dst_manifest}")
+    print(f"[INFO] device_id={device_id}, customer_id={customer_id}, package_name={package_name}")
+
+    return dst_manifest
 
 @dataclass
 class BatchStatus:
@@ -383,6 +437,11 @@ def main() -> int:
                 keep_package=args.keep_package,
             )
             ok += 1
+
+            # 将当前批次的 manifest.json 同步到固定上下文位置：
+            # data/model_context/manifest.json
+            sync_manifest_to_model_context(Path(status.output_dir))
+
             print("[OK] 解压完成")
             print(f"  batch_id:   {status.batch_id}")
             print(f"  device_id:  {status.device_id}")
@@ -391,6 +450,7 @@ def main() -> int:
             print(f"  all_images: {status.all_images_count}")
             print(f"  positive:   {status.positive_count}")
             print(f"  negative:   {status.negative_count}")
+            print("  manifest:   data/model_context/manifest.json")
         except Exception as exc:
             failed += 1
             print(f"[ERROR] 处理失败: {package_path}")

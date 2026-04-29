@@ -118,3 +118,9 @@ dvc-push:
 
 dvc-pull:
 	dvc pull
+
+workflow-ui:
+	$(PYTHON) -m uvicorn server.workflow.control_panel_app:app --host 0.0.0.0 --port 8091 --reload
+
+accept-reviewed-detection:
+	$(PYTHON) server/workflow/accept_reviewed_detection.py --move

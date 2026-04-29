@@ -1,6 +1,6 @@
 task:
   name: detection
-  type: yolo_detection
+  type: detection
 
 dataset:
   raw_root: data/raw_detection
