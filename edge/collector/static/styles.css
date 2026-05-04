@@ -209,3 +209,247 @@
   display: block;
   margin: 0 auto;
 }
+/* v6.8：模式切换鉴权 + 分类/检测采集模式 */
+.capture-mode-select-wrap{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  min-height:82px;
+  padding:12px 16px;
+  border:2px solid #dce6f0;
+  border-radius:24px;
+  background:#fff;
+  font-size:20px;
+  font-weight:900;
+  color:#0f172a;
+  box-shadow:0 8px 18px rgba(15,23,42,.06);
+}
+.capture-mode-select-wrap span{white-space:nowrap;color:#475569;font-size:17px}
+.capture-mode-select{
+  min-width:118px;
+  border:0;
+  outline:none;
+  background:#f8fbff;
+  border-radius:18px;
+  padding:13px 16px;
+  font-size:24px;
+  font-weight:900;
+  color:#0f172a;
+}
+.capture-actions-main #captureAllBtn{min-width:180px}
+.pending-capture-image{
+  position:absolute;
+  inset:0;
+  width:auto!important;
+  height:100%!important;
+  max-width:100%;
+  max-height:100%;
+  object-fit:contain!important;
+  display:none;
+  margin:0 auto;
+  left:50%;
+  transform:translateX(-50%);
+  z-index:4;
+  background:#0f172a;
+  cursor:zoom-in;
+}
+.pending-capture-image.active{display:block}
+.capture-choice-panel{
+  position:absolute;
+  right:22px;
+  top:22px;
+  z-index:8;
+  width:min(360px,calc(100% - 44px));
+  padding:16px;
+  display:none;
+  flex-direction:column;
+  gap:8px;
+  border:2px solid rgba(255,255,255,.35);
+  border-radius:24px;
+  background:rgba(255,255,255,.92);
+  box-shadow:0 20px 45px rgba(15,23,42,.28);
+  backdrop-filter:blur(8px);
+}
+.capture-choice-panel.active{display:flex}
+.capture-choice-panel b{font-size:22px;color:#0f172a}
+.capture-choice-panel span{font-size:14px;font-weight:800;color:#64748b}
+.capture-choice-actions{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:6px}
+.mini-action.ok{background:#16a34a;color:#fff;border-color:#16a34a}
+.mini-action.bad{background:#f59e0b;color:#111827;border-color:#f59e0b}
+.mini-action.ghost{background:#fff;color:#0f172a;border-color:#dce6f0}
+.form-grid.single{grid-template-columns:1fr}
+@media (max-width:1300px){.capture-actions-main{justify-content:flex-start}.capture-mode-select-wrap{flex:1}.capture-actions-main #captureAllBtn{flex:1}}
+@media (max-width:760px){.capture-mode-select-wrap{width:100%;justify-content:space-between}.capture-choice-panel{left:12px;right:12px;top:12px;width:auto}.capture-choice-actions{grid-template-columns:1fr}}
+
+/* v6.8.1：分类取图改为弹窗审核，主摄像头画面始终保持 RTSP/摄像头实时预览 */
+.camera-stage .hidden-canvas{
+  display:none!important;
+}
+.camera-stage .camera-video{
+  position:absolute;
+  top:0;
+  left:50%;
+  right:auto;
+  bottom:auto;
+  transform:translateX(-50%);
+  width:auto!important;
+  height:100%!important;
+  max-width:100%;
+  max-height:100%;
+  object-fit:contain!important;
+  margin:0 auto;
+  background:#0f172a;
+}
+.camera-stage .camera-video.active,
+.camera-stage .camera-video.backend-active{
+  display:block;
+}
+.pending-capture-dialog{
+  width:min(1120px,96vw);
+  max-height:94vh;
+  display:flex;
+  flex-direction:column;
+}
+.pending-capture-zoom-box{
+  margin:18px 24px;
+  height:min(66vh,680px);
+  min-height:360px;
+  border-radius:26px;
+  background:#0f172a;
+  border:1px solid #dce6f0;
+  overflow:auto;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  cursor:zoom-in;
+}
+.pending-capture-modal-image{
+  max-width:100%;
+  max-height:100%;
+  width:auto;
+  height:auto;
+  object-fit:contain;
+  display:block;
+  transition:transform .08s linear;
+  transform-origin:center center;
+}
+.pending-capture-actions{
+  justify-content:center;
+  padding-top:0;
+}
+.pending-capture-actions .big-action{
+  min-width:160px;
+}
+@media (max-width:760px){
+  .pending-capture-zoom-box{height:58vh;min-height:280px;margin:14px}
+  .pending-capture-actions{flex-direction:column;align-items:stretch}
+  .pending-capture-actions .big-action{width:100%}
+}
+
+
+/* v6.8.2：确认上传页文案与上传结果居中提示 */
+.folder-card span{display:none!important;}
+.folder-card{justify-content:center;gap:8px;}
+.folder-card b{font-size:22px;}
+.folder-card em{font-size:18px;}
+.center-notice{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(15,23,42,.18);z-index:260;pointer-events:none;padding:24px;}
+.center-notice.show{display:flex;}
+.center-notice-box{max-width:min(760px,92vw);padding:34px 46px;border-radius:32px;background:#0f172a;color:#fff;font-size:30px;font-weight:1000;line-height:1.35;text-align:center;box-shadow:0 30px 90px rgba(15,23,42,.32);border:3px solid rgba(255,255,255,.35);}
+.center-notice-box.success{background:#16a34a;}
+.center-notice-box.error{background:#dc2626;}
+.center-notice-box.warning{background:#d97706;}
+
+
+/* 检测结果目标明细：一个目标一行 */
+.topk-result{
+  overflow-y:auto;
+}
+.target-row{
+  display:grid;
+  gap:5px;
+  border:1px solid #e2e8f0;
+  background:#fff;
+  border-radius:16px;
+  padding:10px 12px;
+  margin-bottom:8px;
+  font-size:13px;
+  font-weight:800;
+  color:#334155;
+}
+.target-row b,
+.target-row .target-class{
+  font-size:14px;
+  color:#0f172a;
+  font-weight:900;
+}
+.target-row span{
+  display:block;
+  border:none;
+  padding:0;
+  background:transparent;
+  font-size:13px;
+  color:#475569;
+}
+.target-row-inline{
+  grid-template-columns:64px minmax(86px,1fr) minmax(210px,1.5fr) minmax(130px,1fr) minmax(96px,.8fr) minmax(112px,.9fr);
+  align-items:center;
+  column-gap:10px;
+  row-gap:4px;
+}
+.target-row-inline span{
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.target-row-inline .target-index{
+  color:#2563eb;
+  font-weight:900;
+}
+.target-row.empty{
+  min-height:72px;
+  display:grid;
+  place-items:center;
+  color:#94a3b8;
+}
+@media (max-width:1300px){
+  .target-row-inline{
+    grid-template-columns:64px minmax(80px,1fr);
+  }
+  .target-row-inline span{
+    white-space:normal;
+  }
+}
+
+/* 调整模型验证页底部结果区比例：检测结果框变窄，目标明细框变宽 */
+.infer-result-panel {
+  grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.65fr) !important;
+}
+
+.classification-result {
+  grid-column: 1 !important;
+}
+
+.topk-result {
+  grid-column: 2 !important;
+}
+
+/* 一键清除与打包上传按钮布局 */
+.upload-head-actions{
+  display:flex;
+  align-items:center;
+  justify-content:flex-end;
+  gap:12px;
+  flex-wrap:wrap;
+}
+.upload-head-actions .big-action{
+  min-width:150px;
+}
+@media (max-width:900px){
+  .upload-head-actions{
+    width:100%;
+    justify-content:stretch;
+  }
+  .upload-head-actions .big-action{
+    flex:1;
+  }
+}

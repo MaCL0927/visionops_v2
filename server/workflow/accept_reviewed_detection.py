@@ -66,13 +66,20 @@ def load_current_batch_dir(model_context_path: Path) -> Path:
     )
 
 
-def load_class_names() -> list[str]:
+def load_class_names(batch_dir: Path) -> list[str]:
     """
-    第一版尽量兼容：
-    1. data/model_context/manifest.json 里的 class_names/classes/names
-    2. edge/runtime/class_names.yaml
-    3. 默认 names: ['object']
+    类别优先级：
+    1. 当前 batch 的 annotation_classes.json
+    2. data/model_context/manifest.json
+    3. edge/runtime/class_names.yaml
+    4. 默认 ['object']
     """
+    annotation_classes_path = batch_dir / "annotation_classes.json"
+    data = read_json(annotation_classes_path, default={}) or {}
+    names = data.get("names")
+    if isinstance(names, list) and names:
+        return [str(x) for x in names]
+
     manifest_path = PROJECT_ROOT / "data" / "model_context" / "manifest.json"
     manifest = read_json(manifest_path, default={}) or {}
 
@@ -81,6 +88,9 @@ def load_class_names() -> list[str]:
         if isinstance(value, list) and value:
             return [str(x) for x in value]
         if isinstance(value, dict) and value:
+            names = value.get("names")
+            if isinstance(names, list) and names:
+                return [str(x) for x in names]
             return [str(value[k]) for k in sorted(value.keys(), key=lambda x: int(x) if str(x).isdigit() else str(x))]
 
     yaml_path = PROJECT_ROOT / "edge" / "runtime" / "class_names.yaml"
@@ -93,6 +103,9 @@ def load_class_names() -> list[str]:
                 if isinstance(value, list) and value:
                     return [str(x) for x in value]
                 if isinstance(value, dict) and value:
+                    names = value.get("names")
+                    if isinstance(names, list) and names:
+                        return [str(x) for x in names]
                     return [str(value[k]) for k in sorted(value.keys(), key=lambda x: int(x) if str(x).isdigit() else str(x))]
         except Exception:
             pass
@@ -275,7 +288,7 @@ def main() -> int:
     val_count = max(1, int(len(pairs) * args.val_ratio)) if len(pairs) > 1 else 0
     val_pairs = set([p[0] for p in pairs[:val_count]])
 
-    class_names = load_class_names()
+    class_names = load_class_names(batch_dir)
 
     moved_train = 0
     moved_val = 0

@@ -3,17 +3,17 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>VisionOps Edge Collector UI v6.5</title>
-  <link rel="stylesheet" href="/static/styles.css?v=v6_6" />
+  <title>VisionOps Edge Collector UI v6.8</title>
+  <link rel="stylesheet" href="/static/styles.css?v=v6_8" />
 </head>
 <body>
   <header class="topbar">
     <nav id="factoryTabs" class="factory-tabs">
       <button class="top-tab active" data-page="calibrationPage">校验</button>
-      <button class="top-tab" data-page="collectPage">采集标注</button>
+      <button class="top-tab" data-page="collectPage">采集上传</button>
       <button class="top-tab" data-page="validatePage">模型验证</button>
     </nav>
-    <button id="modeToggle" class="mode-toggle">工厂模式</button>
+    <button id="modeToggle" class="mode-toggle">切换生产模式</button>
   </header>
 
   <main class="shell">
@@ -87,7 +87,7 @@
           <aside class="left-steps">
             <button class="step-btn active" data-collect-step="captureStep">
               <span class="step-num">1</span>
-              <span class="step-text"><b>拍照采集</b><em>取图 / 取正样本 / 取负样本</em></span>
+              <span class="step-text"><b>拍照采集</b><em>选择分类/检测模式后取图</em></span>
             </button>
             <button class="step-btn" data-collect-step="uploadStep">
               <span class="step-num">2</span>
@@ -95,7 +95,7 @@
             </button>
             <div class="tip-card">
               <b>数据存储</b>
-              <p>系统内部会维护三个固定文件夹：全部图片、正样本、负样本。点击不同按钮后，图片会直接进入对应文件夹。</p>
+              <p>分类模式下取图后先暂存，选择合格/不合格后分别保存到 positive/negative；检测模式下取图直接保存到 all_images。</p>
             </div>
           </aside>
 
@@ -103,19 +103,24 @@
             <section id="captureStep" class="subscreen active">
               <div class="screen-head collect-head capture-head">
                 <div class="capture-title-block">
-                  <div class="kicker">采集标注 / 第 1 步</div>
+                  <div class="kicker">采集上传 / 第 1 步</div>
                   <h1>拍照采集</h1>
-                  <p>无需选择数据集，也无需双击画面。点击按钮后，系统会按“设备ID_用户ID_时间”命名；正/负样本会同步进入全部图片底库。</p>
+                  <p>选择分类或检测模式后点击取图。分类模式会先暂存当前帧，确认合格/不合格后再保存；检测模式会直接保存到全部图片。</p>
                 </div>
                 <div class="capture-actions capture-actions-main">
+                  <label class="capture-mode-select-wrap">
+                    <span>采集模式</span>
+                    <select id="captureTaskMode" class="capture-mode-select">
+                      <option value="classification">分类</option>
+                      <option value="detection">检测</option>
+                    </select>
+                  </label>
                   <button id="captureAllBtn" class="big-action secondary">取图</button>
-                  <button id="capturePositiveBtn" class="big-action primary">取正样本</button>
-                  <button id="captureNegativeBtn" class="big-action warning">取负样本</button>
                 </div>
                 <div class="stats-inline">
-                  <span>全部 <b id="allCount">0</b></span>
-                  <span>正样本 <b id="positiveCount">0</b></span>
-                  <span>负样本 <b id="negativeCount">0</b></span>
+                  <span>检测图片 <b id="allCount">0</b></span>
+                  <span>合格 <b id="positiveCount">0</b></span>
+                  <span>不合格 <b id="negativeCount">0</b></span>
                 </div>
               </div>
               <div id="captureStage" class="camera-stage capture-fill">
@@ -134,19 +139,22 @@
             <section id="uploadStep" class="subscreen">
               <div class="screen-head collect-head">
                 <div>
-                  <div class="kicker">采集标注 / 第 2 步</div>
+                  <div class="kicker">采集上传 / 第 2 步</div>
                   <div class="title-with-dataset">
-                    <h1>预览三个文件夹并上传</h1>
+                    <h1>预览采集结果并上传</h1>
                   </div>
                   <p>确认无误后，系统只打包当前固定采集目录，不向工人暴露数据集选择。</p>
                 </div>
-                <button id="openUploadModal" class="big-action primary compact">打包并上传</button>
+                <div class="upload-head-actions">
+                  <button id="clearCaptureImages" class="big-action warning compact">一键清除</button>
+                  <button id="openUploadModal" class="big-action primary compact">打包并上传</button>
+                </div>
               </div>
 
               <div class="folder-card-strip">
-                <div class="folder-card active" data-folder-card="all"><b>全部图片</b><span>all_images/</span><em id="allFolderCount">0 张</em></div>
-                <div class="folder-card" data-folder-card="positive"><b>正样本</b><span>positive/</span><em id="posFolderCount">0 张</em></div>
-                <div class="folder-card" data-folder-card="negative"><b>负样本</b><span>negative/</span><em id="negFolderCount">0 张</em></div>
+                <div class="folder-card active" data-folder-card="all"><b>检测图片</b><em id="allFolderCount">0 张</em></div>
+                <div class="folder-card" data-folder-card="positive"><b>合格</b><em id="posFolderCount">0 张</em></div>
+                <div class="folder-card" data-folder-card="negative"><b>不合格</b><em id="negFolderCount">0 张</em></div>
               </div>
 
               <div id="folderPreviewGrid" class="preview-grid"></div>
@@ -228,7 +236,7 @@
           <div>
             <div class="kicker">生产模式</div>
             <h1>实时监控检测画面</h1>
-            <p>该模式下隐藏校验、采集标注、模型验证页面，仅保留监控画面用于现场展示模型检测结果。</p>
+            <p>该模式下隐藏校验、采集上传、模型验证页面，仅保留监控画面用于现场展示模型检测结果。</p>
           </div>
           <div class="status-pill">连续监控中</div>
         </div>
@@ -247,7 +255,7 @@
       <div class="dialog-head">
         <div>
           <h2>上传确认</h2>
-          <p>关键字段默认填写，设备 ID 和客户 ID 为必填项；确认后会打包 all_images / positive / negative，并上传到电脑端 data 目录。</p>
+          <p>关键字段默认填写，设备 ID 和客户 ID 为必填项；确认后会打包检测图片、合格、不合格图片，并上传到电脑端 data 目录。</p>
         </div>
         <button id="closeUploadModal" class="close-btn">×</button>
       </div>
@@ -280,7 +288,49 @@
     </div>
   </div>
 
+  <div id="pendingCaptureModal" class="modal-mask">
+    <div class="dialog pending-capture-dialog">
+      <div class="dialog-head">
+        <div>
+          <h2>分类图片确认</h2>
+          <p>鼠标滚轮可放大查看细节。选择合格/不合格后保存；取消则放弃这张图片。</p>
+        </div>
+        <button id="closePendingCaptureModal" class="close-btn">×</button>
+      </div>
+      <div id="pendingCaptureZoomBox" class="pending-capture-zoom-box">
+        <img id="pendingCaptureModalImage" class="pending-capture-modal-image" alt="暂存图片" />
+      </div>
+      <div class="dialog-actions pending-capture-actions">
+        <button id="savePositiveCapture" class="big-action primary compact">合格</button>
+        <button id="saveNegativeCapture" class="big-action warning compact">不合格</button>
+        <button id="cancelPendingCapture" class="big-action secondary compact">取消</button>
+      </div>
+    </div>
+  </div>
+
+
+  <div id="adminAuthModal" class="modal-mask">
+    <div class="dialog small">
+      <div class="dialog-head">
+        <div>
+          <h2>管理员验证</h2>
+          <p>切换回工厂模式需要输入管理员账号和密码。</p>
+        </div>
+        <button id="closeAdminAuth" class="close-btn">×</button>
+      </div>
+      <div class="form-grid single">
+        <label>管理员账号<input id="adminUsername" value="admin" autocomplete="username" /></label>
+        <label>管理员密码<input id="adminPassword" type="password" placeholder="请输入密码" autocomplete="current-password" /></label>
+      </div>
+      <div class="dialog-actions">
+        <button id="cancelAdminAuth" class="big-action secondary compact">取消</button>
+        <button id="confirmAdminAuth" class="big-action primary compact">确认切换</button>
+      </div>
+    </div>
+  </div>
+
   <div id="toast" class="toast"></div>
-  <script src="/static/app.js?v=v6_6"></script>
+  <div id="centerNotice" class="center-notice" role="status" aria-live="polite"><div id="centerNoticeBox" class="center-notice-box"></div></div>
+  <script src="/static/app.js?v=v6_8_2"></script>
 </body>
 </html>

@@ -253,6 +253,75 @@ def save_capture_bytes(dataset: str, image_bytes: bytes, folder: str = "all", de
         "size_bytes": out_path.stat().st_size,
     }
 
+
+
+def save_labeled_capture(dataset: str, image_data: str, label: str, device_id: str = "", user_id: str = "") -> Dict:
+    """分类采集确认后保存标签图片。
+
+    与 save_capture(..., folder="positive/negative") 不同：
+    这里只保存到 positive 或 negative 目录，不再同步保存到 all_images。
+    用于“分类模式取图 -> 暂存 -> 选择合格/不合格”的流程。
+    """
+    if label not in {"positive", "negative"}:
+        raise ValueError("label 只能是 positive 或 negative")
+    if not image_data or "," not in image_data:
+        raise ValueError("未收到暂存图片数据")
+
+    header, b64_data = image_data.split(",", 1)
+    ext = ".jpg"
+    if "image/png" in header:
+        ext = ".png"
+    elif "image/webp" in header:
+        ext = ".webp"
+    raw = base64.b64decode(b64_data)
+    return save_labeled_capture_bytes(dataset, raw, label, device_id, user_id, ext)
+
+
+def save_labeled_capture_bytes(dataset: str, image_bytes: bytes, label: str, device_id: str = "", user_id: str = "", ext: str = ".jpg") -> Dict:
+    """只保存分类标签图到 positive/negative，不写入 all_images。"""
+    dirs = ensure_dataset_dirs(dataset or default_dataset_name())
+    if label not in {"positive", "negative"}:
+        raise ValueError("label 只能是 positive 或 negative")
+    if not image_bytes:
+        raise ValueError("未收到暂存图片数据")
+
+    now = datetime.now()
+    safe_device = _safe_id(device_id or DEVICE_ID, "device")
+    safe_user = _safe_id(user_id or USER_ID, "user")
+    ext = ext if ext.startswith(".") else f".{ext}"
+    filename = f"{safe_device}_{safe_user}_{now.strftime('%Y%m%d_%H%M%S_%f')}{ext}"
+
+    out_path = Path(dirs[FOLDER_TO_SUBDIR[label]]) / filename
+    out_path.write_bytes(image_bytes)
+
+    record = {
+        "event": "classification_labeled_capture",
+        "dataset": dirs["dataset"],
+        "folder": label,
+        "filename": filename,
+        "device_id": safe_device,
+        "user_id": safe_user,
+        "created_at": now.isoformat(timespec="seconds"),
+        "path": str(out_path),
+        "all_image_path": None,
+        "note": "saved_to_label_folder_only",
+    }
+    meta_file = Path(dirs["dataset_root"]) / "collector_meta.jsonl"
+    with meta_file.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    return {
+        "filename": filename,
+        "folder": label,
+        "dataset": dirs["dataset"],
+        "device_id": safe_device,
+        "user_id": safe_user,
+        "url": f"/api/datasets/{dirs['dataset']}/image/{label}/{filename}",
+        "all_url": None,
+        "linked_all_image": None,
+        "size_bytes": out_path.stat().st_size,
+    }
+
 def label_image(dataset: str, filename: str, label: str, mode: str = "copy") -> Dict:
     # 兼容旧接口：仍支持从 all_images 复制到正/负样本。
     dirs = ensure_dataset_dirs(dataset or default_dataset_name())
@@ -314,6 +383,32 @@ def delete_image(dataset: str, folder: str, filename: str) -> Dict:
         raise FileNotFoundError(f"未找到待删除图片：{filename}")
     return {"dataset": dirs["dataset"], "folder": folder, "filename": filename, "deleted": deleted, "counts": get_counts(dirs["dataset"])}
 
+
+
+def clear_capture_images(dataset: str = "") -> Dict:
+    """一键清空当前采集目录中的图片。
+
+    只清除 all_images / positive / negative 下的图片文件，不删除 upload_packages，
+    也不删除 collector_meta.jsonl，避免影响历史上传包和采集日志。
+    """
+    dirs = ensure_dataset_dirs(dataset or default_dataset_name())
+    deleted = {"all": 0, "positive": 0, "negative": 0}
+
+    for folder, subdir in FOLDER_TO_SUBDIR.items():
+        folder_path = Path(dirs[subdir])
+        if not folder_path.exists():
+            continue
+        for p in folder_path.iterdir():
+            if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES:
+                p.unlink()
+                deleted[folder] += 1
+
+    return {
+        "dataset": dirs["dataset"],
+        "deleted": deleted,
+        "deleted_total": sum(deleted.values()),
+        "counts": get_counts(dirs["dataset"]),
+    }
 
 def _run_cmd(cmd: List[str], timeout: int = UPLOAD_TIMEOUT_SEC) -> subprocess.CompletedProcess:
     return subprocess.run(

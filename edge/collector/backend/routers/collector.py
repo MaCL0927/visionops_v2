@@ -18,6 +18,7 @@ from backend.services.storage import (
     create_dataset,
     create_upload_package,
     delete_image,
+    clear_capture_images,
     ensure_data_root,
     ensure_default_dataset_dirs,
     ensure_dataset_dirs,
@@ -27,6 +28,7 @@ from backend.services.storage import (
     list_images,
     save_capture,
     save_capture_bytes,
+    save_labeled_capture,
     sanitize_dataset_name,
     dataset_path,
     default_dataset_name,
@@ -47,6 +49,14 @@ class CaptureRequest(BaseModel):
     user_id: Optional[str] = None
 
 
+class LabeledCaptureRequest(BaseModel):
+    image_data: str
+    label: str
+    dataset: str = DEFAULT_DATASET_NAME
+    device_id: Optional[str] = None
+    user_id: Optional[str] = None
+
+
 class LabelRequest(BaseModel):
     dataset: str = DEFAULT_DATASET_NAME
     filename: str
@@ -58,6 +68,10 @@ class DeleteRequest(BaseModel):
     dataset: str = DEFAULT_DATASET_NAME
     folder: str
     filename: str
+
+
+class ClearDatasetImagesRequest(BaseModel):
+    dataset: str = DEFAULT_DATASET_NAME
 
 
 class UploadRequest(BaseModel):
@@ -189,6 +203,21 @@ def capture(req: CaptureRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.post("/capture/labeled")
+def capture_labeled(req: LabeledCaptureRequest):
+    """分类模式暂存图片确认后保存。
+
+    只写入 positive/negative，不再同步写入 all_images。
+    """
+    try:
+        ds = req.dataset or default_dataset_name()
+        item = save_labeled_capture(ds, req.image_data or "", req.label, req.device_id or DEVICE_ID, req.user_id or USER_ID)
+        label_text = "合格" if req.label == "positive" else "不合格"
+        return {"ok": True, "message": f"已保存为{label_text}样本：{item['filename']}", "item": item, "counts": get_counts(ds)}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.post("/label")
 def label(req: LabelRequest):
     try:
@@ -208,6 +237,15 @@ def image_delete(req: DeleteRequest):
         return {"ok": True, "message": "图片已删除", **result}
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/dataset/images/clear")
+def dataset_images_clear(req: ClearDatasetImagesRequest):
+    try:
+        result = clear_capture_images(req.dataset or default_dataset_name())
+        return {"ok": True, "message": "已清空检测图片、合格、不合格图片", **result}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 

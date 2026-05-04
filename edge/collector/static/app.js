@@ -1,5 +1,16 @@
 const toast = document.getElementById('toast');
 function showToast(message){toast.textContent=message;toast.classList.add('show');clearTimeout(showToast.t);showToast.t=setTimeout(()=>toast.classList.remove('show'),2600)}
+const centerNotice=document.getElementById('centerNotice');
+const centerNoticeBox=document.getElementById('centerNoticeBox');
+function showCenterNotice(message,type='success',timeout=3600){
+  if(!centerNotice || !centerNoticeBox){showToast(message);return;}
+  centerNoticeBox.textContent=message;
+  centerNoticeBox.className=`center-notice-box ${type}`;
+  centerNotice.classList.add('show');
+  clearTimeout(showCenterNotice.t);
+  showCenterNotice.t=setTimeout(()=>centerNotice.classList.remove('show'),timeout);
+}
+
 async function apiGet(url){const res=await fetch(url);const data=await res.json();if(!res.ok) throw new Error(data.detail || data.message || '请求失败');return data}
 async function apiPost(url, payload={}){const res=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const data=await res.json();if(!res.ok) throw new Error(data.detail || data.message || '请求失败');return data}
 
@@ -7,13 +18,54 @@ const modeToggle=document.getElementById('modeToggle');
 const factoryTabs=document.getElementById('factoryTabs');
 const factoryMode=document.getElementById('factoryMode');
 const productionMode=document.getElementById('productionMode');
+const adminAuthModal=document.getElementById('adminAuthModal');
+const adminUsername=document.getElementById('adminUsername');
+const adminPassword=document.getElementById('adminPassword');
+const ADMIN_USERNAME='admin';
+const ADMIN_PASSWORD='admin';
 let isProduction=false;
-modeToggle.addEventListener('click',()=>{
-  isProduction=!isProduction;
-  if(isProduction){stopRealtimeClassification();modeToggle.textContent='生产模式';modeToggle.classList.add('prod');factoryTabs.classList.add('hidden');factoryMode.classList.remove('active');productionMode.classList.add('active');}
-  else{modeToggle.textContent='工厂模式';modeToggle.classList.remove('prod');factoryTabs.classList.remove('hidden');productionMode.classList.remove('active');factoryMode.classList.add('active');}
+function enterProductionMode(){
+  isProduction=true;
+  stopRealtimeClassification();
+  clearPendingClassificationCapture(false);
+  modeToggle.textContent='切换工厂模式';
+  modeToggle.classList.add('prod');
+  factoryTabs.classList.add('hidden');
+  factoryMode.classList.remove('active');
+  productionMode.classList.add('active');
   updateCameraLifecycle();
+}
+function enterFactoryMode(){
+  isProduction=false;
+  modeToggle.textContent='切换生产模式';
+  modeToggle.classList.remove('prod');
+  factoryTabs.classList.remove('hidden');
+  productionMode.classList.remove('active');
+  factoryMode.classList.add('active');
+  updateCameraLifecycle();
+}
+function openAdminAuthModal(){
+  if(!adminAuthModal) return;
+  adminPassword.value='';
+  adminAuthModal.classList.add('active');
+  setTimeout(()=>adminPassword && adminPassword.focus(),50);
+}
+function closeAdminAuthModal(){
+  if(adminAuthModal) adminAuthModal.classList.remove('active');
+}
+modeToggle.addEventListener('click',()=>{
+  if(isProduction){openAdminAuthModal();return;}
+  enterProductionMode();
 });
+if(document.getElementById('closeAdminAuth')) document.getElementById('closeAdminAuth').addEventListener('click',closeAdminAuthModal);
+if(document.getElementById('cancelAdminAuth')) document.getElementById('cancelAdminAuth').addEventListener('click',closeAdminAuthModal);
+if(document.getElementById('confirmAdminAuth')) document.getElementById('confirmAdminAuth').addEventListener('click',()=>{
+  const u=(adminUsername.value||'').trim();
+  const p=adminPassword.value||'';
+  if(u===ADMIN_USERNAME && p===ADMIN_PASSWORD){closeAdminAuthModal();enterFactoryMode();showToast('已切换到工厂模式');}
+  else{showToast('管理员账号或密码错误');}
+});
+if(adminPassword) adminPassword.addEventListener('keydown',(e)=>{if(e.key==='Enter') document.getElementById('confirmAdminAuth').click();});
 
 const topTabs=document.querySelectorAll('.top-tab');
 const pages=document.querySelectorAll('.page');
@@ -49,6 +101,14 @@ const captureCanvas=document.getElementById('captureCanvas');
 const simulatedCamera=document.getElementById('simulatedCamera');
 const cameraStatusTitle=document.getElementById('cameraStatusTitle');
 const cameraStatusText=document.getElementById('cameraStatusText');
+const captureTaskMode=document.getElementById('captureTaskMode');
+const pendingCaptureModal=document.getElementById('pendingCaptureModal');
+const pendingCaptureModalImage=document.getElementById('pendingCaptureModalImage');
+const pendingCaptureZoomBox=document.getElementById('pendingCaptureZoomBox');
+const savePositiveCaptureBtn=document.getElementById('savePositiveCapture');
+const saveNegativeCaptureBtn=document.getElementById('saveNegativeCapture');
+const cancelPendingCaptureBtn=document.getElementById('cancelPendingCapture');
+const closePendingCaptureModalBtn=document.getElementById('closePendingCaptureModal');
 const allCount=document.getElementById('allCount');
 const positiveCount=document.getElementById('positiveCount');
 const negativeCount=document.getElementById('negativeCount');
@@ -71,6 +131,8 @@ let deviceId='rk3588-001';
 let userId='operator-001';
 let selectedModel='';
 let modelItems=[];
+let pendingClassificationImageData='';
+let pendingCaptureZoom=1;
 
 function syncCounts(counts){
   const c=counts || {all:dataStore.all.length,positive:dataStore.positive.length,negative:dataStore.negative.length};
@@ -154,7 +216,7 @@ async function stopCamera(callBackend=true){
   if(simulatedCamera) simulatedCamera.classList.add('active');
   cameraActive=false;
   if(cameraStatusTitle) cameraStatusTitle.textContent='摄像头已关闭';
-  if(cameraStatusText) cameraStatusText.textContent='只有进入“采集标注 / 拍照采集”页面，或开启实时检测时才会打开摄像头';
+  if(cameraStatusText) cameraStatusText.textContent='只有进入“采集上传 / 拍照采集”页面，或开启实时检测时才会打开摄像头';
   if(callBackend && (backendCameraAvailable || useBackendCamera)){
     try{await apiPost('/api/camera/stop');}catch(err){}
   }
@@ -178,6 +240,56 @@ function captureFrameAsJpeg(){
   } else {buildSimulatedFrame(ctx,w,h);}
   return captureCanvas.toDataURL('image/jpeg',0.88);
 }
+function resetPendingCaptureZoom(){
+  pendingCaptureZoom=1;
+  if(pendingCaptureModalImage){
+    pendingCaptureModalImage.style.transform='scale(1)';
+    pendingCaptureModalImage.style.transformOrigin='center center';
+  }
+}
+function closePendingCaptureModal(clearData=false){
+  if(pendingCaptureModal) pendingCaptureModal.classList.remove('active');
+  resetPendingCaptureZoom();
+  if(clearData) pendingClassificationImageData='';
+}
+function clearPendingClassificationCapture(showCamera=true){
+  pendingClassificationImageData='';
+  closePendingCaptureModal(false);
+  if(showCamera){
+    if(useBackendCamera && backendCamera) backendCamera.classList.add('active','backend-active');
+    else if(useRealCamera && cameraVideo) cameraVideo.classList.add('active');
+    else if(simulatedCamera) simulatedCamera.classList.add('active');
+  }
+}
+function blobToDataUrl(blob){
+  return new Promise((resolve,reject)=>{
+    const reader=new FileReader();
+    reader.onload=()=>resolve(reader.result);
+    reader.onerror=reject;
+    reader.readAsDataURL(blob);
+  });
+}
+async function captureCurrentFrameDataUrl(){
+  await startCamera();
+  await new Promise(resolve=>setTimeout(resolve,160));
+  if(useBackendCamera){
+    const res=await fetch('/api/camera/frame?t='+Date.now());
+    if(!res.ok) throw new Error('读取摄像头当前帧失败');
+    return await blobToDataUrl(await res.blob());
+  }
+  return captureFrameAsJpeg();
+}
+function showPendingClassificationCapture(imageData){
+  pendingClassificationImageData=imageData;
+  // 主摄像头画面保持实时预览，不再被暂存图替换。暂存图只在弹窗中展示。
+  if(pendingCaptureModalImage){
+    pendingCaptureModalImage.src=imageData;
+  }
+  resetPendingCaptureZoom();
+  if(pendingCaptureModal) pendingCaptureModal.classList.add('active');
+  if(cameraStatusTitle) cameraStatusTitle.textContent='实时摄像头画面';
+  if(cameraStatusText) cameraStatusText.textContent='图片已暂存到弹窗中，请在弹窗里放大查看并选择合格/不合格，或取消放弃';
+}
 async function captureToFolder(folder){
   try{
     const payload={dataset:currentDataset,folder,device_id:deviceId,user_id:userId};
@@ -192,14 +304,50 @@ async function captureToFolder(folder){
     showToast(data.message);
   }catch(err){showToast(err.message)}
 }
+async function handleCaptureButton(){
+  const mode=(captureTaskMode && captureTaskMode.value) || 'classification';
+  clearPendingClassificationCapture(false);
+  if(mode==='detection'){
+    await captureToFolder('all');
+    return;
+  }
+  try{
+    const imageData=await captureCurrentFrameDataUrl();
+    showPendingClassificationCapture(imageData);
+    showToast('图片已暂存，请选择合格或不合格');
+  }catch(err){showToast(err.message || '取图失败')}
+}
+async function savePendingClassificationCapture(label){
+  if(!pendingClassificationImageData){showToast('没有暂存图片，请先取图');return;}
+  try{
+    const data=await apiPost('/api/capture/labeled',{dataset:currentDataset,image_data:pendingClassificationImageData,label,device_id:deviceId,user_id:userId});
+    syncCounts(data.counts);
+    clearPendingClassificationCapture(true);
+    await refreshFolder(label);
+    showToast(data.message);
+  }catch(err){showToast(err.message || '保存失败')}
+}
 
-document.getElementById('captureAllBtn').addEventListener('click',()=>captureToFolder('all'));
-document.getElementById('capturePositiveBtn').addEventListener('click',()=>captureToFolder('positive'));
-document.getElementById('captureNegativeBtn').addEventListener('click',()=>captureToFolder('negative'));
+document.getElementById('captureAllBtn').addEventListener('click',handleCaptureButton);
+if(savePositiveCaptureBtn) savePositiveCaptureBtn.addEventListener('click',()=>savePendingClassificationCapture('positive'));
+if(saveNegativeCaptureBtn) saveNegativeCaptureBtn.addEventListener('click',()=>savePendingClassificationCapture('negative'));
+if(cancelPendingCaptureBtn) cancelPendingCaptureBtn.addEventListener('click',()=>{clearPendingClassificationCapture(true);showToast('已取消暂存图片')});
+if(closePendingCaptureModalBtn) closePendingCaptureModalBtn.addEventListener('click',()=>{clearPendingClassificationCapture(true);showToast('已取消暂存图片')});
+if(pendingCaptureZoomBox){
+  pendingCaptureZoomBox.addEventListener('wheel',(e)=>{
+    if(!pendingClassificationImageData) return;
+    e.preventDefault();
+    const delta=e.deltaY<0 ? 0.12 : -0.12;
+    pendingCaptureZoom=Math.min(5, Math.max(1, pendingCaptureZoom+delta));
+    if(pendingCaptureModalImage){
+      pendingCaptureModalImage.style.transform=`scale(${pendingCaptureZoom})`;
+    }
+  }, {passive:false});
+}
 
 const folderCards=document.querySelectorAll('.folder-card');
 const previewGrid=document.getElementById('folderPreviewGrid');
-function folderLabel(folder){return folder==='all'?'全部图片':folder==='positive'?'正样本':'负样本'}
+function folderLabel(folder){return folder==='all'?'检测图片':folder==='positive'?'合格':'不合格'}
 async function refreshFolder(folder='all'){
   currentFolder=folder;
   folderCards.forEach(b=>b.classList.toggle('active',b.dataset.folderCard===folder));
@@ -220,12 +368,15 @@ function renderFolder(folder,items){
   });
 }
 folderCards.forEach(btn=>btn.addEventListener('click',()=>refreshFolder(btn.dataset.folderCard)));
+if(captureTaskMode) captureTaskMode.addEventListener('change',()=>{clearPendingClassificationCapture(true);showToast(captureTaskMode.value==='classification'?'已切换到分类采集模式':'已切换到检测采集模式')});
 
 function openImageViewer(item){
   viewerItem=item;
+  document.getElementById('deleteViewerImage').style.display='';
   viewerImage.src=item.url + `?t=${Date.now()}`;
+  const deleteBtn=document.getElementById('deleteViewerImage'); if(deleteBtn) deleteBtn.style.display='';
   viewerTitle.textContent=item.filename;
-  viewerSubtitle.textContent=`${folderLabel(item.folder)}。删除规则：在全部图片中删除会同步移除正负样本同名副本；在正/负样本中删除只移除该标签图片。`;
+  viewerSubtitle.textContent=`${folderLabel(item.folder)}。删除规则：在检测图片中删除会同步移除合格/不合格同名副本；在合格/不合格中删除只移除该标签图片。`;
   imageViewerModal.classList.add('active');
 }
 document.getElementById('closeImageViewer').addEventListener('click',()=>imageViewerModal.classList.remove('active'));
@@ -244,13 +395,31 @@ async function deletePreviewImage(item,fromViewer=false){
 }
 
 const uploadModal=document.getElementById('uploadModal');
+
+const clearCaptureImagesBtn=document.getElementById('clearCaptureImages');
+if(clearCaptureImagesBtn){
+  clearCaptureImagesBtn.addEventListener('click',async()=>{
+    const ok=window.confirm('确认清空检测图片、合格、不合格文件夹下的所有图片吗？此操作不可恢复。');
+    if(!ok) return;
+    try{
+      const data=await apiPost('/api/dataset/images/clear',{dataset:currentDataset});
+      syncCounts(data.counts);
+      dataStore={all:[],positive:[],negative:[]};
+      await refreshFolder(currentFolder);
+      await loadValidationImages();
+      showCenterNotice(data.message || '已清空采集图片','success',3600);
+    }catch(err){
+      showCenterNotice(err.message || '清空失败','error',4600);
+    }
+  });
+}
 document.getElementById('openUploadModal').addEventListener('click',async()=>{await refreshFolder(currentFolder);uploadModal.classList.add('active')});
 document.getElementById('closeUploadModal').addEventListener('click',()=>uploadModal.classList.remove('active'));
 document.getElementById('cancelUploadModal').addEventListener('click',()=>uploadModal.classList.remove('active'));
 document.getElementById('confirmUpload').addEventListener('click',async()=>{
   const payload={dataset:currentDataset,device_id:document.getElementById('uploadDeviceId').value.trim(),customer_id:document.getElementById('uploadCustomerId').value.trim(),contact_info:document.getElementById('uploadContact').value.trim(),remark:document.getElementById('uploadRemark').value.trim()};
-  try{const data=await apiPost('/api/upload',payload);const remote=data.package&&data.package.remote_upload;const suffix=remote&&remote.uploaded?` → ${remote.target}`:`：${data.package.package}`;showToast(`${data.message}${suffix}`);uploadModal.classList.remove('active');await refreshDatasetSummary();}
-  catch(err){showToast(err.message)}
+  try{const data=await apiPost('/api/upload',payload);const remote=data.package&&data.package.remote_upload;const suffix=remote&&remote.uploaded?` → ${remote.target}`:`：${data.package.package}`;showCenterNotice(`${data.message}${suffix}`,'success',4200);uploadModal.classList.remove('active');await refreshDatasetSummary();}
+  catch(err){showCenterNotice(err.message || '上传失败，请检查网络或目标电脑配置','error',5200)}
 });
 
 function escapeHtml(text){
@@ -274,6 +443,29 @@ function taskDisplayName(task){
   if(t==='detection') return '检测';
   if(t==='obb_detection') return '旋转框检测';
   return task || '未知';
+}
+
+
+function formatBBox(bbox){
+  if(!Array.isArray(bbox) || bbox.length<4) return '--';
+  return `[${bbox.slice(0,4).map((x)=>Number(x).toFixed(2)).join(', ')}]`;
+}
+function formatPoint(point){
+  if(!Array.isArray(point) || point.length<2) return '--';
+  return `[${Number(point[0]).toFixed(2)}, ${Number(point[1]).toFixed(2)}]`;
+}
+function getPredictionCenter(pred, fallbackBox=null){
+  if(Array.isArray(pred.center) && pred.center.length>=2){
+    return [Number(pred.center[0]), Number(pred.center[1])];
+  }
+  if(Number.isFinite(Number(pred.center_x)) && Number.isFinite(Number(pred.center_y))){
+    return [Number(pred.center_x), Number(pred.center_y)];
+  }
+  const box = fallbackBox || (Array.isArray(pred.bbox) ? pred.bbox.map(Number) : null);
+  if(box && box.length>=4 && !box.some((x)=>!Number.isFinite(x))){
+    return [(box[0]+box[2])/2, (box[1]+box[3])/2];
+  }
+  return null;
 }
 
 let validationImages=[];
@@ -389,7 +581,7 @@ function setSelectedValidationImage(item, resetResult=true){
 function renderValidationImages(){
   if(!validationImageGrid) return;
   if(!validationImages.length){
-    validationImageGrid.innerHTML='<div class="empty-models">暂无采集图片<br><small>请先到采集标注页取图，或直接点击拍照检测</small></div>';
+    validationImageGrid.innerHTML='<div class="empty-models">暂无采集图片<br><small>请先到采集上传页取图，或直接点击拍照检测</small></div>';
     setSelectedValidationImage(null, false);
     return;
   }
@@ -549,6 +741,31 @@ function drawDetectionOverlay(predictions=[]){
     ctx.fillRect(lx,ly,textW+pad*2,labelH);
     ctx.fillStyle='#fff';
     ctx.fillText(label,lx+pad,ly+pad/2);
+
+    const center=getPredictionCenter(pred, box);
+    if(center && Number.isFinite(center[0]) && Number.isFinite(center[1])){
+      const cx=Math.max(0, Math.min(canvas.width, center[0]));
+      const cy=Math.max(0, Math.min(canvas.height, center[1]));
+      const r=Math.max(4, Math.round(canvas.width/180));
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI*2);
+      ctx.fillStyle='#ef4444';
+      ctx.fill();
+      ctx.lineWidth=Math.max(2, Math.round(canvas.width/500));
+      ctx.strokeStyle='#fff';
+      ctx.stroke();
+
+      const centerText=`(${cx.toFixed(1)}, ${cy.toFixed(1)})`;
+      ctx.font=`${Math.max(14, Math.round(canvas.width/58))}px sans-serif`;
+      const cw=ctx.measureText(centerText).width;
+      const ch=Math.max(22, Math.round(canvas.width/44));
+      const tx=Math.min(canvas.width-cw-pad*2, cx+r+6);
+      const ty=Math.min(canvas.height-ch, cy+r+6);
+      ctx.fillStyle='rgba(15,23,42,.90)';
+      ctx.fillRect(Math.max(0,tx), Math.max(0,ty), cw+pad*2, ch);
+      ctx.fillStyle='#fff';
+      ctx.fillText(centerText, Math.max(0,tx)+pad, Math.max(0,ty)+pad/2);
+    }
   });
 }
 window.addEventListener('resize',()=>{
@@ -568,28 +785,37 @@ function renderClassificationResult(data, options={}){
   const r=data.result || {};
   classificationResult.className='classification-result done';
   if(isDetectionLikeTask(task)){
-    const det=data.detection || {};
     const predictions=Array.isArray(data.predictions) ? data.predictions : [];
     window.__lastDetectionPredictions=predictions;
-    const count=det.count ?? predictions.length;
-    const maxConf=predictions.reduce((m,p)=>{
-      const v=Number(p.confidence ?? p.score);
-      return Number.isFinite(v) ? Math.max(m,v) : m;
-    }, -1);
     const taskText=normalizeTaskName(task)==='obb_detection' ? '旋转框检测' : '检测';
-    resultClassName.textContent=`${taskText}到 ${count} 个目标`;
-    const modeText = options.mode === 'realtime' ? '实时检测' : (options.mode === 'capture' ? '拍照检测' : '选图检测');
-    resultConfidence.textContent=maxConf>=0 ? `${modeText} · ${taskText} · 最高置信度 ${(maxConf*100).toFixed(1)}%` : `${modeText} · ${taskText}模型结果`;
-    resultLatency.textContent=`耗时 ${data.latency_ms ?? '--'} ms`;
+    const updatedAt=data.updated_at || new Date().toLocaleTimeString();
+    resultClassName.textContent=`耗时 ${data.latency_ms ?? '--'} ms`;
+    resultConfidence.textContent=`${taskText} · 共 ${predictions.length} 个目标`;
+    resultLatency.textContent=`更新 ${updatedAt}`;
+
     if(topkResult){
-      const counts=det.class_counts || {};
-      const rows=Object.keys(counts).length
-        ? Object.entries(counts).map(([k,v])=>`<span>${escapeHtml(k)}：${v}</span>`).join('')
-        : '<span>无目标</span>';
-      topkResult.innerHTML='<b>类别统计</b>'+rows;
+      if(predictions.length){
+        topkResult.innerHTML='<b>目标明细</b>'+predictions.map((p,idx)=>{
+          const bbox=Array.isArray(p.bbox) ? p.bbox : [];
+          const center=getPredictionCenter(p);
+          const conf=Number(p.confidence ?? p.score);
+          const confText=Number.isFinite(conf) ? `${(conf*100).toFixed(1)}%` : '--';
+          const cls=escapeHtml(p.class_name ?? p.class ?? p.label ?? p.class_id ?? '目标');
+          return `<div class="target-row target-row-inline">
+            <span class="target-index">目标${idx+1}</span>
+            <span class="target-class">${cls}</span>
+            <span>位置：${escapeHtml(formatBBox(bbox))}</span>
+            <span>中心点：${escapeHtml(formatPoint(center))}</span>
+            <span>置信度：${confText}</span>
+            <span>更新时间：${escapeHtml(updatedAt)}</span>
+          </div>`;
+        }).join('');
+      }else{
+        topkResult.innerHTML='<b>目标明细</b><div class="target-row empty">未检测到目标</div>';
+      }
     }
     drawDetectionOverlay(predictions);
-    if(!options.silent) showToast(`${taskText}完成：${count} 个目标`);
+    if(!options.silent) showToast(`${taskText}完成：${predictions.length} 个目标`);
     return;
   }
   window.__lastDetectionPredictions=[];

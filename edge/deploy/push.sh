@@ -43,6 +43,15 @@ TOPK_OVERRIDE=""
 CONF_THRESHOLD_OVERRIDE=""
 NMS_THRESHOLD_OVERRIDE=""
 
+# 临时部署目标覆盖参数：用于从控制台把同一个模型部署到其他设备。
+# 部署目录第一版固定为 /opt/visionops，不对页面开放，避免 systemd 模板和运行目录不一致。
+TARGET_DEVICE_ID_OVERRIDE=""
+TARGET_HOST_OVERRIDE=""
+TARGET_USER_OVERRIDE="ubuntu"
+TARGET_PORT_OVERRIDE="22"
+TARGET_HEALTH_PORT_OVERRIDE=""
+TARGET_HEALTH_URL_OVERRIDE=""
+
 REMOTE_INSTALL_DIR="/opt/visionops"
 REMOTE_MODEL_DIR="${REMOTE_INSTALL_DIR}/models"
 REMOTE_EDGE_DIR="${REMOTE_INSTALL_DIR}/edge"
@@ -83,6 +92,12 @@ usage() {
   --topk <N>                  覆盖分类 topk
   --conf-threshold <float>    覆盖检测/OBB 置信度阈值
   --nms-threshold <float>     覆盖检测/OBB NMS 阈值
+  --target-device-id <id>     临时指定部署目标设备 ID，例如 rk3588-002
+  --target-host <host>        临时指定部署目标设备 IP/Host，例如 192.168.1.202
+  --target-user <user>        临时指定 SSH 用户，默认 ubuntu
+  --target-port <port>        临时指定 SSH 端口，默认 22
+  --target-health-port <port> 临时指定健康检查端口，默认沿用 edge.env PORT
+  --target-health-url <url>   临时指定完整健康检查地址，优先级高于 --target-health-port
   --code                      部署模型时同时同步 edge/ 代码到板端
   --code-only                 只同步 edge/ 代码，不上传模型、不改 env/service、不重启
   --no-restart                只上传文件和更新 env/service，不重启推理服务
@@ -103,6 +118,12 @@ while [[ $# -gt 0 ]]; do
     --topk) TOPK_OVERRIDE="${2:-}"; shift 2 ;;
     --conf-threshold) CONF_THRESHOLD_OVERRIDE="${2:-}"; shift 2 ;;
     --nms-threshold) NMS_THRESHOLD_OVERRIDE="${2:-}"; shift 2 ;;
+    --target-device-id) TARGET_DEVICE_ID_OVERRIDE="${2:-}"; shift 2 ;;
+    --target-host) TARGET_HOST_OVERRIDE="${2:-}"; shift 2 ;;
+    --target-user) TARGET_USER_OVERRIDE="${2:-ubuntu}"; shift 2 ;;
+    --target-port) TARGET_PORT_OVERRIDE="${2:-22}"; shift 2 ;;
+    --target-health-port) TARGET_HEALTH_PORT_OVERRIDE="${2:-}"; shift 2 ;;
+    --target-health-url) TARGET_HEALTH_URL_OVERRIDE="${2:-}"; shift 2 ;;
     --code) SYNC_EDGE_CODE="true"; shift ;;
     --code-only) CODE_ONLY="true"; SYNC_EDGE_CODE="true"; NO_RESTART="true"; shift ;;
     --no-restart) NO_RESTART="true"; shift ;;
@@ -379,9 +400,9 @@ sanitize_name_part() {
 }
 
 parse_deploy_context() {
-  local class_file="$1" manifest_file="$2" input_override="$3" topk_override="$4" conf_override="$5" nms_override="$6" display_name="$7" model_path="$8" model_md5="$9" model_size_bytes="${10}" version_override="${11}"
+  local class_file="$1" manifest_file="$2" input_override="$3" topk_override="$4" conf_override="$5" nms_override="$6" display_name="$7" model_path="$8" model_md5="$9" model_size_bytes="${10}" version_override="${11}" target_device_override="${12}"
 
-  python3 - <<'PY' "$class_file" "$manifest_file" "$input_override" "$topk_override" "$conf_override" "$nms_override" "$display_name" "$model_path" "$model_md5" "$model_size_bytes" "$version_override"
+  python3 - <<'PY' "$class_file" "$manifest_file" "$input_override" "$topk_override" "$conf_override" "$nms_override" "$display_name" "$model_path" "$model_md5" "$model_size_bytes" "$version_override" "$target_device_override"
 import json, re, sys
 from pathlib import Path
 from datetime import datetime
@@ -402,6 +423,7 @@ model_path = sys.argv[8]
 model_md5 = sys.argv[9]
 model_size_bytes = int(sys.argv[10])
 version_override = sys.argv[11].strip()
+target_device_override = sys.argv[12].strip()
 
 def fail(msg):
     print(json.dumps({"ok": False, "error": msg}, ensure_ascii=False))
@@ -521,9 +543,10 @@ topk = int(topk_override or class_cfg.get("topk") or default_topk)
 conf_threshold = float(conf_override or class_cfg.get("conf_threshold") or 0.25)
 nms_threshold = float(nms_override or class_cfg.get("nms_threshold") or 0.45)
 
-device_id = first_nonempty(manifest.get("device_id"), manifest.get("equipment_id"), manifest.get("edge_device_id"))
+source_device_id = first_nonempty(manifest.get("device_id"), manifest.get("equipment_id"), manifest.get("edge_device_id"))
+device_id = target_device_override or source_device_id
 if not device_id:
-    fail(f"{manifest_file} 必须包含 device_id")
+    fail(f"{manifest_file} 必须包含 device_id，或通过 --target-device-id 指定目标设备 ID")
 customer_id = first_nonempty(manifest.get("customer_id"), manifest.get("customer"), manifest.get("cust_id"), "CUST-000")
 counts = manifest.get("counts") or {}
 if not isinstance(counts, dict):
@@ -555,6 +578,7 @@ meta = {
         "manifest_path": str(manifest_file),
         "dataset_id": manifest.get("dataset_id") or manifest.get("package_id") or "",
         "device_id": str(device_id),
+        "source_device_id": str(source_device_id or ""),
         "customer_id": str(customer_id),
         "counts": counts,
         "raw_manifest": manifest,
@@ -816,7 +840,7 @@ main() {
   model_size_bytes="$(get_file_size_bytes "$MODEL_PATH")"
   context_file="$(mktemp /tmp/visionops_deploy_context_XXXXXX.json)"
 
-  context_json="$(parse_deploy_context "$CLASS_NAMES_FILE" "$DATASET_MANIFEST" "$INPUT_SIZE_OVERRIDE" "$TOPK_OVERRIDE" "$CONF_THRESHOLD_OVERRIDE" "$NMS_THRESHOLD_OVERRIDE" "$DISPLAY_NAME" "$MODEL_PATH" "$model_md5" "$model_size_bytes" "$MODEL_VERSION_OVERRIDE")"
+  context_json="$(parse_deploy_context "$CLASS_NAMES_FILE" "$DATASET_MANIFEST" "$INPUT_SIZE_OVERRIDE" "$TOPK_OVERRIDE" "$CONF_THRESHOLD_OVERRIDE" "$NMS_THRESHOLD_OVERRIDE" "$DISPLAY_NAME" "$MODEL_PATH" "$model_md5" "$model_size_bytes" "$MODEL_VERSION_OVERRIDE" "$TARGET_DEVICE_ID_OVERRIDE")"
   echo "$context_json" > "$context_file"
 
   local ok err
@@ -888,14 +912,36 @@ PY
   log_info "模型 MD5: ${model_md5}, size=${model_size_bytes} bytes"
 
   local parsed host port user deploy_path service_name health_url
-  parsed="$(parse_device_from_yaml "$CONFIG_FILE" "$device_id")"
-  case "$parsed" in
-    YAML_IMPORT_ERROR) log_error "缺少 PyYAML，无法解析设备配置: ${CONFIG_FILE}"; rm -f "$context_file"; exit 1 ;;
-    CONFIG_NOT_FOUND) log_error "设备配置不存在: ${CONFIG_FILE}"; rm -f "$context_file"; exit 1 ;;
-    DEVICE_NOT_FOUND) log_error "在 ${CONFIG_FILE} 中找不到设备: ${device_id}。请在 pipeline/configs/task.yaml 或 pipeline/configs/deploy.yaml 中增加 edge_devices，或设置 EDGE_DEVICE_HOST/EDGE_USER 环境变量。"; rm -f "$context_file"; exit 1 ;;
-  esac
-  IFS='|' read -r host port user deploy_path service_name health_url <<< "$parsed"
+  if [[ -n "$TARGET_HOST_OVERRIDE" ]]; then
+    log_warn "使用临时目标设备参数部署到其他设备: device_id=${device_id}, host=${TARGET_HOST_OVERRIDE}"
+    host="$TARGET_HOST_OVERRIDE"
+    port="${TARGET_PORT_OVERRIDE:-22}"
+    user="${TARGET_USER_OVERRIDE:-ubuntu}"
+    deploy_path="${REMOTE_MODEL_DIR}"
+    service_name="visionops-inference"
+    if [[ -n "$TARGET_HEALTH_URL_OVERRIDE" ]]; then
+      health_url="$TARGET_HEALTH_URL_OVERRIDE"
+    elif [[ -n "$TARGET_HEALTH_PORT_OVERRIDE" ]]; then
+      health_url="http://localhost:${TARGET_HEALTH_PORT_OVERRIDE}/health"
+    else
+      health_url=""
+    fi
+  else
+    parsed="$(parse_device_from_yaml "$CONFIG_FILE" "$device_id")"
+    case "$parsed" in
+      YAML_IMPORT_ERROR) log_error "缺少 PyYAML，无法解析设备配置: ${CONFIG_FILE}"; rm -f "$context_file"; exit 1 ;;
+      CONFIG_NOT_FOUND) log_error "设备配置不存在: ${CONFIG_FILE}"; rm -f "$context_file"; exit 1 ;;
+      DEVICE_NOT_FOUND) log_error "在 ${CONFIG_FILE} 中找不到设备: ${device_id}。请在 pipeline/configs/task.yaml 或 pipeline/configs/deploy.yaml 中增加 edge_devices，或设置 EDGE_DEVICE_HOST/EDGE_USER 环境变量。"; rm -f "$context_file"; exit 1 ;;
+    esac
+    IFS='|' read -r host port user deploy_path service_name health_url <<< "$parsed"
+  fi
+
   [[ -n "$host" ]] || { log_error "设备 host 为空"; rm -f "$context_file"; exit 1; }
+  if ! [[ "$port" =~ ^[0-9]+$ ]]; then
+    log_error "SSH 端口必须是数字，当前: ${port}"
+    rm -f "$context_file"
+    exit 1
+  fi
 
   local resolved_health_url
   resolved_health_url="$(resolve_health_url "$health_url" "$LOCAL_EDGE_ENV")"

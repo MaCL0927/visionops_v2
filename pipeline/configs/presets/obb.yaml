@@ -19,7 +19,7 @@ model:
 
 train:
   epochs: 20
-  batch_size: 8
+  batch_size: 4
   lr0: 0.001
   device: cuda
   workers: 4

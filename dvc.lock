@@ -235,8 +235,8 @@ stages:
     deps:
     - path: pipeline/configs/task.yaml
       hash: md5
-      md5: 07a89499e8a3c207aada39d46d18a690
-      size: 1588
+      md5: 6de762413e57714960feb771bb427ea7
+      size: 1903
     - path: pipeline/core/config.py
       hash: md5
       md5: 3fdf301cf48a7d0602eb9ea62aad343a
@@ -252,16 +252,16 @@ stages:
     outs:
     - path: edge/runtime/class_names.yaml
       hash: md5
-      md5: 9a63b0e9651b33cb932fe4719417cd29
-      size: 220
+      md5: 2d16b63a2168e69ca18a8e90324b2bab
+      size: 189
     - path: edge/runtime/edge.env
       hash: md5
-      md5: b86ec837866ee4027440fd444638e329
-      size: 338
+      md5: 91c39e0c9d4a449cb4417008e9cdc4df
+      size: 334
     - path: pipeline/configs/generated/task.generated.yaml
       hash: md5
-      md5: 82d7b65d53006840929975099a13ff65
-      size: 3733
+      md5: af587b1e1e1fc23f81dffe43c66715dd
+      size: 3174
   preprocess:
     cmd: python -m pipeline.stages.preprocess
     deps:
@@ -422,8 +422,8 @@ stages:
     deps:
     - path: pipeline/configs/generated/task.generated.yaml
       hash: md5
-      md5: 82d7b65d53006840929975099a13ff65
-      size: 3733
+      md5: af587b1e1e1fc23f81dffe43c66715dd
+      size: 3174
     - path: pipeline/core/config.py
       hash: md5
       md5: 3fdf301cf48a7d0602eb9ea62aad343a

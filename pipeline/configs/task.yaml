@@ -8,11 +8,10 @@ dataset:
   processed_yaml: data/processed_obb/data.yaml
 classes:
   names:
-  - green_cube
-  - yellow_cube
-  - blue_cube
-  - red_cube
-  num_classes: 4
+  - earphone
+  - mouse
+  - phone
+  num_classes: 3
 model:
   architecture: yolov8n-obb
   pretrained_weights: models/pretrained/yolov8n-obb.pt
@@ -21,7 +20,7 @@ model:
   - 640
 train:
   epochs: 20
-  batch_size: 8
+  batch_size: 4
   lr0: 0.001
   device: cuda
   workers: 4

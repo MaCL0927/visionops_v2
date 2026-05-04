@@ -5,28 +5,29 @@
 Ingest edge collector upload packages.
 
 Usage:
-  python server/data_ingest/ingest_uploaded_package.py
-  python server/data_ingest/ingest_uploaded_package.py --package data/rk3588-001_CUST-001_20260425_144306.tar.gz
-  python server/data_ingest/ingest_uploaded_package.py --incoming-dir data --keep-package
+  # 单包处理
+  python server/data_ingest/ingest_uploaded_package.py \
+    --package data/incoming/rk3588-001_CUST-001_20260425_144306.tar.gz
 
-Input package example:
-  data/rk3588-001_CUST-001_20260425_144306.tar.gz
+  # 多包合并处理：多个包会合并到一个 data/raw_collected/<merged_batch_id>/，并只同步一个 manifest
+  python server/data_ingest/ingest_uploaded_package.py \
+    --packages data/incoming/A.tar.gz data/incoming/B.tar.gz
 
 Output:
   data/raw_collected/<batch_id>/
   data/collected_batches/index.json
+  data/model_context/manifest.json
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import shutil
 import tarfile
 import tempfile
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -34,61 +35,8 @@ from typing import Any
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 REQUIRED_DIRS = ["all_images", "positive", "negative"]
+OPTIONAL_MERGE_DIRS = ["labels", "labels_auto"]
 
-def sync_manifest_to_model_context(
-    package_dir: Path,
-    model_context_dir: Path = Path("data/model_context"),
-) -> Path:
-    """
-    将当前采集包的 manifest.json 同步到固定位置：
-    data/model_context/manifest.json
-
-    注意：
-    1. 原始 manifest 保留在 raw_collected/<package_name>/manifest.json
-    2. 固定 manifest 作为当前训练/部署上下文
-    """
-    src_manifest = package_dir / "manifest.json"
-
-    if not src_manifest.exists():
-        raise FileNotFoundError(f"未找到采集包 manifest.json: {src_manifest}")
-
-    model_context_dir.mkdir(parents=True, exist_ok=True)
-    dst_manifest = model_context_dir / "manifest.json"
-
-    with src_manifest.open("r", encoding="utf-8") as f:
-        manifest = json.load(f)
-
-    package_name = package_dir.name
-
-    # 尽量兼容不同字段名
-    device_id = (
-        manifest.get("device_id")
-        or manifest.get("equipment_id")
-        or manifest.get("edge_device_id")
-        or "unknown-device"
-    )
-
-    customer_id = (
-        manifest.get("customer_id")
-        or manifest.get("cust_id")
-        or manifest.get("user_id")
-        or "unknown-customer"
-    )
-
-    # 这里不要破坏原始字段，只追加标准字段
-    manifest["device_id"] = device_id
-    manifest["customer_id"] = customer_id
-    manifest["package_name"] = package_name
-    manifest["source_manifest"] = str(src_manifest)
-    manifest["model_context_updated_at"] = datetime.now().isoformat(timespec="seconds")
-
-    with dst_manifest.open("w", encoding="utf-8") as f:
-        json.dump(manifest, f, ensure_ascii=False, indent=2)
-
-    print(f"[OK] 已同步 manifest 到固定位置: {dst_manifest}")
-    print(f"[INFO] device_id={device_id}, customer_id={customer_id}, package_name={package_name}")
-
-    return dst_manifest
 
 @dataclass
 class BatchStatus:
@@ -113,10 +61,23 @@ def now_str() -> str:
 
 
 def safe_name(name: str) -> str:
-    name = name.strip()
-    name = name.replace(" ", "_")
+    name = name.strip().replace(" ", "_")
     name = re.sub(r"[^A-Za-z0-9_.\-]+", "_", name)
     return name.strip("._") or "unknown"
+
+
+def write_json(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_json(path: Path, default: Any) -> Any:
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return default
 
 
 def parse_batch_name(package_path: Path) -> tuple[str, str, str, str]:
@@ -137,9 +98,7 @@ def parse_batch_name(package_path: Path) -> tuple[str, str, str, str]:
     if len(parts) >= 4:
         device_id = safe_name(parts[0])
         customer_id = safe_name(parts[1])
-        date_part = parts[2]
-        time_part = parts[3]
-        captured_at = f"{date_part}_{time_part}"
+        captured_at = f"{parts[2]}_{parts[3]}"
         batch_id = safe_name(stem)
         return batch_id, device_id, customer_id, captured_at
 
@@ -148,9 +107,7 @@ def parse_batch_name(package_path: Path) -> tuple[str, str, str, str]:
 
 
 def is_safe_tar_member(member: tarfile.TarInfo, dest_dir: Path) -> bool:
-    """
-    Prevent path traversal such as ../../evil.
-    """
+    """Prevent path traversal such as ../../evil."""
     member_path = dest_dir / member.name
     try:
         member_path.resolve().relative_to(dest_dir.resolve())
@@ -182,8 +139,6 @@ def find_dataset_root(extracted_dir: Path) -> Path:
       local_dataset/all_images/
       local_dataset/positive/
       local_dataset/negative/
-
-    This function finds the directory containing required dataset dirs.
     """
     candidates = [extracted_dir]
     candidates.extend([p for p in extracted_dir.rglob("*") if p.is_dir()])
@@ -192,26 +147,19 @@ def find_dataset_root(extracted_dir: Path) -> Path:
         if all((p / d).is_dir() for d in REQUIRED_DIRS):
             return p
 
-    raise FileNotFoundError(
-        f"未找到数据集根目录，要求同时包含: {', '.join(REQUIRED_DIRS)}"
-    )
+    raise FileNotFoundError(f"未找到数据集根目录，要求同时包含: {', '.join(REQUIRED_DIRS)}")
 
 
 def count_images(folder: Path) -> int:
     if not folder.exists():
         return 0
-    return sum(
-        1 for p in folder.rglob("*")
-        if p.is_file() and p.suffix.lower() in IMAGE_EXTS
-    )
+    return sum(1 for p in folder.rglob("*") if p.is_file() and p.suffix.lower() in IMAGE_EXTS)
 
 
 def copy_dataset_root(dataset_root: Path, output_dir: Path, overwrite: bool) -> None:
     if output_dir.exists():
         if not overwrite:
-            raise FileExistsError(
-                f"输出目录已存在: {output_dir}。如需覆盖，请加 --overwrite"
-            )
+            raise FileExistsError(f"输出目录已存在: {output_dir}。如需覆盖，请加 --overwrite")
         shutil.rmtree(output_dir)
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -225,23 +173,39 @@ def copy_dataset_root(dataset_root: Path, output_dir: Path, overwrite: bool) -> 
 
     for d in REQUIRED_DIRS:
         (output_dir / d).mkdir(parents=True, exist_ok=True)
+    (output_dir / "labels").mkdir(parents=True, exist_ok=True)
 
 
-def write_json(path: Path, data: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2),
-        encoding="utf-8"
-    )
+def copy_dir_contents(src_dir: Path, dst_dir: Path) -> int:
+    """
+    将 src_dir 下的文件复制到 dst_dir。
+    当前项目约定不同包内不会有重名图片，因此这里不做重命名处理。
+    """
+    if not src_dir.exists():
+        return 0
+
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    for src in src_dir.rglob("*"):
+        if not src.is_file():
+            continue
+        rel = src.relative_to(src_dir)
+        dst = dst_dir / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        copied += 1
+    return copied
 
 
-def load_json(path: Path, default: Any) -> Any:
-    if not path.exists():
-        return default
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return default
+def append_text_file(src_file: Path, dst_file: Path) -> None:
+    if not src_file.exists():
+        return
+    dst_file.parent.mkdir(parents=True, exist_ok=True)
+    with src_file.open("r", encoding="utf-8", errors="ignore") as f_in, dst_file.open(
+        "a", encoding="utf-8"
+    ) as f_out:
+        for line in f_in:
+            f_out.write(line.rstrip("\n") + "\n")
 
 
 def update_index(index_path: Path, status: BatchStatus) -> None:
@@ -275,10 +239,55 @@ def move_package(package_path: Path, incoming_dir: Path, status: str, keep_packa
     dst = target_dir / package_path.name
     if dst.exists():
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        dst = target_dir / f"{package_path.stem}_{timestamp}{package_path.suffix}"
+        stem = package_path.name[:-7] if package_path.name.endswith(".tar.gz") else package_path.stem
+        dst = target_dir / f"{stem}_{timestamp}.tar.gz"
 
     shutil.move(str(package_path), str(dst))
     return dst
+
+
+def sync_manifest_to_model_context(
+    package_dir: Path,
+    model_context_dir: Path = Path("data/model_context"),
+) -> Path:
+    """
+    将当前采集包的 manifest.json 同步到固定位置：data/model_context/manifest.json。
+    """
+    src_manifest = package_dir / "manifest.json"
+    if not src_manifest.exists():
+        raise FileNotFoundError(f"未找到采集包 manifest.json: {src_manifest}")
+
+    model_context_dir.mkdir(parents=True, exist_ok=True)
+    dst_manifest = model_context_dir / "manifest.json"
+
+    manifest = load_json(src_manifest, default={}) or {}
+    package_name = package_dir.name
+
+    device_id = (
+        manifest.get("device_id")
+        or manifest.get("equipment_id")
+        or manifest.get("edge_device_id")
+        or "unknown-device"
+    )
+    customer_id = (
+        manifest.get("customer_id")
+        or manifest.get("cust_id")
+        or manifest.get("user_id")
+        or "unknown-customer"
+    )
+
+    manifest["device_id"] = device_id
+    manifest["customer_id"] = customer_id
+    manifest["package_name"] = package_name
+    manifest["source_manifest"] = str(src_manifest)
+    manifest["model_context_updated_at"] = datetime.now().isoformat(timespec="seconds")
+
+    write_json(dst_manifest, manifest)
+
+    print(f"[OK] 已同步 manifest 到固定位置: {dst_manifest}")
+    print(f"[INFO] device_id={device_id}, customer_id={customer_id}, package_name={package_name}")
+
+    return dst_manifest
 
 
 def ingest_one_package(
@@ -325,6 +334,7 @@ def ingest_one_package(
 
         write_json(output_dir / "batch_status.json", asdict(status))
         update_index(index_path, status)
+        sync_manifest_to_model_context(output_dir)
         move_package(package_path, incoming_dir, "success", keep_package=keep_package)
 
         return status
@@ -351,14 +361,147 @@ def ingest_one_package(
         raise
 
 
+def auto_merged_batch_id(package_paths: list[Path]) -> str:
+    _, device_id, customer_id, _ = parse_batch_name(package_paths[0])
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return safe_name(f"{device_id}_{customer_id}_merged_{timestamp}")
+
+
+def ingest_multiple_packages(
+    package_paths: list[Path],
+    incoming_dir: Path,
+    raw_collected_dir: Path,
+    index_path: Path,
+    overwrite: bool,
+    keep_package: bool,
+    merged_batch_id: str = "",
+) -> BatchStatus:
+    """
+    多包处理：把多个上传包合并到一个 raw_collected/<merged_batch_id>/，只生成一个 manifest.json。
+    不做重名图片处理；如果不同包内存在同名文件，后复制的文件会覆盖前面的文件。
+    """
+    if len(package_paths) < 2:
+        raise ValueError("多包处理至少需要 2 个压缩包")
+
+    package_paths = [p.resolve() for p in package_paths]
+    for p in package_paths:
+        if not p.exists():
+            raise FileNotFoundError(f"压缩包不存在: {p}")
+
+    first_batch_id, first_device_id, first_customer_id, first_captured_at = parse_batch_name(package_paths[0])
+    batch_id = safe_name(merged_batch_id) if merged_batch_id else auto_merged_batch_id(package_paths)
+    output_dir = raw_collected_dir / batch_id
+
+    try:
+        if output_dir.exists():
+            if not overwrite:
+                raise FileExistsError(f"合并输出目录已存在: {output_dir}。如需覆盖，请加 --overwrite")
+            shutil.rmtree(output_dir)
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for d in REQUIRED_DIRS + OPTIONAL_MERGE_DIRS:
+            (output_dir / d).mkdir(parents=True, exist_ok=True)
+
+        sources: list[dict[str, Any]] = []
+
+        for package_path in package_paths:
+            sub_batch_id, device_id, customer_id, captured_at = parse_batch_name(package_path)
+            print(f"[INFO] 合并上传包: {package_path}")
+
+            with tempfile.TemporaryDirectory(prefix="visionops_merge_") as tmp:
+                tmp_dir = Path(tmp)
+                safe_extract_tar_gz(package_path, tmp_dir)
+                dataset_root = find_dataset_root(tmp_dir)
+
+                for d in REQUIRED_DIRS + OPTIONAL_MERGE_DIRS:
+                    copy_dir_contents(dataset_root / d, output_dir / d)
+
+                append_text_file(dataset_root / "collector_meta.jsonl", output_dir / "collector_meta.jsonl")
+
+                src_manifest_path = dataset_root / "manifest.json"
+                src_manifest = load_json(src_manifest_path, default={}) if src_manifest_path.exists() else {}
+                sources.append(
+                    {
+                        "package_path": str(package_path),
+                        "batch_id": sub_batch_id,
+                        "device_id": device_id,
+                        "customer_id": customer_id,
+                        "captured_at": captured_at,
+                        "manifest": src_manifest,
+                    }
+                )
+
+        merged_manifest = {
+            "schema_version": "visionops_collected_manifest_v1",
+            "is_merged": True,
+            "batch_id": batch_id,
+            "package_name": batch_id,
+            "device_id": first_device_id,
+            "customer_id": first_customer_id,
+            "captured_at": first_captured_at,
+            "merged_at": datetime.now().isoformat(timespec="seconds"),
+            "source_package_count": len(package_paths),
+            "source_packages": [str(p) for p in package_paths],
+            "sources": sources,
+            "all_images_count": count_images(output_dir / "all_images"),
+            "positive_count": count_images(output_dir / "positive"),
+            "negative_count": count_images(output_dir / "negative"),
+        }
+        write_json(output_dir / "manifest.json", merged_manifest)
+
+        status = BatchStatus(
+            batch_id=batch_id,
+            device_id=first_device_id,
+            customer_id=first_customer_id,
+            captured_at=first_captured_at,
+            source_package=";".join(str(p) for p in package_paths),
+            output_dir=str(output_dir),
+            status="merged",
+            all_images_count=count_images(output_dir / "all_images"),
+            positive_count=count_images(output_dir / "positive"),
+            negative_count=count_images(output_dir / "negative"),
+            manifest_exists=True,
+            collector_meta_exists=(output_dir / "collector_meta.jsonl").exists(),
+            ingested_at=now_str(),
+            message=f"merged {len(package_paths)} packages",
+        )
+
+        write_json(output_dir / "batch_status.json", asdict(status))
+        update_index(index_path, status)
+        sync_manifest_to_model_context(output_dir)
+
+        for package_path in package_paths:
+            move_package(package_path, incoming_dir, "success", keep_package=keep_package)
+
+        return status
+
+    except Exception as exc:
+        failed_status = BatchStatus(
+            batch_id=batch_id,
+            device_id=first_device_id,
+            customer_id=first_customer_id,
+            captured_at=first_captured_at,
+            source_package=";".join(str(p) for p in package_paths),
+            output_dir=str(output_dir),
+            status="failed",
+            all_images_count=0,
+            positive_count=0,
+            negative_count=0,
+            manifest_exists=False,
+            collector_meta_exists=False,
+            ingested_at=now_str(),
+            message=str(exc),
+        )
+        update_index(index_path, failed_status)
+        for package_path in package_paths:
+            if package_path.exists():
+                move_package(package_path, incoming_dir, "failed", keep_package=keep_package)
+        raise
+
+
 def discover_packages(incoming_dir: Path) -> list[Path]:
-    packages = sorted(incoming_dir.glob("*.tar.gz"))
-    return [
-        p for p in packages
-        if p.is_file()
-        and "processed" not in p.parts
-        and "failed" not in p.parts
-    ]
+    packages = sorted(incoming_dir.glob("*.tar.gz"), key=lambda p: p.stat().st_mtime)
+    return [p for p in packages if p.is_file() and "processed" not in p.parts and "failed" not in p.parts]
 
 
 def build_argparser() -> argparse.ArgumentParser:
@@ -367,13 +510,25 @@ def build_argparser() -> argparse.ArgumentParser:
         "--package",
         type=str,
         default="",
-        help="指定单个 tar.gz 包。默认扫描 incoming-dir 下所有 *.tar.gz。",
+        help="指定单个 tar.gz 包。",
+    )
+    parser.add_argument(
+        "--packages",
+        nargs="+",
+        default=[],
+        help="指定一个或多个 tar.gz 包。传入多个包时会自动合并成一个 batch。",
+    )
+    parser.add_argument(
+        "--merged-batch-id",
+        type=str,
+        default="",
+        help="多包合并后的 batch_id。不传则自动生成。",
     )
     parser.add_argument(
         "--incoming-dir",
         type=str,
-        default="data",
-        help="上传包所在目录。当前测试包在 data/ 下，所以默认用 data。",
+        default="data/incoming",
+        help="上传包所在目录。默认 data/incoming。",
     )
     parser.add_argument(
         "--raw-collected-dir",
@@ -413,7 +568,9 @@ def main() -> int:
     (incoming_dir / "processed").mkdir(parents=True, exist_ok=True)
     (incoming_dir / "failed").mkdir(parents=True, exist_ok=True)
 
-    if args.package:
+    if args.packages:
+        packages = [Path(p) for p in args.packages]
+    elif args.package:
         packages = [Path(args.package)]
     else:
         packages = discover_packages(incoming_dir)
@@ -422,12 +579,10 @@ def main() -> int:
         print(f"[INFO] 未发现待处理压缩包: {incoming_dir}/*.tar.gz")
         return 0
 
-    ok = 0
-    failed = 0
-
-    for package_path in packages:
-        print(f"\n[INFO] 处理上传包: {package_path}")
-        try:
+    try:
+        if len(packages) == 1:
+            package_path = packages[0]
+            print(f"\n[INFO] 单包处理: {package_path}")
             status = ingest_one_package(
                 package_path=package_path,
                 incoming_dir=incoming_dir,
@@ -436,12 +591,6 @@ def main() -> int:
                 overwrite=args.overwrite,
                 keep_package=args.keep_package,
             )
-            ok += 1
-
-            # 将当前批次的 manifest.json 同步到固定上下文位置：
-            # data/model_context/manifest.json
-            sync_manifest_to_model_context(Path(status.output_dir))
-
             print("[OK] 解压完成")
             print(f"  batch_id:   {status.batch_id}")
             print(f"  device_id:  {status.device_id}")
@@ -451,17 +600,39 @@ def main() -> int:
             print(f"  positive:   {status.positive_count}")
             print(f"  negative:   {status.negative_count}")
             print("  manifest:   data/model_context/manifest.json")
-        except Exception as exc:
-            failed += 1
-            print(f"[ERROR] 处理失败: {package_path}")
-            print(f"  reason: {exc}")
+        else:
+            print(f"\n[INFO] 多包合并处理: {len(packages)} 个压缩包")
+            status = ingest_multiple_packages(
+                package_paths=packages,
+                incoming_dir=incoming_dir,
+                raw_collected_dir=raw_collected_dir,
+                index_path=index_path,
+                overwrite=args.overwrite,
+                keep_package=args.keep_package,
+                merged_batch_id=args.merged_batch_id,
+            )
+            print("[OK] 合并解压完成")
+            print(f"  merged_batch_id: {status.batch_id}")
+            print(f"  output_dir:      {status.output_dir}")
+            print(f"  packages:        {len(packages)}")
+            print(f"  all_images:      {status.all_images_count}")
+            print(f"  positive:        {status.positive_count}")
+            print(f"  negative:        {status.negative_count}")
+            print("  manifest:        data/model_context/manifest.json")
 
-    print("\n============================================================")
-    print(f"完成: 成功 {ok} 个，失败 {failed} 个")
-    print(f"索引: {index_path}")
-    print("============================================================")
+        print("\n============================================================")
+        print("完成: 成功 1 个 batch，失败 0 个")
+        print(f"索引: {index_path}")
+        print("============================================================")
+        return 0
 
-    return 0 if failed == 0 else 1
+    except Exception as exc:
+        print("\n============================================================")
+        print("完成: 成功 0 个 batch，失败 1 个")
+        print(f"索引: {index_path}")
+        print("============================================================")
+        print(f"[ERROR] 处理失败: {exc}")
+        return 1
 
 
 if __name__ == "__main__":

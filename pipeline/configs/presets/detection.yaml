@@ -99,7 +99,7 @@ model:
 
 train:
   epochs: 50
-  batch_size: 16
+  batch_size: 4
   lr0: 0.001
   device: 0
   workers: 4

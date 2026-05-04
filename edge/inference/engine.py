@@ -319,6 +319,29 @@ def safe_class_name(class_names: List[str], cls_id: int) -> str:
 
 
 
+def build_detection_prediction(
+    cls_id: int,
+    cls_name: str,
+    score: float,
+    bbox_xyxy: Any,
+) -> Dict[str, Any]:
+    """构造检测结果，统一补充 bbox 中心点坐标。"""
+    box = [float(x) for x in np.asarray(bbox_xyxy, dtype=np.float32).reshape(-1)[:4].tolist()]
+    x1, y1, x2, y2 = box
+    cx = (x1 + x2) / 2.0
+    cy = (y1 + y2) / 2.0
+    return {
+        "class_id": int(cls_id),
+        "class_name": str(cls_name),
+        "confidence": round(float(score), 4),
+        "bbox": [round(x1, 2), round(y1, 2), round(x2, 2), round(y2, 2)],
+        "center": [round(cx, 2), round(cy, 2)],
+        "center_x": round(cx, 2),
+        "center_y": round(cy, 2),
+    }
+
+
+
 def softmax_np(x: np.ndarray, axis: int = -1) -> np.ndarray:
     """数值稳定版 softmax，用于 DFL 解码。"""
     x = np.asarray(x, dtype=np.float32)
@@ -742,12 +765,12 @@ def _decode_rockchip_yolov8_outputs(
     for i in keep:
         cls_id = int(class_ids[i])
         predictions.append(
-            {
-                "class_id": cls_id,
-                "class_name": str(cls_id),
-                "confidence": round(float(scores[i]), 4),
-                "bbox": [round(float(x), 2) for x in boxes[i].tolist()],
-            }
+            build_detection_prediction(
+                cls_id=cls_id,
+                cls_name=str(cls_id),
+                score=float(scores[i]),
+                bbox_xyxy=boxes[i],
+            )
         )
 
     predictions.sort(key=lambda x: x["confidence"], reverse=True)
@@ -1196,12 +1219,12 @@ class RKNNInferenceEngine:
                 else str(cls_id)
             )
             predictions.append(
-                {
-                    "class_id": cls_id,
-                    "class_name": cls_name,
-                    "confidence": round(float(scores[i]), 4),
-                    "bbox": [round(float(x), 2) for x in boxes_xyxy[i].tolist()],
-                }
+                build_detection_prediction(
+                    cls_id=cls_id,
+                    cls_name=cls_name,
+                    score=float(scores[i]),
+                    bbox_xyxy=boxes_xyxy[i],
+                )
             )
 
         predictions.sort(key=lambda x: x["confidence"], reverse=True)
@@ -1272,14 +1295,16 @@ class RKNNInferenceEngine:
         for i in keep:
             cls_id = int(class_ids[i])
             predictions.append(
-                {
-                    "class_id": cls_id,
-                    "class_name": self.config.class_names[cls_id]
-                    if cls_id < len(self.config.class_names)
-                    else str(cls_id),
-                    "confidence": round(float(scores[i]), 4),
-                    "bbox": [round(float(x), 2) for x in boxes_xyxy[i].tolist()],
-                }
+                build_detection_prediction(
+                    cls_id=cls_id,
+                    cls_name=(
+                        self.config.class_names[cls_id]
+                        if cls_id < len(self.config.class_names)
+                        else str(cls_id)
+                    ),
+                    score=float(scores[i]),
+                    bbox_xyxy=boxes_xyxy[i],
+                )
             )
 
         predictions.sort(key=lambda x: x["confidence"], reverse=True)
@@ -1485,6 +1510,9 @@ class RKNNInferenceEngine:
                     "class_name": safe_class_name(self.config.class_names, cls_id),
                     "confidence": round(score, 6),
                     "bbox": [round(float(x), 2) for x in bbox.tolist()],
+                    "center": [round(cx, 2), round(cy, 2)],
+                    "center_x": round(cx, 2),
+                    "center_y": round(cy, 2),
                     "obb": {
                         "cx": round(cx, 2),
                         "cy": round(cy, 2),

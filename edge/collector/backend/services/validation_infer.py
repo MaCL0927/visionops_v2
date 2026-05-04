@@ -500,6 +500,27 @@ def _summarize_detection(raw: Dict[str, Any]) -> Dict[str, Any]:
     return {"count": len(preds), "class_counts": counts}
 
 
+def _ensure_detection_centers(predictions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """兼容旧版 engine：如果检测结果没有 center 字段，则根据 bbox 补算中心点。"""
+    fixed: List[Dict[str, Any]] = []
+    for pred in predictions or []:
+        item = dict(pred)
+        bbox = item.get("bbox")
+        if isinstance(bbox, list) and len(bbox) >= 4:
+            try:
+                x1, y1, x2, y2 = [float(x) for x in bbox[:4]]
+                cx = round((x1 + x2) / 2.0, 2)
+                cy = round((y1 + y2) / 2.0, 2)
+                item["bbox"] = [round(x1, 2), round(y1, 2), round(x2, 2), round(y2, 2)]
+                item.setdefault("center", [cx, cy])
+                item.setdefault("center_x", cx)
+                item.setdefault("center_y", cy)
+            except Exception:
+                pass
+        fixed.append(item)
+    return fixed
+
+
 def infer_image_with_model(model_name: str, image_path: Path) -> Dict[str, Any]:
     engine_info = ensure_validation_engine(model_name)
     meta = engine_info.get("meta", {})
@@ -512,6 +533,7 @@ def infer_image_with_model(model_name: str, image_path: Path) -> Dict[str, Any]:
         "model_name": Path(model_name).name,
         "image_name": image_path.name,
         "latency_ms": raw.get("latency_ms"),
+        "updated_at": time.strftime("%H:%M:%S"),
         "engine": {
             "port": _validation_port(),
             "reused": engine_info.get("reused", False),
@@ -531,8 +553,9 @@ def infer_image_with_model(model_name: str, image_path: Path) -> Dict[str, Any]:
         base["result"] = _normalize_classification_result(raw)
         base["topk"] = raw.get("topk", [])
     elif task in {"detection", "obb_detection"}:
-        base["predictions"] = raw.get("predictions", [])
-        base["detection"] = _summarize_detection(raw)
+        predictions = _ensure_detection_centers(raw.get("predictions", []))
+        base["predictions"] = predictions
+        base["detection"] = _summarize_detection({"predictions": predictions})
         task_text = "旋转框检测" if task == "obb_detection" else "检测"
         base["result"] = {
             "class_name": f"{task_text}到 {base['detection']['count']} 个目标",
