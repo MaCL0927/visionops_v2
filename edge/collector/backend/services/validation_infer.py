@@ -89,7 +89,9 @@ def _read_model_meta(model_path: Path) -> Dict[str, Any]:
     task = str(data.get("task") or model_meta.get("task") or "").strip().lower()
     if task in {"obb", "oriented_detection", "rotated_detection", "yolo_obb", "yolov8_obb"}:
         task = "obb_detection"
-    if task not in {"classification", "detection", "obb_detection"}:
+    if task in {"seg", "segment", "segmentation", "instance_segmentation", "yolo_seg", "yolov8_seg", "mask_segmentation"}:
+        task = "segmentation"
+    if task not in {"classification", "detection", "obb_detection", "segmentation"}:
         raise ValueError(f"模型配置缺少有效 task: {meta_path.name}")
 
     input_size = data.get("input_size") or model_meta.get("input_size")
@@ -552,11 +554,11 @@ def infer_image_with_model(model_name: str, image_path: Path) -> Dict[str, Any]:
     if task == "classification":
         base["result"] = _normalize_classification_result(raw)
         base["topk"] = raw.get("topk", [])
-    elif task in {"detection", "obb_detection"}:
+    elif task in {"detection", "obb_detection", "segmentation"}:
         predictions = _ensure_detection_centers(raw.get("predictions", []))
         base["predictions"] = predictions
         base["detection"] = _summarize_detection({"predictions": predictions})
-        task_text = "旋转框检测" if task == "obb_detection" else "检测"
+        task_text = "旋转框检测" if task == "obb_detection" else ("实例分割" if task == "segmentation" else "检测")
         base["result"] = {
             "class_name": f"{task_text}到 {base['detection']['count']} 个目标",
             "confidence": None,

@@ -518,6 +518,185 @@ def build_obb_detection(cfg: dict[str, Any]) -> dict[str, dict[str, Any]]:
             },
         },
     }
+    
+def build_segmentation(cfg: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    names = _class_names(cfg)
+
+    model = cfg.get("model", {})
+    train = cfg.get("train", {})
+    ds = cfg.get("dataset", {})
+    out = cfg.get("output", {})
+    export = cfg.get("export", {})
+    rknn = cfg.get("rknn", {})
+    mlflow = cfg.get("mlflow", {})
+
+    input_hw = _as_hw(model.get("input_size", 640), [640, 640])
+    img = int(input_hw[0])
+
+    raw_root = ds.get("raw_root", "data/raw_segmentation")
+    raw_yaml = ds.get("raw_yaml", "data/raw_segmentation/data.yaml")
+    processed_root = ds.get("processed_root", "data/processed_segmentation")
+    processed_yaml = ds.get("processed_yaml", "data/processed_segmentation/data.yaml")
+
+    checkpoint_dir = out.get("checkpoint_dir", "models/checkpoints_segmentation")
+    metrics_dir = out.get("metrics_dir", "models/metrics_segmentation")
+    export_dir = out.get("export_dir", "models/export_segmentation")
+
+    onnx_path = export.get("output_path", f"{export_dir}/model.onnx")
+    rknn_model = rknn.get("rknn_model", f"{export_dir}/model.rknn")
+    rknn_report = rknn.get("perf_report", f"{export_dir}/rknn_report.json")
+
+    return {
+        "preprocess": {
+            "dataset": {
+                "root": raw_root,
+                "yaml_path": raw_yaml,
+                "task": "segment",
+                "class_names": names,
+                "num_classes": len(names),
+                "label_format": "yolo_segmentation_polygon",
+            },
+            "preprocess": {
+                "copy_to_processed": True,
+                "processed_root": processed_root,
+                "processed_yaml": processed_yaml,
+                "check_images": True,
+                "check_labels": True,
+                "min_label_fields": 7,
+            },
+        },
+        "train": {
+            "model": {
+                "architecture": model.get("architecture", "yolov8n-seg"),
+                "weights": model.get("pretrained_weights", "models/pretrained/yolov8n-seg.pt"),
+                "num_classes": len(names),
+                "pretrained": True,
+                "task": "segment",
+            },
+            "dataset": {
+                "yaml_path": processed_yaml,
+            },
+            "train": {
+                "epochs": train.get("epochs", 50),
+                "batch_size": train.get("batch_size", 16),
+                "img_size": img,
+                "lr0": train.get("lr0", 0.001),
+                "device": train.get("device", "cpu"),
+                "workers": train.get("workers", 4),
+                "patience": train.get("patience", 20),
+                "cache": train.get("cache", False),
+                "project": train.get("project", "models/runs/segment"),
+                "name": train.get("name", "visionops_segmentation"),
+                "exist_ok": train.get("exist_ok", True),
+            },
+            "mlflow": {
+                "experiment_name": mlflow.get("experiment_name", "visionops-segmentation"),
+                "tracking_uri": mlflow.get("tracking_uri", "http://localhost:5000"),
+                "log_artifacts": True,
+                "log_model": False,
+            },
+            "output": {
+                "checkpoint_dir": checkpoint_dir,
+                "metrics_dir": metrics_dir,
+            },
+        },
+        "evaluate": {
+            "model": {
+                "checkpoint_path": f"{checkpoint_dir}/best.pt",
+                "task": "segment",
+            },
+            "dataset": {
+                "yaml_path": processed_yaml,
+            },
+            "eval": {
+                "img_size": img,
+                "batch_size": train.get("batch_size", 16),
+                "device": train.get("device", "cpu"),
+            },
+            "output": {
+                "metrics_dir": metrics_dir,
+                "eval_metrics": f"{metrics_dir}/eval_metrics.json",
+            },
+        },
+        "export": {
+            "export": {
+                "checkpoint_path": export.get("checkpoint_path", f"{checkpoint_dir}/best.pt"),
+                "output_path": onnx_path,
+                "imgsz": export.get("imgsz", img),
+                "opset": export.get("opset", 12),
+                "simplify": export.get("simplify", True),
+                "dynamic": export.get("dynamic", False),
+                "mode": export.get("mode", "ultralytics"),
+                "task": "segment",
+                "yolo_exec": export.get("yolo_exec", "/home/pc/anaconda3/envs/pt2onnx/bin/yolo"),
+            },
+            "external_export": cfg.get("external_export", {}),
+        },
+        "convert_rknn": {
+            "python_exec": rknn.get("python_exec", "python"),
+            "target_platform": rknn.get("target_platform", "rk3588"),
+            "output": {
+                "onnx_model": rknn.get("onnx_model", onnx_path),
+                "rknn_model": rknn_model,
+                "perf_report": rknn_report,
+            },
+            "quantization": {
+                "dataset": rknn.get("quantization", {}).get("dataset", f"{processed_root}/images/val"),
+                "dataset_size": rknn.get("quantization", {}).get("dataset_size", 100),
+                "quantized_dtype": rknn.get("quantization", {}).get(
+                    "quantized_dtype",
+                    "asymmetric_quantized-8",
+                ),
+            },
+            "io_config": {
+                "mean_values": rknn.get("input", {}).get("mean_values", [[0, 0, 0]]),
+                "std_values": rknn.get("input", {}).get("std_values", [[255, 255, 255]]),
+                "input_size_list": [[1, 3, img, img]],
+            },
+            "build": {
+                "do_quantization": rknn.get("build", {}).get("do_quantization", True),
+                "optimization_level": rknn.get("build", {}).get("optimization_level", 3),
+            },
+            "runtime": {
+                "perf_debug": rknn.get("runtime", {}).get("perf_debug", False),
+                "eval_mem": rknn.get("runtime", {}).get("eval_mem", False),
+            },
+            "check_output_shapes": rknn.get("check_output_shapes", True),
+            "task": "segmentation",
+            "output_type": "box_mask",
+        },
+        "register_model": {
+            "registry": {
+                "model_name": mlflow.get("registered_model_name", "visionops-segmentation-rk3588"),
+                "task": "segmentation",
+                "promotion_threshold": mlflow.get(
+                    "promotion_threshold",
+                    {
+                        "map50": 0.5,
+                        "map50_95": 0.3,
+                        "latency_ms": 150.0,
+                    },
+                ),
+                "tags": {
+                    "platform": rknn.get("target_platform", "rk3588"),
+                    "quantized": str(rknn.get("build", {}).get("do_quantization", True)).lower(),
+                    "auto_registered": "true",
+                    "task": "segmentation",
+                    "output_type": "box_mask",
+                    "model_family": model.get("architecture", "yolov8-seg"),
+                },
+            },
+            "paths": {
+                "eval_metrics": f"{metrics_dir}/eval_metrics.json",
+                "train_metrics": f"{metrics_dir}/train_metrics.json",
+                "mlflow_run_id": f"{metrics_dir}/mlflow_run_id.txt",
+                "onnx_model": onnx_path,
+                "rknn_model": rknn_model,
+                "convert_report": rknn_report,
+                "registry_result": f"{metrics_dir}/registry_result.json",
+            },
+        },
+    }
 
 def main() -> None:
     cfg = load_task_config()
@@ -536,6 +715,8 @@ def main() -> None:
         stage_files = build_classification(cfg)
     elif task_type == "obb_detection":
         stage_files = build_obb_detection(cfg)
+    elif task_type == "segmentation":
+        stage_files = build_segmentation(cfg)
     else:
         raise ValueError(f"不支持的任务类型: {task_type}")
     

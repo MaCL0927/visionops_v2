@@ -94,7 +94,9 @@ def extract_results_dict(results: Any) -> dict[str, Any]:
 
 
 def sanitize_mlflow_key(key: str) -> str:
-    """MLflow metric/param key 对字符有限制，这里把特殊字符替换成下划线。"""
+    """
+    MLflow metric/param key 对字符有限制，这里把括号、中文等替换成下划线。
+    """
     key = str(key).strip().replace("/", "_")
     key = re.sub(r"[^A-Za-z0-9_. -]+", "_", key)
     key = re.sub(r"\s+", "_", key)
@@ -156,8 +158,6 @@ def safe_log_artifacts_from_dir(save_dir: Path, artifact_path: str = "train") ->
         "labels.jpg",
         "labels_correlogram.jpg",
         "train_batch0.jpg",
-        "train_batch1.jpg",
-        "train_batch2.jpg",
         "val_batch0_labels.jpg",
         "val_batch0_pred.jpg",
     ]
@@ -175,7 +175,7 @@ def setup_mlflow(mlflow_cfg: dict[str, Any]) -> tuple[bool, str | None, str | No
     """
     enabled = bool(mlflow_cfg.get("enabled", True))
     tracking_uri = str(mlflow_cfg.get("tracking_uri") or "http://localhost:5000")
-    experiment_name = str(mlflow_cfg.get("experiment_name") or "visionops-obb")
+    experiment_name = str(mlflow_cfg.get("experiment_name") or "visionops-segmentation")
 
     if not enabled:
         print("[INFO] MLflow logging disabled by config")
@@ -205,11 +205,11 @@ def main() -> None:
     output_cfg = cfg.get("output", {})
     mlflow_cfg = cfg.get("mlflow", {})
 
-    weights = project_path(model_cfg.get("weights", "models/pretrained/yolov8n-obb.pt"))
-    data_yaml = project_path(dataset_cfg.get("yaml_path", "data/processed_obb/data.yaml"))
+    weights = project_path(model_cfg.get("weights", "models/pretrained/yolov8n-seg.pt"))
+    data_yaml = project_path(dataset_cfg.get("yaml_path", "data/processed_segmentation/data.yaml"))
 
-    checkpoint_dir = project_path(output_cfg.get("checkpoint_dir", "models/checkpoints_obb"))
-    metrics_dir = project_path(output_cfg.get("metrics_dir", "models/metrics_obb"))
+    checkpoint_dir = project_path(output_cfg.get("checkpoint_dir", "models/checkpoints_segmentation"))
+    metrics_dir = project_path(output_cfg.get("metrics_dir", "models/metrics_segmentation"))
 
     img_size = int(train_cfg.get("img_size", 640))
     epochs = int(train_cfg.get("epochs", 50))
@@ -218,19 +218,19 @@ def main() -> None:
     workers = int(train_cfg.get("workers", 4))
     patience = int(train_cfg.get("patience", 20))
     cache = bool(train_cfg.get("cache", False))
-    project = train_cfg.get("project", "models/runs/obb")
-    name = train_cfg.get("name", "visionops_obb")
+    project = train_cfg.get("project", "models/runs/segment")
+    name = train_cfg.get("name", "visionops_segmentation")
     exist_ok = bool(train_cfg.get("exist_ok", True))
     lr0 = float(train_cfg.get("lr0", 0.001))
 
-    require_file(weights, "请确认 task.yaml 中 model.pretrained_weights 指向本地 yolov8n-obb.pt")
-    require_file(data_yaml, "请先运行 dvc repro preprocess 生成 data/processed_obb/data.yaml")
+    require_file(weights, "请确认 task.yaml 中 model.pretrained_weights 指向本地 yolov8n-seg.pt")
+    require_file(data_yaml, "请先运行 dvc repro preprocess 生成 data/processed_segmentation/data.yaml")
 
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     metrics_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 60)
-    print("OBB 模型训练开始")
+    print("Segmentation 模型训练开始")
     print("=" * 60)
     print(f"权重文件: {weights}")
     print(f"数据配置: {data_yaml}")
@@ -244,7 +244,7 @@ def main() -> None:
     print("=" * 60)
 
     mlflow_enabled, tracking_uri, experiment_name = setup_mlflow(mlflow_cfg)
-    run_name = str(mlflow_cfg.get("run_name") or f"obb-train-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
+    run_name = str(mlflow_cfg.get("run_name") or f"segmentation-train-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
     run_ctx = mlflow.start_run(run_name=run_name) if (mlflow_enabled and mlflow is not None) else nullcontext()
 
     run_id: str | None = None
@@ -256,11 +256,11 @@ def main() -> None:
             print(f"[INFO] MLflow Run ID: {run_id}")
 
             params = {
-                "task": "obb_detection",
+                "task": "segmentation",
                 "stage": "train",
                 "weights": weights.as_posix(),
                 "data_yaml": data_yaml.as_posix(),
-                "architecture": model_cfg.get("architecture", "yolov8n-obb"),
+                "architecture": model_cfg.get("architecture", "yolov8n-seg"),
                 "img_size": img_size,
                 "epochs": epochs,
                 "batch_size": batch_size,
@@ -277,7 +277,7 @@ def main() -> None:
                 safe_log_param(k, v)
 
         results = model.train(
-            task="obb",
+            task="segment",
             data=str(data_yaml),
             imgsz=img_size,
             epochs=epochs,
@@ -309,6 +309,7 @@ def main() -> None:
         result_dict = extract_results_dict(results)
 
         if active_run is not None:
+            # 训练阶段 Ultralytics 有时会在 results_dict 里带少量数值；能记则记，失败不影响主流程。
             for k, v in result_dict.items():
                 safe_log_metric(f"train_{k}", v)
 
@@ -321,7 +322,7 @@ def main() -> None:
                 safe_log_artifacts_from_dir(Path(save_dir_raw), artifact_path="train")
 
         train_metrics = {
-            "task": "obb_detection",
+            "task": "segmentation",
             "stage": "train",
             "status": "success",
             "mlflow_run_id": run_id,
@@ -365,7 +366,7 @@ def main() -> None:
         if active_run is not None:
             safe_log_artifact(train_metrics_path, artifact_path="metrics")
 
-    print("✓ OBB 模型训练完成")
+    print("✓ Segmentation 模型训练完成")
     print(f"best.pt: {best_path}")
     print(f"last.pt:  {last_path}")
     print(f"训练指标: {metrics_dir / 'train_metrics.json'}")

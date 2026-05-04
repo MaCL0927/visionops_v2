@@ -235,52 +235,52 @@ stages:
     deps:
     - path: pipeline/configs/task.yaml
       hash: md5
-      md5: 6de762413e57714960feb771bb427ea7
-      size: 1903
+      md5: adb54fd07ec90216f179063c8909b2ae
+      size: 2586
     - path: pipeline/core/config.py
       hash: md5
-      md5: 3fdf301cf48a7d0602eb9ea62aad343a
-      size: 2264
+      md5: a6f6ada57b2143e00e0fb707d17bbfaa
+      size: 2493
     - path: pipeline/core/io.py
       hash: md5
       md5: 9e8351dc4cb499e5f7080d1025dea2ad
       size: 1691
     - path: pipeline/utils/render_task_config.py
       hash: md5
-      md5: 3451fde749f98d0633241211839d045a
-      size: 24096
+      md5: 98f7ae261cec5ed1b435be4cbafeff4a
+      size: 31740
     outs:
     - path: edge/runtime/class_names.yaml
       hash: md5
-      md5: 2d16b63a2168e69ca18a8e90324b2bab
-      size: 189
+      md5: 4088f0f75449d72385578eed3a8196dd
+      size: 950
     - path: edge/runtime/edge.env
       hash: md5
-      md5: 91c39e0c9d4a449cb4417008e9cdc4df
-      size: 334
+      md5: a685814cba79c2d99f302fb9d3096b03
+      size: 338
     - path: pipeline/configs/generated/task.generated.yaml
       hash: md5
-      md5: af587b1e1e1fc23f81dffe43c66715dd
-      size: 3174
+      md5: 4f71f6da26aac2ecf8885f7f24434611
+      size: 6065
   preprocess:
     cmd: python -m pipeline.stages.preprocess
     deps:
     - path: pipeline/configs/generated/task.generated.yaml
       hash: md5
-      md5: 5c9e12c64f5647dd35ac7875737651a2
-      size: 3614
+      md5: 80d9a01356f616dca579b2251203c72b
+      size: 6067
     - path: pipeline/core/config.py
       hash: md5
-      md5: 3fdf301cf48a7d0602eb9ea62aad343a
-      size: 2264
+      md5: a6f6ada57b2143e00e0fb707d17bbfaa
+      size: 2493
     - path: pipeline/core/io.py
       hash: md5
       md5: 9e8351dc4cb499e5f7080d1025dea2ad
       size: 1691
     - path: pipeline/stages/preprocess.py
       hash: md5
-      md5: 1e0b374e8bda9d1ecb1390bc7bae87d3
-      size: 579
+      md5: 81315a409faa6f6855149faa4e3005cb
+      size: 688
     - path: pipeline/tasks/classification/preprocess.py
       hash: md5
       md5: c460cc38258f1ec47d58a374ea55a380
@@ -293,25 +293,29 @@ stages:
       hash: md5
       md5: 59fa353851d40ec0fc63f5a0104a114e
       size: 16427
+    - path: pipeline/tasks/segmentation/preprocess.py
+      hash: md5
+      md5: e852a09df22e66b122bcd8badfe7a81e
+      size: 12660
   train:
     cmd: python -m pipeline.stages.train
     deps:
     - path: pipeline/configs/generated/task.generated.yaml
       hash: md5
-      md5: 5c9e12c64f5647dd35ac7875737651a2
-      size: 3614
+      md5: 496234f8cb1fd8698a7f44cc882a4dba
+      size: 6068
     - path: pipeline/core/config.py
       hash: md5
-      md5: 3fdf301cf48a7d0602eb9ea62aad343a
-      size: 2264
+      md5: a6f6ada57b2143e00e0fb707d17bbfaa
+      size: 2493
     - path: pipeline/core/io.py
       hash: md5
       md5: 9e8351dc4cb499e5f7080d1025dea2ad
       size: 1691
     - path: pipeline/stages/train.py
       hash: md5
-      md5: 36054f9531484557cc10732f094ceeb8
-      size: 564
+      md5: 1455e9b5924b1cdc4ce6b2c1c379df1d
+      size: 668
     - path: pipeline/tasks/classification/train.py
       hash: md5
       md5: 5409122463cb11aaeb7866e5fa4a4b5a
@@ -324,25 +328,29 @@ stages:
       hash: md5
       md5: 4cc0734d84b505a099e285a2417a68c3
       size: 6437
+    - path: pipeline/tasks/segmentation/train.py
+      hash: md5
+      md5: fab081a320ba1213a56fe839c4623f5c
+      size: 6480
   export_onnx:
     cmd: python -m pipeline.stages.export_onnx
     deps:
     - path: pipeline/configs/generated/task.generated.yaml
       hash: md5
-      md5: 82d7b65d53006840929975099a13ff65
-      size: 3733
+      md5: 496234f8cb1fd8698a7f44cc882a4dba
+      size: 6068
     - path: pipeline/core/config.py
       hash: md5
-      md5: 3fdf301cf48a7d0602eb9ea62aad343a
-      size: 2264
+      md5: a6f6ada57b2143e00e0fb707d17bbfaa
+      size: 2493
     - path: pipeline/core/io.py
       hash: md5
       md5: 9e8351dc4cb499e5f7080d1025dea2ad
       size: 1691
     - path: pipeline/stages/export_onnx.py
       hash: md5
-      md5: 32e7c162dc0b308c449c62b430a34c90
-      size: 582
+      md5: f631b291e50a1c8daa14b6148ff58e8e
+      size: 692
     - path: pipeline/tasks/classification/export_onnx.py
       hash: md5
       md5: 4e4ee29705bc376e29bff03870c23ab4
@@ -355,25 +363,29 @@ stages:
       hash: md5
       md5: 43174b3a6459863755b41d99f0160859
       size: 6301
+    - path: pipeline/tasks/segmentation/export_onnx.py
+      hash: md5
+      md5: 5fd6f56a2ac61bb964de76f07af9fa27
+      size: 9114
   convert_rknn:
     cmd: python -m pipeline.stages.convert_rknn
     deps:
     - path: pipeline/configs/generated/task.generated.yaml
       hash: md5
-      md5: 82d7b65d53006840929975099a13ff65
-      size: 3733
+      md5: 496234f8cb1fd8698a7f44cc882a4dba
+      size: 6068
     - path: pipeline/core/config.py
       hash: md5
-      md5: 3fdf301cf48a7d0602eb9ea62aad343a
-      size: 2264
+      md5: a6f6ada57b2143e00e0fb707d17bbfaa
+      size: 2493
     - path: pipeline/core/io.py
       hash: md5
       md5: 9e8351dc4cb499e5f7080d1025dea2ad
       size: 1691
     - path: pipeline/stages/convert_rknn.py
       hash: md5
-      md5: 7997f76770c1ecc91ed2019a4d04804b
-      size: 585
+      md5: 2c425de65bda2ae2dad4625af20515fe
+      size: 696
     - path: pipeline/tasks/classification/convert_rknn.py
       hash: md5
       md5: 47fb61c7d340665bd549a846d0a98d70
@@ -386,25 +398,29 @@ stages:
       hash: md5
       md5: 98fce991a0348cb624396ce04c738fe8
       size: 8985
+    - path: pipeline/tasks/segmentation/convert_rknn.py
+      hash: md5
+      md5: df6e1140b1c3a41da488ff3bdeadb362
+      size: 11404
   evaluate:
     cmd: python -m pipeline.stages.evaluate
     deps:
     - path: pipeline/configs/generated/task.generated.yaml
       hash: md5
-      md5: 5c9e12c64f5647dd35ac7875737651a2
-      size: 3614
+      md5: 496234f8cb1fd8698a7f44cc882a4dba
+      size: 6068
     - path: pipeline/core/config.py
       hash: md5
-      md5: 3fdf301cf48a7d0602eb9ea62aad343a
-      size: 2264
+      md5: a6f6ada57b2143e00e0fb707d17bbfaa
+      size: 2493
     - path: pipeline/core/io.py
       hash: md5
       md5: 9e8351dc4cb499e5f7080d1025dea2ad
       size: 1691
     - path: pipeline/stages/evaluate.py
       hash: md5
-      md5: 4ace59c41fb096695c5383df0afcac7e
-      size: 573
+      md5: 1861c9098781a7f7cf7281758930382f
+      size: 680
     - path: pipeline/tasks/classification/evaluate.py
       hash: md5
       md5: 342619a0397947876a13e2956d3d1070
@@ -417,25 +433,29 @@ stages:
       hash: md5
       md5: f29b699b70c319824ab3359cec22bc8a
       size: 5736
+    - path: pipeline/tasks/segmentation/evaluate.py
+      hash: md5
+      md5: 582afdc6172a49e50178eff140c6ce08
+      size: 5364
   register_model:
     cmd: python -m pipeline.stages.register_model
     deps:
     - path: pipeline/configs/generated/task.generated.yaml
       hash: md5
-      md5: af587b1e1e1fc23f81dffe43c66715dd
-      size: 3174
+      md5: 4f71f6da26aac2ecf8885f7f24434611
+      size: 6065
     - path: pipeline/core/config.py
       hash: md5
-      md5: 3fdf301cf48a7d0602eb9ea62aad343a
-      size: 2264
+      md5: a6f6ada57b2143e00e0fb707d17bbfaa
+      size: 2493
     - path: pipeline/core/io.py
       hash: md5
       md5: 9e8351dc4cb499e5f7080d1025dea2ad
       size: 1691
     - path: pipeline/stages/register_model.py
       hash: md5
-      md5: 39e71a0fbf11c5aabfcd61397173c91e
-      size: 591
+      md5: d68cfdeb2848ff6fe95af5230d483b2d
+      size: 704
     - path: pipeline/tasks/classification/register_model.py
       hash: md5
       md5: 888f3e3386c760a3aa9ec7eab58b6158
@@ -448,3 +468,7 @@ stages:
       hash: md5
       md5: eb4d9e4ef1aae85b9158e3bb7518d9a4
       size: 13388
+    - path: pipeline/tasks/segmentation/register_model.py
+      hash: md5
+      md5: fa5ce6d2033878c9a9d9e93584a2f854
+      size: 13566

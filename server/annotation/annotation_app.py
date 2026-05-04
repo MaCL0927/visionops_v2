@@ -36,6 +36,7 @@ QUICK_TRAIN_IMGSZ = int(os.environ.get("VISIONOPS_QUICK_TRAIN_IMGSZ", "640"))
 QUICK_TRAIN_BATCH = int(os.environ.get("VISIONOPS_QUICK_TRAIN_BATCH", "2"))
 QUICK_DET_MODEL = os.environ.get("VISIONOPS_QUICK_DET_MODEL", "models/pretrained/yolov8n.pt")
 QUICK_OBB_MODEL = os.environ.get("VISIONOPS_QUICK_OBB_MODEL", "models/pretrained/yolov8n-obb.pt")
+QUICK_SEG_MODEL = os.environ.get("VISIONOPS_QUICK_SEG_MODEL", "models/pretrained/yolov8n-seg.pt")
 QUICK_YOLO_CMD = os.environ.get("VISIONOPS_QUICK_YOLO_CMD", "yolo")
 AUTO_LABEL_CONF = float(os.environ.get("VISIONOPS_QUICK_AUTO_CONF", "0.25"))
 QUICK_TRAIN_MIN_PER_CLASS = int(os.environ.get("VISIONOPS_QUICK_TRAIN_MIN_PER_CLASS", "3"))
@@ -140,12 +141,50 @@ def save_quick_state(batch_dir: Path, state: dict[str, Any]) -> None:
     write_json(quick_state_path(batch_dir), state)
 
 
+def normalize_annotation_task(task_type: str | None) -> str:
+    task = str(task_type or "detection").strip().lower()
+    if task in {"seg", "segment", "segmentation", "instance_segmentation", "yolo_seg", "yolov8_seg"}:
+        return "segmentation"
+    if task in {"obb", "obb_detection", "oriented_detection", "rotated_detection"}:
+        return "obb"
+    return "detection"
+
+
+def task_state_path(batch_dir: Path) -> Path:
+    return batch_dir / "annotation_task.json"
+
+
+def load_annotation_task(batch_dir: Path) -> str:
+    data = read_json(task_state_path(batch_dir), default={}) or {}
+    return normalize_annotation_task(data.get("task_type") or data.get("task") or "detection")
+
+
+def save_annotation_task(batch_dir: Path, task_type: str) -> str:
+    task = normalize_annotation_task(task_type)
+    write_json(task_state_path(batch_dir), {
+        "task_type": task,
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "note": "当前 batch 的标注任务类型。用于区分 OBB 9列标签与 segmentation 4点多边形标签。",
+    })
+    return task
+
+
 def task_to_yolo_subcommand(task_type: str) -> str:
-    return "obb" if task_type == "obb" else "detect"
+    task = normalize_annotation_task(task_type)
+    if task == "obb":
+        return "obb"
+    if task == "segmentation":
+        return "segment"
+    return "detect"
 
 
 def quick_model_for_task(task_type: str) -> str:
-    return QUICK_OBB_MODEL if task_type == "obb" else QUICK_DET_MODEL
+    task = normalize_annotation_task(task_type)
+    if task == "obb":
+        return QUICK_OBB_MODEL
+    if task == "segmentation":
+        return QUICK_SEG_MODEL
+    return QUICK_DET_MODEL
 
 
 def non_empty_label(path: Path) -> bool:
@@ -253,10 +292,12 @@ def build_quick_dataset(
 
     names_lines = "\n".join([f"  {i}: {name}" for i, name in enumerate(classes)])
     data_yaml = dataset_dir / "data.yaml"
+    task_line = "task: segment\n" if normalize_annotation_task(task_type) == "segmentation" else ""
     data_yaml.write_text(
         f"path: {dataset_dir.as_posix()}\n"
         "train: images/train\n"
-        "val: images/val\n\n"
+        "val: images/val\n"
+        f"{task_line}\n"
         f"nc: {len(classes)}\n"
         "names:\n"
         f"{names_lines}\n",
@@ -387,14 +428,14 @@ def annotation_session() -> dict[str, Any]:
         "auto_label_count": count_auto_labels(labels_auto_dir),
         "quick_train": quick_state.get("quick_train", {}),
         "last_auto_label": quick_state.get("last_auto_label", {}),
-        "default_task_type": "detection",
+        "default_task_type": load_annotation_task(batch_dir),
     }
 
 
 @router.get("/api/annotator/image/{index}")
 def annotation_image(index: int) -> dict[str, Any]:
     try:
-        _, images_dir, labels_dir, labels_auto_dir, _ = get_batch_paths()
+        batch_dir, images_dir, labels_dir, labels_auto_dir, _ = get_batch_paths()
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -417,7 +458,8 @@ def annotation_image(index: int) -> dict[str, Any]:
         label_source = "none"
         active_label_path = manual_label_path
 
-    annotations = parse_yolo_label(active_label_path, image_w=image_w, image_h=image_h)
+    task_type = load_annotation_task(batch_dir)
+    annotations = parse_yolo_label(active_label_path, image_w=image_w, image_h=image_h, task_type=task_type)
 
     return {
         "index": index,
@@ -430,6 +472,7 @@ def annotation_image(index: int) -> dict[str, Any]:
         "label_path": rel(active_label_path),
         "label_source": label_source,
         "needs_confirm": label_source == "auto",
+        "task_type": task_type,
         "annotations": annotations,
     }
 
@@ -451,7 +494,7 @@ def annotation_file(index: int) -> FileResponse:
 @router.post("/api/annotator/classes")
 def annotation_save_classes(payload: dict[str, Any]) -> dict[str, Any]:
     try:
-        _, _, _, _, classes_path = get_batch_paths()
+        batch_dir, _, _, _, classes_path = get_batch_paths()
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -459,14 +502,27 @@ def annotation_save_classes(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(classes, list):
         raise HTTPException(status_code=400, detail="classes 必须是列表")
 
+    task_type = normalize_annotation_task(payload.get("task_type") or load_annotation_task(batch_dir))
+    save_annotation_task(batch_dir, task_type)
     save_annotation_classes(classes_path, [str(x) for x in classes])
-    return {"message": "类别已保存", "classes_path": rel(classes_path), "num_classes": len(classes)}
+    return {"message": "类别已保存", "classes_path": rel(classes_path), "num_classes": len(classes), "task_type": task_type}
+
+
+@router.post("/api/annotator/task")
+def annotation_save_task(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        batch_dir, _, _, _, _ = get_batch_paths()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    task_type = normalize_annotation_task(payload.get("task_type"))
+    save_annotation_task(batch_dir, task_type)
+    return {"message": "任务类型已保存", "task_type": task_type}
 
 
 @router.post("/api/annotator/save")
 def annotation_save(payload: dict[str, Any]) -> dict[str, Any]:
     try:
-        _, images_dir, labels_dir, _, classes_path = get_batch_paths()
+        batch_dir, images_dir, labels_dir, _, classes_path = get_batch_paths()
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -479,9 +535,10 @@ def annotation_save(payload: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"图片不存在: {filename}")
 
     image_w, image_h = get_image_size(image_path)
-    task_type = str(payload.get("task_type", "detection"))
-    if task_type not in {"detection", "obb"}:
+    task_type = normalize_annotation_task(payload.get("task_type", "detection"))
+    if task_type not in {"detection", "obb", "segmentation"}:
         raise HTTPException(status_code=400, detail=f"不支持的任务类型: {task_type}")
+    save_annotation_task(batch_dir, task_type)
 
     annotations = payload.get("annotations", [])
     if not isinstance(annotations, list):
@@ -493,7 +550,7 @@ def annotation_save(payload: dict[str, Any]) -> dict[str, Any]:
 
     label_path = labels_dir / f"{image_path.stem}.txt"
     save_yolo_label(label_path=label_path, annotations=annotations, image_w=image_w, image_h=image_h, task_type=task_type)
-    return {"message": "已保存人工标注", "label_path": rel(label_path), "count": len(annotations)}
+    return {"message": "已保存人工标注", "label_path": rel(label_path), "count": len(annotations), "task_type": task_type}
 
 
 @router.post("/api/annotator/confirm-auto")
@@ -631,9 +688,10 @@ def annotation_quick_train(payload: dict[str, Any]) -> dict[str, Any]:
         batch_dir, _, _, _, classes_path = get_batch_paths()
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    task_type = str(payload.get("task_type", "detection"))
-    if task_type not in {"detection", "obb"}:
+    task_type = normalize_annotation_task(payload.get("task_type", "detection"))
+    if task_type not in {"detection", "obb", "segmentation"}:
         raise HTTPException(status_code=400, detail=f"不支持的任务类型: {task_type}")
+    save_annotation_task(batch_dir, task_type)
     classes = payload.get("classes")
     if isinstance(classes, list):
         save_annotation_classes(classes_path, [str(x) for x in classes])
@@ -649,9 +707,10 @@ def annotation_auto_label_remaining(payload: dict[str, Any]) -> dict[str, Any]:
         batch_dir, _, _, _, _ = get_batch_paths()
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    task_type = str(payload.get("task_type", "detection"))
-    if task_type not in {"detection", "obb"}:
+    task_type = normalize_annotation_task(payload.get("task_type", "detection"))
+    if task_type not in {"detection", "obb", "segmentation"}:
         raise HTTPException(status_code=400, detail=f"不支持的任务类型: {task_type}")
+    save_annotation_task(batch_dir, task_type)
     job_id = quick_jobs.start(batch_dir, "auto-label-remaining", _auto_label_worker, batch_dir, task_type)
     return {"job_id": job_id, "message": "预标注剩余图片已开始"}
 
@@ -758,6 +817,7 @@ ANNOTATOR_HTML = r'''
       <select id="taskType" onchange="onTaskChange()">
         <option value="detection">Detection 矩形框</option>
         <option value="obb">OBB 四点框</option>
+        <option value="segmentation">Segmentation 多边形</option>
       </select>
 
       <div class="section-title">类别</div>
@@ -767,6 +827,7 @@ ANNOTATOR_HTML = r'''
         <button class="green" onclick="startDraw()">W 开始标注</button>
         <button class="orange" onclick="deleteSelected()">Q 删除</button>
         <button class="dark" onclick="saveCurrent(true)">S 保存</button>
+        <button class="gray" onclick="finishSegmentationPolygon()">Enter 完成多边形</button>
       </div>
 
       <div id="autoNotice" class="auto-notice">
@@ -776,7 +837,7 @@ ANNOTATOR_HTML = r'''
 
       <div class="hint">
         A/D：上一张/下一张。W：开始标注。Q：删除。S：保存。E：确认自动标注。Esc：取消。<br>
-        Detection：W 后拖拽矩形框。OBB：W 后依次点击 4 个角点。鼠标滚轮缩放。<br>
+        Detection：W 后拖拽矩形框。OBB：W 后依次点击 4 个角点。Segmentation：W 后依次点击多边形点，双击或 Enter 完成。鼠标滚轮缩放。<br>
         人工标注保存到 labels；模型预标注保存到 labels_auto。
       </div>
 
@@ -827,6 +888,7 @@ let dragging = false;
 let startPt = null;
 let tempPt = null;
 let obbPoints = [];
+let segPoints = [];
 let pendingAnnotation = null;
 let baseScale = 1, zoom = 1, scale = 1, offsetX = 0, offsetY = 0;
 let mouseCanvas = null;
@@ -847,6 +909,7 @@ async function init() {
   if (!res.ok) { alert(data.detail || '初始化失败'); return; }
   session = data;
   classes = Array.isArray(session.classes) ? [...session.classes] : [];
+  document.getElementById('taskType').value = session.default_task_type || 'detection';
   document.getElementById('batch').textContent = 'batch: ' + session.batch_id;
   renderClassSummary();
   resizeCanvas();
@@ -896,6 +959,7 @@ async function loadImage(index) {
   const data = await res.json();
   if (!res.ok) { alert(data.detail || '加载图片失败'); return; }
   currentMeta = data;
+  if (data.task_type) document.getElementById('taskType').value = data.task_type;
   annotations = data.annotations || [];
   labelSource = data.label_source || 'none';
   dirty = false;
@@ -903,6 +967,7 @@ async function loadImage(index) {
   drawingMode = false;
   dragging = false;
   obbPoints = [];
+  segPoints = [];
   pendingAnnotation = null;
   mouseCanvas = null;
   zoom = 1;
@@ -952,6 +1017,7 @@ function draw() {
   annotations.forEach((ann,i)=>drawAnn(ann, i===selectedIndex));
   if (dragging && startPt && tempPt) drawAnn({type:'bbox', class_id:-1, x1:startPt.x, y1:startPt.y, x2:tempPt.x, y2:tempPt.y}, true, true);
   if (obbPoints.length) drawAnn({type:'obb', class_id:-1, points:obbPoints}, true, true);
+  if (segPoints.length) drawAnn({type:'segmentation', class_id:-1, points:segPoints}, true, true);
   if (drawingMode && mouseCanvas) drawCrosshair(mouseCanvas.x, mouseCanvas.y);
 }
 
@@ -965,12 +1031,14 @@ function clsName(id) { if (id < 0) return '待选择类别'; return classes[id] 
 function drawAnn(ann, active=false, temp=false) {
   ctx.save(); ctx.lineWidth=active?3:2; ctx.strokeStyle=temp?'#f59e0b':(active?'#22c55e':'#38bdf8'); ctx.fillStyle=ctx.strokeStyle;
   const label = `${ann.class_id>=0?ann.class_id:'?'}: ${clsName(ann.class_id)}`;
-  if (ann.type === 'obb') {
+  if (ann.type === 'obb' || ann.type === 'segmentation') {
     const pts = ann.points || [];
     if (pts.length) {
       ctx.beginPath(); ctx.moveTo(sx(pts[0][0]), sy(pts[0][1]));
       for (let i=1;i<pts.length;i++) ctx.lineTo(sx(pts[i][0]), sy(pts[i][1]));
-      if (pts.length === 4) ctx.closePath(); ctx.stroke();
+      if (ann.type === 'segmentation' && pts.length >= 3) { ctx.closePath(); ctx.fillStyle='rgba(34,197,94,.20)'; ctx.fill(); ctx.fillStyle=ctx.strokeStyle; }
+      if (ann.type === 'obb' && pts.length === 4) ctx.closePath();
+      ctx.stroke();
       pts.forEach(p=>{ctx.beginPath(); ctx.arc(sx(p[0]), sy(p[1]), 4, 0, Math.PI*2); ctx.fill();});
       ctx.font = "35px Arial";
       ctx.fillText(label, sx(pts[0][0])+4, sy(pts[0][1])-6);
@@ -986,23 +1054,34 @@ function drawAnn(ann, active=false, temp=false) {
 function renderBoxList() {
   const list = document.getElementById('boxList');
   if (!annotations.length) { list.innerHTML='<div class="muted">暂无标注</div>'; return; }
-  list.innerHTML = annotations.map((a,i)=>`<div class="boxitem ${i===selectedIndex?'active':''}" onclick="selectAnn(${i})">${i+1}. ${a.type} | ${a.class_id}: ${clsName(a.class_id)}</div>`).join('');
+  list.innerHTML = annotations.map((a,i)=>`<div class="boxitem ${i===selectedIndex?'active':''}" onclick="selectAnn(${i})">${i+1}. ${a.type === 'segmentation' ? 'seg' : a.type} | ${a.class_id}: ${clsName(a.class_id)}</div>`).join('');
 }
 function selectAnn(i){selectedIndex=i; renderBoxList(); draw();}
 function markDirty(){ dirty = true; if (labelSource === 'auto') document.getElementById('saveStatus').textContent = '已修改自动标注，需保存为人工标注'; }
-function startDraw(){drawingMode=true; dragging=false; startPt=null; tempPt=null; obbPoints=[]; pendingAnnotation=null; canvas.classList.add('draw-ready'); document.getElementById('saveStatus').textContent='标注中'; draw();}
-function stopDraw(){drawingMode=false; dragging=false; startPt=null; tempPt=null; obbPoints=[]; canvas.classList.remove('draw-ready'); draw();}
-function onTaskChange(){stopDraw();}
+function startDraw(){drawingMode=true; dragging=false; startPt=null; tempPt=null; obbPoints=[]; segPoints=[]; pendingAnnotation=null; canvas.classList.add('draw-ready'); document.getElementById('saveStatus').textContent='标注中'; draw();}
+function stopDraw(){drawingMode=false; dragging=false; startPt=null; tempPt=null; obbPoints=[]; segPoints=[]; canvas.classList.remove('draw-ready'); draw();}
+async function onTaskChange(){stopDraw(); await fetch('/api/annotator/task',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({task_type:currentTask()})});}
+function finishSegmentationPolygon(){
+  if (currentTask() !== 'segmentation' || segPoints.length < 3) { return; }
+  pendingAnnotation={type:'segmentation', class_id:-1, points:segPoints.map(p=>[p[0],p[1]])};
+  segPoints=[]; stopDraw(); openClassModal(pendingAnnotation);
+}
 
 canvas.addEventListener('mousedown', e => {
   if (!drawingMode) return;
   const p = toImgPt(e);
   if (currentTask() === 'detection') { dragging=true; startPt=p; tempPt=p; }
-  else {
+  else if (currentTask() === 'segmentation') {
+    segPoints.push([p.x,p.y]);
+    draw();
+  } else {
     obbPoints.push([p.x,p.y]);
     if (obbPoints.length === 4) { pendingAnnotation={type:'obb', class_id:-1, points:obbPoints.map(p=>[p[0],p[1]])}; obbPoints=[]; stopDraw(); openClassModal(pendingAnnotation); }
     draw();
   }
+});
+canvas.addEventListener('dblclick', e => {
+  if (drawingMode && currentTask() === 'segmentation') finishSegmentationPolygon();
 });
 canvas.addEventListener('mousemove', e => { mouseCanvas=toCanvasPt(e); if (dragging) tempPt=toImgPt(e); if (drawingMode || dragging) draw(); });
 canvas.addEventListener('mouseleave', () => { mouseCanvas=null; if (drawingMode || dragging) draw(); });
@@ -1034,7 +1113,7 @@ function closeClassModal(){document.getElementById('classModal').style.display='
 function confirmExistingClass(classId){ if(!pendingAnnotation)return; pendingAnnotation.class_id=classId; annotations.push(pendingAnnotation); selectedIndex=annotations.length-1; pendingAnnotation=null; closeClassModal(); markDirty(); renderBoxList(); draw(); }
 async function confirmNewClass(){ const input=document.getElementById('newClassInput'); const name=input.value.trim(); if(!name){alert('请输入类别名'); return;} let classId=classes.indexOf(name); if(classId<0){classes.push(name); classId=classes.length-1; renderClassSummary(); await saveClassesOnly();} confirmExistingClass(classId); }
 function cancelClassModal(){ pendingAnnotation=null; closeClassModal(); draw(); }
-async function saveClassesOnly(){ await fetch('/api/annotator/classes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({classes})}); }
+async function saveClassesOnly(){ await fetch('/api/annotator/classes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({classes, task_type: currentTask()})}); }
 
 async function saveCurrent(force=false){
   if(!currentMeta) return;
@@ -1138,10 +1217,10 @@ ${status.status === 'success' ? '已整理到训练数据目录。' : '请回控
 }
 
 async function acceptReviewedFromAnnotator() {
-  const ok = confirm('确认当前 batch 的标注已经审核完成，并整理到 raw_detection/raw_obb？');
+  const ok = confirm('确认当前 batch 的标注已经审核完成，并整理到对应的 raw_detection/raw_obb/raw_segmentation？');
   if (!ok) return;
   await saveCurrent(true);
-  const res = await fetch('/api/accept-reviewed', { method:'POST' });
+  const res = await fetch('/api/accept-reviewed', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({task_type: currentTask()}) });
   const data = await res.json();
   if (!res.ok) { alert(data.detail || '确认审核完成失败'); return; }
   setReviewJobMsg(`${data.message}
@@ -1160,6 +1239,7 @@ window.addEventListener('keydown', async e => {
   if(k==='s') await saveCurrent(true);
   if(k==='q') deleteSelected();
   if(k==='e') await confirmAutoLabel();
+  if(k==='enter') finishSegmentationPolygon();
   if(k==='escape'){ pendingAnnotation=null; closeClassModal(); stopDraw(); }
 });
 window.addEventListener('resize', resizeCanvas);

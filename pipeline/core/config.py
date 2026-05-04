@@ -63,8 +63,19 @@ def normalize_task_type(task_type: str) -> str:
     }:
         return "obb_detection"
 
+    if t in {
+        "seg",
+        "segment",
+        "segmentation",
+        "instance_segmentation",
+        "yolo_seg",
+        "yolov8_seg",
+        "mask_segmentation",
+    }:
+        return "segmentation"
+
     raise ValueError(
-        f"不支持的 task.type: {task_type!r}，应为 detection、classification 或 obb_detection"
+        f"不支持的 task.type: {task_type!r}，应为 detection、classification、obb_detection 或 segmentation"
     )
 
 

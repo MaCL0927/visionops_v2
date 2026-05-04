@@ -87,7 +87,7 @@
           <aside class="left-steps">
             <button class="step-btn active" data-collect-step="captureStep">
               <span class="step-num">1</span>
-              <span class="step-text"><b>拍照采集</b><em>选择分类/检测模式后取图</em></span>
+              <span class="step-text"><b>拍照采集</b><em>选择分类/检测/分割模式后取图</em></span>
             </button>
             <button class="step-btn" data-collect-step="uploadStep">
               <span class="step-num">2</span>
@@ -105,14 +105,14 @@
                 <div class="capture-title-block">
                   <div class="kicker">采集上传 / 第 1 步</div>
                   <h1>拍照采集</h1>
-                  <p>选择分类或检测模式后点击取图。分类模式会先暂存当前帧，确认合格/不合格后再保存；检测模式会直接保存到全部图片。</p>
+                  <p>选择分类或检测/分割模式后点击取图。分类模式会先暂存当前帧，确认合格/不合格后再保存；检测/分割模式会直接保存到全部图片。</p>
                 </div>
                 <div class="capture-actions capture-actions-main">
                   <label class="capture-mode-select-wrap">
                     <span>采集模式</span>
                     <select id="captureTaskMode" class="capture-mode-select">
                       <option value="classification">分类</option>
-                      <option value="detection">检测</option>
+                      <option value="detection">检测/分割</option>
                     </select>
                   </label>
                   <button id="captureAllBtn" class="big-action secondary">取图</button>
@@ -182,7 +182,7 @@
               <div>
                 <div class="kicker">模型验证 / v6.7</div>
                 <h1>检测模型选图 / 拍照 / 实时验证</h1>
-                <p>系统会根据模型同名 YAML 自动识别分类/检测任务。检测模型支持选图检测、拍照检测和实时检测，并在结果图上显示检测框。</p>
+                <p>系统会根据模型同名 YAML 自动识别分类/检测/旋转框/分割任务。检测与分割模型支持选图、拍照和实时验证，并在结果图上显示检测框、旋转框或分割区域。</p>
               </div>
               <div class="validate-action-row">
                 <button id="runSingleImageInfer" class="big-action validate-btn compact">选图检测</button>
@@ -241,10 +241,22 @@
           <div class="status-pill">连续监控中</div>
         </div>
         <div class="production-stage">
-          <div class="camera-label"><b>生产线实时监控</b><span>模型结果叠加显示</span></div>
-          <div class="prod-box p1"><span>person 0.96</span></div>
-          <div class="prod-box p2"><span>forklift 0.91</span></div>
-          <div class="prod-box p3"><span>smoke 0.73</span></div>
+          <div class="production-monitor-meta">
+            <div><span>当前模型</span><b id="productionModelName">自动选择最新模型</b></div>
+            <div><span>检测状态</span><b id="productionStatus">准备启动</b></div>
+          </div>
+
+          <div id="productionPreview" class="production-preview">
+            <div class="preview-canvas-wrap production-canvas-wrap">
+              <span class="production-empty">生产模式实时检测画面加载中...</span>
+            </div>
+          </div>
+
+          <div class="production-result-bar">
+            <div><span>检测结果</span><b id="productionResultSummary">--</b></div>
+            <div><span>耗时</span><b id="productionLatency">--</b></div>
+            <div><span>更新时间</span><b id="productionUpdatedAt">--</b></div>
+          </div>
         </div>
       </div>
     </section>
@@ -331,6 +343,6 @@
 
   <div id="toast" class="toast"></div>
   <div id="centerNotice" class="center-notice" role="status" aria-live="polite"><div id="centerNoticeBox" class="center-notice-box"></div></div>
-  <script src="/static/app.js?v=v6_8_2"></script>
+  <script src="/static/app.js?v=v6_9_production"></script>
 </body>
 </html>

@@ -45,6 +45,7 @@ try:
     import yaml
 except Exception as e:
     raise SystemExit(f"缺少 PyYAML: {e}")
+
 meta_path = Path(sys.argv[1]).resolve()
 port = str(sys.argv[2])
 model_path = Path(sys.argv[3]).resolve()
@@ -58,33 +59,67 @@ def first(*vals, default=''):
     return default
 
 def norm_names(v):
-    if isinstance(v, list): return [str(x) for x in v]
+    if isinstance(v, list):
+        return [str(x) for x in v]
     if isinstance(v, dict):
         def key(k):
-            s=str(k)
-            return (0,int(s)) if s.isdigit() else (1,s)
+            s = str(k)
+            return (0, int(s)) if s.isdigit() else (1, s)
         return [str(v[k]) for k in sorted(v.keys(), key=key)]
     return []
 
-task = str(first(data.get('task'), model_meta.get('task'), default='detection')).strip().lower()
-if task not in {'detection','classification','obb_detection'}:
-    raise SystemExit(f"meta task 无效: {task}")
-input_size = first(data.get('input_size'), model_meta.get('input_size'), default=[224,224] if task == 'classification' else [640,640])
+def norm_task(v):
+    s = str(v or '').strip().lower()
+    if s in {'detection', 'detect', 'yolo_detection', 'object_detection'}:
+        return 'detection'
+    if s in {'classification', 'classify', 'image_classification', 'cls'}:
+        return 'classification'
+    if s in {
+        'obb', 'obb_detection', 'oriented_detection', 'oriented_bbox_detection',
+        'rotated_detection', 'rotated_bbox_detection', 'yolo_obb', 'yolov8_obb',
+    }:
+        return 'obb_detection'
+    if s in {'seg', 'segment', 'segmentation', 'instance_segmentation', 'yolo_seg', 'yolov8_seg', 'mask_segmentation'}:
+        return 'segmentation'
+    return ''
+
+task = norm_task(first(data.get('task'), model_meta.get('task'), default='detection'))
+if not task:
+    raw = first(data.get('task'), model_meta.get('task'), default='')
+    raise SystemExit(f"meta task 无效: {raw}")
+
+input_size = first(
+    data.get('input_size'),
+    model_meta.get('input_size'),
+    default=[224, 224] if task == 'classification' else [640, 640],
+)
 if isinstance(input_size, str):
     parts = input_size.replace(',', ' ').split()
 else:
     parts = list(input_size)
 if len(parts) != 2:
-    parts = [224,224] if task == 'classification' else [640,640]
+    parts = [224, 224] if task == 'classification' else [640, 640]
 input_size = [int(parts[0]), int(parts[1])]
+
 class_names = norm_names(first(data.get('class_names'), model_meta.get('class_names'), default=[]))
 num_classes = int(first(data.get('num_classes'), model_meta.get('num_classes'), default=len(class_names) or 1))
 if not class_names:
     class_names = [str(i) for i in range(num_classes)]
-topk = int(first(data.get('topk'), model_meta.get('topk'), default=min(max(num_classes,1),5)))
+
+topk = int(first(data.get('topk'), model_meta.get('topk'), default=min(max(num_classes, 1), 5)))
 conf_threshold = float(first(data.get('conf_threshold'), model_meta.get('conf_threshold'), default=0.25))
 nms_threshold = float(first(data.get('nms_threshold'), model_meta.get('nms_threshold'), default=0.45))
-device_id = str(first(data.get('device_id'), data.get('deploy',{}).get('target_device') if isinstance(data.get('deploy'),dict) else None, data.get('dataset',{}).get('device_id') if isinstance(data.get('dataset'),dict) else None, default='rk3588-001'))
+mask_threshold = float(first(data.get('mask_threshold'), model_meta.get('mask_threshold'), default=0.5))
+
+deploy_meta = data.get('deploy') if isinstance(data.get('deploy'), dict) else {}
+dataset_meta = data.get('dataset') if isinstance(data.get('dataset'), dict) else {}
+device_id = str(first(
+    data.get('device_id'),
+    deploy_meta.get('target_device'),
+    dataset_meta.get('device_id'),
+    default='rk3588-001',
+))
+
 out = {
     'device_id': device_id,
     'task': task,
@@ -94,6 +129,7 @@ out = {
     'topk': topk,
     'conf_threshold': conf_threshold,
     'nms_threshold': nms_threshold,
+    'mask_threshold': mask_threshold,
     'model_path': str(model_path),
     'meta_path': str(meta_path),
     'port': port,
@@ -131,6 +167,10 @@ NMS_THRESHOLD="$(python3 - <<'PY' "${META_JSON}"
 import json,sys; print(json.loads(sys.argv[1])['nms_threshold'])
 PY
 )"
+MASK_THRESHOLD="$(python3 - <<'PY' "${META_JSON}"
+import json,sys; print(json.loads(sys.argv[1])['mask_threshold'])
+PY
+)"
 
 mkdir -p /tmp
 cat > /tmp/visionops_switch.env <<EOF_ENV
@@ -150,6 +190,7 @@ PORT=${PORT}
 METRICS_PORT=9091
 CONF_THRESHOLD=${CONF_THRESHOLD}
 NMS_THRESHOLD=${NMS_THRESHOLD}
+MASK_THRESHOLD=${MASK_THRESHOLD}
 TOPK=${TOPK}
 WARMUP_RUNS=3
 EOF_ENV
@@ -175,10 +216,10 @@ for _ in $(seq 1 25); do
     if python3 - <<'PY' /tmp/visionops_health.json "${MODEL_PATH}" "${TASK}"
 import json, sys
 from pathlib import Path
-h=json.load(open(sys.argv[1], encoding='utf-8'))
-target=str(Path(sys.argv[2]).resolve())
-task=sys.argv[3]
-model=str(Path(str(h.get('model_path',''))).resolve()) if h.get('model_path') else ''
+h = json.load(open(sys.argv[1], encoding='utf-8'))
+target = str(Path(sys.argv[2]).resolve())
+task = sys.argv[3]
+model = str(Path(str(h.get('model_path',''))).resolve()) if h.get('model_path') else ''
 if h.get('status') == 'ok' and str(h.get('task','')).lower() == task and model == target:
     raise SystemExit(0)
 raise SystemExit(1)

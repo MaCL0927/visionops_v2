@@ -3,6 +3,7 @@
 .PHONY: help up down restart logs init render-task clean-generated \
         pipeline pipeline-force pipeline-task pipeline-dvc \
         pipeline-detection pipeline-classification \
+		pipeline-obb pipeline-segmentation \
         train deploy deploy-code deploy-code-only \
         test-api mlflow monitor minio install install-edge \
         ingest-collected ingest-collected-force clean-checkpoints dvc-push dvc-pull
@@ -47,10 +48,16 @@ init:
 	dvc remote modify minio access_key_id minioadmin
 	dvc remote modify minio secret_access_key minioadmin123
 	@echo "创建项目目录..."
-	mkdir -p data/raw_detection data/processed_detection data/raw_classification data/processed_classification \
+	mkdir -p data/raw_detection data/processed_detection \
+		data/raw_classification data/processed_classification \
+		data/raw_obb data/processed_obb \
+		data/raw_segmentation data/processed_segmentation \
 		models/checkpoints_detection models/export_detection models/metrics_detection \
 		models/checkpoints_classification models/export_classification models/metrics_classification \
-		models/runs/detect logs/retrain edge/runtime
+		models/checkpoints_obb models/export_obb models/metrics_obb \
+		models/checkpoints_segmentation models/export_segmentation models/metrics_segmentation \
+		models/runs/detect models/runs/obb models/runs/segment \
+		logs/retrain edge/runtime
 	@echo "✓ 初始化完成"
 
 render-task:
@@ -79,6 +86,10 @@ pipeline-dvc:
 pipeline-detection: pipeline
 
 pipeline-classification: pipeline
+
+pipeline-obb: pipeline
+
+pipeline-segmentation: pipeline
 
 train: render-task
 	$(PYTHON) -m pipeline.stages.train

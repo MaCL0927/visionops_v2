@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -157,14 +158,10 @@ def safe_log_artifacts_from_dir(save_dir: Path, artifact_path: str = "eval") -> 
         "BoxP_curve.png",
         "BoxPR_curve.png",
         "BoxR_curve.png",
-        "OBBF1_curve.png",
-        "OBBP_curve.png",
-        "OBBPR_curve.png",
-        "OBBR_curve.png",
-        "F1_curve.png",
-        "P_curve.png",
-        "PR_curve.png",
-        "R_curve.png",
+        "MaskF1_curve.png",
+        "MaskP_curve.png",
+        "MaskPR_curve.png",
+        "MaskR_curve.png",
     ]
     for name in important_files:
         p = save_dir / name
@@ -187,7 +184,7 @@ def resolve_mlflow_context(metrics_dir: Path) -> tuple[bool, str | None, str, st
 
     mlflow_info = train_metrics.get("mlflow", {}) if isinstance(train_metrics.get("mlflow"), dict) else {}
     tracking_uri = str(mlflow_info.get("tracking_uri") or "http://localhost:5000")
-    experiment_name = str(mlflow_info.get("experiment_name") or "visionops-obb")
+    experiment_name = str(mlflow_info.get("experiment_name") or "visionops-segmentation")
     run_id = str(train_metrics.get("mlflow_run_id") or mlflow_info.get("run_id") or "").strip()
 
     txt_path = metrics_dir / "mlflow_run_id.txt"
@@ -207,11 +204,11 @@ def main() -> None:
     output_cfg = cfg.get("output", {})
 
     checkpoint_path = project_path(
-        model_cfg.get("checkpoint_path", "models/checkpoints_obb/best.pt")
+        model_cfg.get("checkpoint_path", "models/checkpoints_segmentation/best.pt")
     )
-    data_yaml = project_path(dataset_cfg.get("yaml_path", "data/processed_obb/data.yaml"))
+    data_yaml = project_path(dataset_cfg.get("yaml_path", "data/processed_segmentation/data.yaml"))
 
-    metrics_dir = project_path(output_cfg.get("metrics_dir", "models/metrics_obb"))
+    metrics_dir = project_path(output_cfg.get("metrics_dir", "models/metrics_segmentation"))
     eval_metrics_path = project_path(
         output_cfg.get("eval_metrics", metrics_dir / "eval_metrics.json")
     )
@@ -220,13 +217,13 @@ def main() -> None:
     batch_size = int(eval_cfg.get("batch_size", 16))
     device = eval_cfg.get("device", "cpu")
 
-    require_file(checkpoint_path, "请先运行 dvc repro train 生成 models/checkpoints_obb/best.pt")
-    require_file(data_yaml, "请先运行 dvc repro preprocess 生成 data/processed_obb/data.yaml")
+    require_file(checkpoint_path, "请先运行 dvc repro train 生成 models/checkpoints_segmentation/best.pt")
+    require_file(data_yaml, "请先运行 dvc repro preprocess 生成 data/processed_segmentation/data.yaml")
 
     metrics_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 60)
-    print("OBB 模型评估开始")
+    print("Segmentation 模型评估开始")
     print("=" * 60)
     print(f"模型权重: {checkpoint_path}")
     print(f"数据配置: {data_yaml}")
@@ -239,7 +236,7 @@ def main() -> None:
     model = YOLO(str(checkpoint_path))
 
     results = model.val(
-        task="obb",
+        task="segment",
         data=str(data_yaml),
         imgsz=img_size,
         batch=batch_size,
@@ -248,68 +245,53 @@ def main() -> None:
 
     results_dict = extract_results_dict(results)
 
-    precision = pick_metric(
-        results_dict,
-        [
-            "metrics/precision(B)",
-            "metrics/precision(OBB)",
-            "metrics/precision",
-            "precision",
-        ],
-    )
-    recall = pick_metric(
-        results_dict,
-        [
-            "metrics/recall(B)",
-            "metrics/recall(OBB)",
-            "metrics/recall",
-            "recall",
-        ],
-    )
-    map50 = pick_metric(
-        results_dict,
-        [
-            "metrics/mAP50(B)",
-            "metrics/mAP50(OBB)",
-            "metrics/mAP50",
-            "map50",
-        ],
-    )
-    map50_95 = pick_metric(
-        results_dict,
-        [
-            "metrics/mAP50-95(B)",
-            "metrics/mAP50-95(OBB)",
-            "metrics/mAP50_95",
-            "map50_95",
-        ],
-    )
-    fitness = pick_metric(
-        results_dict,
-        [
-            "fitness",
-            "metrics/fitness",
-        ],
-    )
+    # 常见 Ultralytics seg 指标 key 兼容。
+    box_map50 = pick_metric(results_dict, [
+        "metrics/mAP50(B)",
+        "metrics/box/mAP50",
+        "metrics/mAP50",
+        "map50",
+    ])
+
+    box_map50_95 = pick_metric(results_dict, [
+        "metrics/mAP50-95(B)",
+        "metrics/box/mAP50-95",
+        "metrics/mAP50-95",
+        "map50_95",
+    ])
+
+    mask_map50 = pick_metric(results_dict, [
+        "metrics/mAP50(M)",
+        "metrics/seg/mAP50",
+        "metrics/mAP50(mask)",
+        "metrics/mAP50(Mask)",
+        "mask_map50",
+    ])
+
+    mask_map50_95 = pick_metric(results_dict, [
+        "metrics/mAP50-95(M)",
+        "metrics/seg/mAP50-95",
+        "metrics/mAP50-95(mask)",
+        "metrics/mAP50-95(Mask)",
+        "mask_map50_95",
+    ])
 
     eval_metrics = {
-        "task": "obb_detection",
+        "task": "segmentation",
         "stage": "evaluate",
         "status": "success",
         "checkpoint_path": checkpoint_path.as_posix(),
         "data_yaml": data_yaml.as_posix(),
-        # 顶层 map50/map50_95 供 register_model 和 UI 直接读取。
-        "precision": precision,
-        "recall": recall,
-        "map50": map50,
-        "map50_95": map50_95,
-        "fitness": fitness,
-        "metrics": {
-            "precision": precision,
-            "recall": recall,
-            "map50": map50,
-            "map50_95": map50_95,
-            "fitness": fitness,
+        # 顶层 map50/map50_95 用 mask 指标，供 register_model 和 UI 直接读取。
+        "map50": mask_map50,
+        "map50_95": mask_map50_95,
+        "box_metrics": {
+            "map50": box_map50,
+            "map50_95": box_map50_95,
+        },
+        "mask_metrics": {
+            "map50": mask_map50,
+            "map50_95": mask_map50_95,
         },
         "params": {
             "img_size": img_size,
@@ -332,25 +314,27 @@ def main() -> None:
                 run_ctx = mlflow.start_run(run_id=run_id)
                 print(f"[INFO] 评估指标写入已有 MLflow run: {run_id}")
             else:
-                run_ctx = mlflow.start_run(run_name=f"obb-eval-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
+                run_ctx = mlflow.start_run(run_name=f"segmentation-eval-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
                 print("[WARN] 未找到 train 阶段 run_id，创建 eval 专用 MLflow run")
 
             with run_ctx as active_run:
                 eval_run_id = active_run.info.run_id
 
-                safe_log_param("eval_task", "obb_detection")
+                safe_log_param("eval_task", "segmentation")
                 safe_log_param("eval_checkpoint_path", checkpoint_path.as_posix())
                 safe_log_param("eval_data_yaml", data_yaml.as_posix())
                 safe_log_param("eval_img_size", img_size)
                 safe_log_param("eval_batch_size", batch_size)
                 safe_log_param("eval_device", device)
 
-                safe_log_metric("precision", precision)
-                safe_log_metric("recall", recall)
-                safe_log_metric("map50", map50)
-                safe_log_metric("map50_95", map50_95)
-                safe_log_metric("fitness", fitness)
+                safe_log_metric("map50", mask_map50)
+                safe_log_metric("map50_95", mask_map50_95)
+                safe_log_metric("mask_map50", mask_map50)
+                safe_log_metric("mask_map50_95", mask_map50_95)
+                safe_log_metric("box_map50", box_map50)
+                safe_log_metric("box_map50_95", box_map50_95)
 
+                # 尽量记录原始结果中的所有数值字段。
                 for k, v in results_dict.items():
                     safe_log_metric(f"eval_{k}", v)
 
@@ -374,6 +358,7 @@ def main() -> None:
     if eval_run_id:
         (metrics_dir / "mlflow_run_id.txt").write_text(eval_run_id, encoding="utf-8")
 
+    # eval_metrics_path 写完之后再作为 artifact 记录。
     if mlflow_enabled and mlflow is not None and eval_run_id:
         try:
             with mlflow.start_run(run_id=eval_run_id):
@@ -384,12 +369,11 @@ def main() -> None:
         except Exception as e:
             print(f"[WARN] MLflow 评估 artifact 写入失败: {e}")
 
-    print("✓ OBB 模型评估完成")
-    print(f"precision: {precision}")
-    print(f"recall:    {recall}")
-    print(f"mAP50:     {map50}")
-    print(f"mAP50-95:  {map50_95}")
-    print(f"fitness:   {fitness}")
+    print("✓ Segmentation 模型评估完成")
+    print(f"mask mAP50:     {mask_map50}")
+    print(f"mask mAP50-95:  {mask_map50_95}")
+    print(f"box mAP50:      {box_map50}")
+    print(f"box mAP50-95:   {box_map50_95}")
     print(f"评估指标: {eval_metrics_path}")
     if eval_run_id:
         print(f"MLflow run_id: {eval_run_id}")

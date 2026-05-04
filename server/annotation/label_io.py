@@ -29,16 +29,32 @@ def list_images(images_dir: Path) -> list[Path]:
     )
 
 
-def parse_yolo_label(label_path: Path, image_w: int, image_h: int) -> list[dict[str, Any]]:
-    """Read YOLO HBB or YOLO OBB txt and return pixel-space annotations.
+def normalize_task_type(task_type: str | None) -> str:
+    task = str(task_type or "detection").strip().lower()
+    if task in {"seg", "segment", "segmentation", "instance_segmentation", "yolo_seg", "yolov8_seg"}:
+        return "segmentation"
+    if task in {"obb", "obb_detection", "oriented_detection", "rotated_detection"}:
+        return "obb"
+    return "detection"
+
+
+def parse_yolo_label(
+    label_path: Path,
+    image_w: int,
+    image_h: int,
+    task_type: str | None = None,
+) -> list[dict[str, Any]]:
+    """Read YOLO HBB / OBB / segmentation txt and return pixel-space annotations.
 
     HBB line: class_id xc yc w h
     OBB line: class_id x1 y1 x2 y2 x3 y3 x4 y4
+    Seg line: class_id x1 y1 x2 y2 ... xn yn, n>=3
     All coordinates in txt are normalized to [0, 1].
     """
     if not label_path.exists():
         return []
 
+    task = normalize_task_type(task_type)
     annotations: list[dict[str, Any]] = []
     text = label_path.read_text(encoding="utf-8", errors="ignore").strip()
     if not text:
@@ -52,6 +68,24 @@ def parse_yolo_label(label_path: Path, image_w: int, image_h: int) -> list[dict[
             class_id = int(float(parts[0]))
         except Exception:
             class_id = 0
+
+        # Segmentation labels are ambiguous with 4-point OBB when len(parts)==9.
+        # The explicit task_type from the UI/batch state wins.
+        if task == "segmentation" and len(parts) >= 7 and (len(parts) - 1) % 2 == 0:
+            vals = [safe_float(v) for v in parts[1:]]
+            pts = []
+            for i in range(0, len(vals), 2):
+                pts.append([
+                    clamp(vals[i] * image_w, 0, image_w),
+                    clamp(vals[i + 1] * image_h, 0, image_h),
+                ])
+            if len(pts) >= 3:
+                annotations.append({
+                    "type": "segmentation",
+                    "class_id": class_id,
+                    "points": pts,
+                })
+            continue
 
         if len(parts) == 5:
             xc = safe_float(parts[1]) * image_w
@@ -70,7 +104,7 @@ def parse_yolo_label(label_path: Path, image_w: int, image_h: int) -> list[dict[
                 "x2": x2,
                 "y2": y2,
             })
-        elif len(parts) >= 9:
+        elif task == "obb" and len(parts) >= 9:
             pts = []
             vals = [safe_float(v) for v in parts[1:9]]
             for i in range(0, 8, 2):
@@ -83,6 +117,21 @@ def parse_yolo_label(label_path: Path, image_w: int, image_h: int) -> list[dict[
                 "class_id": class_id,
                 "points": pts,
             })
+        elif len(parts) >= 7 and (len(parts) - 1) % 2 == 0:
+            # Auto fallback: treat polygons with more than 4 points as segmentation.
+            vals = [safe_float(v) for v in parts[1:]]
+            pts = []
+            for i in range(0, len(vals), 2):
+                pts.append([
+                    clamp(vals[i] * image_w, 0, image_w),
+                    clamp(vals[i + 1] * image_h, 0, image_h),
+                ])
+            ann_type = "obb" if len(pts) == 4 else "segmentation"
+            annotations.append({
+                "type": ann_type,
+                "class_id": class_id,
+                "points": pts,
+            })
 
     return annotations
 
@@ -92,7 +141,9 @@ def save_yolo_label(label_path: Path, annotations: list[dict[str, Any]], image_w
 
     task_type='detection' writes HBB lines.
     task_type='obb' writes OBB 4-point lines.
+    task_type='segmentation' writes polygon segmentation lines.
     """
+    task = normalize_task_type(task_type)
     label_path.parent.mkdir(parents=True, exist_ok=True)
     lines: list[str] = []
 
@@ -102,9 +153,22 @@ def save_yolo_label(label_path: Path, annotations: list[dict[str, Any]], image_w
         except Exception:
             class_id = 0
 
-        ann_type = ann.get("type", task_type)
+        ann_type = normalize_task_type(str(ann.get("type", task)))
 
-        if task_type == "obb" or ann_type == "obb":
+        if task == "segmentation" or ann_type == "segmentation":
+            pts = ann.get("points") or []
+            if len(pts) < 3:
+                continue
+            vals: list[str] = []
+            for p in pts:
+                if not isinstance(p, (list, tuple)) or len(p) < 2:
+                    continue
+                x = clamp(float(p[0]), 0, image_w) / max(image_w, 1)
+                y = clamp(float(p[1]), 0, image_h) / max(image_h, 1)
+                vals.extend([f"{x:.6f}", f"{y:.6f}"])
+            if len(vals) >= 6:
+                lines.append(f"{class_id} " + " ".join(vals))
+        elif task == "obb" or ann_type == "obb":
             pts = ann.get("points") or []
             if len(pts) != 4:
                 continue

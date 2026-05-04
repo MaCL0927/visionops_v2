@@ -2,19 +2,20 @@
 set -euo pipefail
 
 # ============================================================
-# VisionOps Edge Deploy Script v6.2-task-aware-obb
+# VisionOps Edge Deploy Script v6.3-task-aware-seg
 # 零参数自动部署 / 版本化模型文件 / 同名 meta YAML
 #
 # 默认输入（v2 自动识别）：
 #   detection:      models/export_detection/model.rknn
 #   classification: models/export_classification/model.rknn
 #   obb_detection:  models/export_obb/model.rknn
+#   segmentation:   models/export_segmentation/model.rknn
 #   edge/runtime/class_names.yaml
 #   data/model_context/manifest.json（不存在时生成临时 manifest）
 #
 # 默认输出到边缘端：
-#   /opt/visionops/models/{device_id}_{customer_id}_{cls|det|obb}_{timestamp}.rknn
-#   /opt/visionops/models/{device_id}_{customer_id}_{cls|det|obb}_{timestamp}.yaml
+#   /opt/visionops/models/{device_id}_{customer_id}_{cls|det|obb|seg}_{timestamp}.rknn
+#   /opt/visionops/models/{device_id}_{customer_id}_{cls|det|obb|seg}_{timestamp}.yaml
 #
 # systemd 仍读取 /opt/visionops/.env，但 MODEL_PATH / CLASS_NAMES_FILE
 # 指向具体版本化模型，不再使用 current.rknn / backup_*.rknn，
@@ -72,6 +73,7 @@ usage() {
               detection      -> models/export_detection/model.rknn
               classification -> models/export_classification/model.rknn
               obb_detection  -> models/export_obb/model.rknn
+              segmentation   -> models/export_segmentation/model.rknn
   类别配置:   edge/runtime/class_names.yaml
   数据集信息: data/model_context/manifest.json；不存在时自动生成临时 manifest
 
@@ -88,10 +90,10 @@ usage() {
   --edge-env <path>           覆盖默认 edge.env，用于读取端口/阈值等可选默认值
   --model-version <name>      覆盖自动生成的模型版本名，不带后缀
   --display-name <name>       写入 meta 的展示名称
-  --input-size "H,W"          覆盖 input_size；默认 classification=224,224，detection/obb_detection=640,640
+  --input-size "H,W"          覆盖 input_size；默认 classification=224,224，detection/obb_detection/segmentation=640,640
   --topk <N>                  覆盖分类 topk
-  --conf-threshold <float>    覆盖检测/OBB 置信度阈值
-  --nms-threshold <float>     覆盖检测/OBB NMS 阈值
+  --conf-threshold <float>    覆盖检测/OBB/分割 置信度阈值
+  --nms-threshold <float>     覆盖检测/OBB/分割 NMS 阈值
   --target-device-id <id>     临时指定部署目标设备 ID，例如 rk3588-002
   --target-host <host>        临时指定部署目标设备 IP/Host，例如 192.168.1.202
   --target-user <user>        临时指定 SSH 用户，默认 ubuntu
@@ -173,8 +175,9 @@ normalize_task() {
     detection|detect|yolo_detection|object_detection) echo "detection" ;;
     classification|classify|image_classification|cls) echo "classification" ;;
     obb|obb_detection|oriented_detection|oriented_bbox_detection|rotated_detection|rotated_bbox_detection|yolo_obb|yolov8_obb) echo "obb_detection" ;;
+    seg|segment|segmentation|instance_segmentation|yolo_seg|yolov8_seg|mask_segmentation) echo "segmentation" ;;
     *)
-      log_error "edge/runtime/class_names.yaml 中 task 必须是 detection、classification 或 obb_detection，当前: ${raw}"
+      log_error "edge/runtime/class_names.yaml 中 task 必须是 detection、classification、obb_detection 或 segmentation，当前: ${raw}"
       exit 1
       ;;
   esac
@@ -186,6 +189,8 @@ task_short() {
     echo "cls"
   elif [[ "$task" == "obb_detection" ]]; then
     echo "obb"
+  elif [[ "$task" == "segmentation" ]]; then
+    echo "seg"
   else
     echo "det"
   fi
@@ -199,6 +204,7 @@ normalize_task_family_value() {
     detection|detect|yolo_detection|object_detection) echo "detection" ;;
     classification|classify|image_classification|cls) echo "classification" ;;
     obb|obb_detection|oriented_detection|oriented_bbox_detection|rotated_detection|rotated_bbox_detection|yolo_obb|yolov8_obb) echo "obb_detection" ;;
+    seg|segment|segmentation|instance_segmentation|yolo_seg|yolov8_seg|mask_segmentation) echo "segmentation" ;;
     *) echo "" ;;
   esac
 }
@@ -220,6 +226,8 @@ def norm(v):
         return "classification"
     if s in {"obb", "obb_detection", "oriented_detection", "oriented_bbox_detection", "rotated_detection", "rotated_bbox_detection", "yolo_obb", "yolov8_obb"}:
         return "obb_detection"
+    if s in {"seg", "segment", "segmentation", "instance_segmentation", "yolo_seg", "yolov8_seg", "mask_segmentation"}:
+        return "segmentation"
     return ""
 
 for raw in sys.argv[1:]:
@@ -330,6 +338,10 @@ auto_prepare_inputs() {
     elif [[ "$task_family" == "obb_detection" ]]; then
       MODEL_PATH="$(choose_first_existing \
         "models/export_obb/model.rknn" \
+        "models/export/model.rknn")"
+    elif [[ "$task_family" == "segmentation" ]]; then
+      MODEL_PATH="$(choose_first_existing \
+        "models/export_segmentation/model.rknn" \
         "models/export/model.rknn")"
     else
       MODEL_PATH="$(choose_first_existing \
@@ -513,11 +525,13 @@ def normalize_task_value(v):
         return "classification"
     if s in {"obb", "obb_detection", "oriented_detection", "oriented_bbox_detection", "rotated_detection", "rotated_bbox_detection", "yolo_obb", "yolov8_obb"}:
         return "obb_detection"
+    if s in {"seg", "segment", "segmentation", "instance_segmentation", "yolo_seg", "yolov8_seg", "mask_segmentation"}:
+        return "segmentation"
     return ""
 
 task = normalize_task_value(class_cfg.get("task_type")) or normalize_task_value(class_cfg.get("task"))
 if not task:
-    fail(f"{class_file} 必须包含 task_type/task: classification、detection 或 obb_detection")
+    fail(f"{class_file} 必须包含 task_type/task: classification、detection、obb_detection 或 segmentation")
 
 class_names = normalize_names(class_cfg.get("class_names", class_cfg.get("names")))
 if not class_names:
@@ -553,7 +567,7 @@ if not isinstance(counts, dict):
     counts = {}
 
 timestamp = find_timestamp(manifest)
-short = "cls" if task == "classification" else ("obb" if task == "obb_detection" else "det")
+short = "cls" if task == "classification" else ("obb" if task == "obb_detection" else ("seg" if task == "segmentation" else "det"))
 version_name = version_override or f"{sanitize(device_id)}_{sanitize(customer_id)}_{short}_{timestamp}"
 version_name = sanitize(version_name)
 
@@ -733,15 +747,16 @@ resolve_health_url() {
 build_deploy_env() {
   local out_file="$1" target_device="$2" remote_model_path="$3" remote_meta_path="$4" task="$5" input_size_env="$6" num_classes="$7" topk="$8" conf_threshold="$9" nms_threshold="${10}"
 
-  local env_npu_core env_port env_metrics_port env_warmup env_report_interval
+  local env_npu_core env_port env_metrics_port env_warmup env_report_interval env_mask_threshold
   env_npu_core="$(read_env_value NPU_CORE "$LOCAL_EDGE_ENV")"; [[ -n "$env_npu_core" ]] || env_npu_core="auto"
   env_port="$(read_env_value PORT "$LOCAL_EDGE_ENV")"; [[ -n "$env_port" ]] || env_port="8080"
   env_metrics_port="$(read_env_value METRICS_PORT "$LOCAL_EDGE_ENV")"; [[ -n "$env_metrics_port" ]] || env_metrics_port="9091"
   env_warmup="$(read_env_value WARMUP_RUNS "$LOCAL_EDGE_ENV")"; [[ -n "$env_warmup" ]] || env_warmup="3"
   env_report_interval="$(read_env_value REPORT_INTERVAL "$LOCAL_EDGE_ENV")"; [[ -n "$env_report_interval" ]] || env_report_interval="60"
+  env_mask_threshold="$(read_env_value MASK_THRESHOLD "$LOCAL_EDGE_ENV")"; [[ -n "$env_mask_threshold" ]] || env_mask_threshold="0.5"
 
   cat > "$out_file" <<EOF_ENV
-# Auto generated by edge/deploy/push.sh v6.2-task-aware-obb
+# Auto generated by edge/deploy/push.sh v6.3-task-aware-seg
 DEVICE_ID=${target_device}
 MODEL_PATH=${remote_model_path}
 INFERENCE_URL=http://localhost:${env_port}
@@ -757,6 +772,7 @@ PORT=${env_port}
 METRICS_PORT=${env_metrics_port}
 CONF_THRESHOLD=${conf_threshold}
 NMS_THRESHOLD=${nms_threshold}
+MASK_THRESHOLD=${env_mask_threshold}
 TOPK=${topk}
 WARMUP_RUNS=${env_warmup}
 EOF_ENV
@@ -787,6 +803,7 @@ ExecStart=/opt/visionops/venv/bin/python /opt/visionops/edge/inference/engine.py
     --metrics-port ${METRICS_PORT} \
     --conf-threshold ${CONF_THRESHOLD} \
     --nms-threshold ${NMS_THRESHOLD} \
+    --mask-threshold ${MASK_THRESHOLD} \
     --topk ${TOPK} \
     --warmup-runs ${WARMUP_RUNS}
 

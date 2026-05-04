@@ -11,6 +11,8 @@ def main() -> None:
         from pipeline.tasks.classification.export_onnx import main as run
     elif task_type == "obb_detection":
         from pipeline.tasks.obb.export_onnx import main as run
+    elif task_type == "segmentation":
+        from pipeline.tasks.segmentation.export_onnx import main as run
     else:
         raise ValueError(f"不支持的任务类型: {task_type}")
     run()

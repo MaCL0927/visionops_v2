@@ -453,3 +453,97 @@
     flex:1;
   }
 }
+
+
+/* 生产模式：实时检测画面 */
+.production-stage{
+  position:relative!important;
+  flex:1!important;
+  min-height:0!important;
+  border-radius:32px!important;
+  background:#0f172a!important;
+  overflow:hidden!important;
+  display:grid!important;
+  grid-template-rows:auto minmax(0,1fr) auto!important;
+  gap:12px!important;
+  padding:16px!important;
+}
+.production-monitor-meta,
+.production-result-bar{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:12px;
+  z-index:3;
+}
+.production-result-bar{grid-template-columns:1.4fr .7fr .7fr;}
+.production-monitor-meta div,
+.production-result-bar div{
+  background:rgba(255,255,255,.95);
+  border:2px solid #dce6f0;
+  border-radius:20px;
+  padding:12px 16px;
+  min-width:0;
+}
+.production-monitor-meta span,
+.production-result-bar span{
+  display:block;
+  font-size:13px;
+  font-weight:900;
+  color:#64748b;
+}
+.production-monitor-meta b,
+.production-result-bar b{
+  display:block;
+  margin-top:5px;
+  font-size:18px;
+  color:#0f172a;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.production-preview{
+  min-height:0;
+  width:100%;
+  height:100%;
+  border-radius:26px;
+  overflow:hidden;
+  background:#0f172a;
+  display:grid;
+  place-items:center;
+}
+.production-canvas-wrap{width:100%;height:100%;}
+.production-canvas-wrap img{
+  width:auto!important;
+  height:100%!important;
+  max-width:100%;
+  max-height:100%;
+  object-fit:contain!important;
+  display:block;
+  margin:0 auto;
+}
+#productionOverlayCanvas{
+  position:absolute;
+  pointer-events:none;
+  display:none;
+  z-index:4;
+}
+.production-empty{
+  color:#cbd5e1;
+  font-size:24px;
+  font-weight:900;
+  text-align:center;
+  padding:24px;
+}
+@media (max-width:900px){
+  .production-monitor-meta,
+  .production-result-bar{grid-template-columns:1fr;}
+}
+
+
+/* v6.9：分割模型结果展示 */
+.target-row-seg{
+  grid-template-columns:64px minmax(86px,1fr) minmax(190px,1.2fr) minmax(120px,.9fr) minmax(90px,.7fr) minmax(96px,.7fr) minmax(112px,.8fr);
+}
+@media (max-width:1300px){
+  .target-row-seg{grid-template-columns:64px minmax(80px,1fr);}
+}

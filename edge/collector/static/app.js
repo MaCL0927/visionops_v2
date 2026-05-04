@@ -26,16 +26,17 @@ const ADMIN_PASSWORD='admin';
 let isProduction=false;
 function enterProductionMode(){
   isProduction=true;
-  stopRealtimeClassification();
+  stopRealtimeClassification(false);
   clearPendingClassificationCapture(false);
   modeToggle.textContent='切换工厂模式';
   modeToggle.classList.add('prod');
   factoryTabs.classList.add('hidden');
   factoryMode.classList.remove('active');
   productionMode.classList.add('active');
-  updateCameraLifecycle();
+  startProductionMonitor();
 }
 function enterFactoryMode(){
+  stopProductionMonitor();
   isProduction=false;
   modeToggle.textContent='切换生产模式';
   modeToggle.classList.remove('prod');
@@ -172,7 +173,7 @@ function isCapturePageVisible(){
 }
 
 function shouldKeepCameraRunning(){
-  return isCapturePageVisible() || realtimeRunning;
+  return isCapturePageVisible() || realtimeRunning || productionRunning;
 }
 
 function updateCameraLifecycle(){
@@ -429,19 +430,21 @@ function escapeHtml(text){
 function normalizeTaskName(task){
   const t=String(task || '').trim().toLowerCase();
   if(['obb','obb_detection','oriented_detection','oriented_bbox_detection','rotated_detection','rotated_bbox_detection','yolo_obb','yolov8_obb'].includes(t)) return 'obb_detection';
+  if(['seg','segment','segmentation','instance_segmentation','yolo_seg','yolov8_seg','mask_segmentation'].includes(t)) return 'segmentation';
   if(['detect','detection','yolo_detection','object_detection'].includes(t)) return 'detection';
   if(['cls','classify','classification','image_classification'].includes(t)) return 'classification';
   return t;
 }
 function isDetectionLikeTask(task){
   const t=normalizeTaskName(task);
-  return t==='detection' || t==='obb_detection';
+  return t==='detection' || t==='obb_detection' || t==='segmentation';
 }
 function taskDisplayName(task){
   const t=normalizeTaskName(task);
   if(t==='classification') return '分类';
   if(t==='detection') return '检测';
   if(t==='obb_detection') return '旋转框检测';
+  if(t==='segmentation') return '实例分割';
   return task || '未知';
 }
 
@@ -485,6 +488,18 @@ const REALTIME_INTERVAL_MS=1000; // v6.7: 分类/检测统一使用低频单帧�
 let realtimeRunning=false;
 let realtimeTimer=null;
 let realtimeBusy=false;
+
+// 生产模式实时监控：复用模型验证实时检测接口，但独立渲染到生产模式大画面。
+const productionPreview=document.getElementById('productionPreview');
+const productionModelName=document.getElementById('productionModelName');
+const productionStatus=document.getElementById('productionStatus');
+const productionResultSummary=document.getElementById('productionResultSummary');
+const productionLatency=document.getElementById('productionLatency');
+const productionUpdatedAt=document.getElementById('productionUpdatedAt');
+let productionRunning=false;
+let productionTimer=null;
+let productionBusy=false;
+let productionLastPredictions=[];
 
 function updateSelectedModelUI(){
   if(!selectedModelNameEl) return;
@@ -634,6 +649,72 @@ function clearDetectionOverlay(){
   ctx.clearRect(0,0,canvas.width,canvas.height);
   canvas.style.display='none';
 }
+
+function normalizePolygonPoints(points, canvasWidth, canvasHeight){
+  if(!Array.isArray(points) || points.length<3) return null;
+  const normalized=[];
+  for(const p of points){
+    if(!Array.isArray(p) || p.length<2) return null;
+    const x=Number(p[0]);
+    const y=Number(p[1]);
+    if(!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    normalized.push([
+      Math.max(0, Math.min(canvasWidth, x)),
+      Math.max(0, Math.min(canvasHeight, y)),
+    ]);
+  }
+  return normalized.length>=3 ? normalized : null;
+}
+function getValidMaskSegments(pred, canvasWidth, canvasHeight){
+  const mask=pred && pred.mask && typeof pred.mask==='object' ? pred.mask : null;
+  if(!mask) return [];
+  const segments=[];
+  if(Array.isArray(mask.segments)){
+    mask.segments.forEach((seg)=>{
+      const normalized=normalizePolygonPoints(seg, canvasWidth, canvasHeight);
+      if(normalized) segments.push(normalized);
+    });
+  }
+  if(!segments.length && Array.isArray(mask.polygon)){
+    const normalized=normalizePolygonPoints(mask.polygon, canvasWidth, canvasHeight);
+    if(normalized) segments.push(normalized);
+  }
+  return segments;
+}
+function drawMaskSegmentsOverlay(ctx, segments){
+  if(!Array.isArray(segments) || !segments.length) return;
+  segments.forEach((points)=>{
+    if(!points || points.length<3) return;
+    ctx.beginPath();
+    ctx.moveTo(points[0][0], points[0][1]);
+    for(let i=1;i<points.length;i++) ctx.lineTo(points[i][0], points[i][1]);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  });
+}
+function getMaskLabelAnchor(segments, fallbackBox=null){
+  if(Array.isArray(segments) && segments.length){
+    let best=null;
+    segments.forEach((seg)=>{
+      (seg || []).forEach((p)=>{
+        const x=Number(p && p[0]);
+        const y=Number(p && p[1]);
+        if(!Number.isFinite(x) || !Number.isFinite(y)) return;
+        if(!best || y<best[1] || (y===best[1] && x<best[0])) best=[x,y];
+      });
+    });
+    if(best) return best;
+  }
+  if(fallbackBox && fallbackBox.length>=2) return [fallbackBox[0], fallbackBox[1]];
+  return [0,0];
+}
+function formatMaskArea(pred){
+  const area=Number(pred && pred.mask && pred.mask.area);
+  if(!Number.isFinite(area)) return '--';
+  return area>=1000 ? `${Math.round(area)} px` : `${area.toFixed(1)} px`;
+}
+
 function getPredictionLabelPosition(pred){
   const points=pred && pred.obb && Array.isArray(pred.obb.points) ? pred.obb.points : null;
   if(points && points.length){
@@ -699,15 +780,23 @@ function drawDetectionOverlay(predictions=[]){
   ctx.font=`${Math.max(18, Math.round(canvas.width/48))}px sans-serif`;
   ctx.textBaseline='top';
   predictions.forEach((pred)=>{
+    const maskSegments=getValidMaskSegments(pred, canvas.width, canvas.height);
     const obbPoints=getValidObbPoints(pred, canvas.width, canvas.height);
     const box=Array.isArray(pred.bbox) ? pred.bbox.map(Number) : null;
 
     let labelAnchor=null;
     let hasShape=false;
-    ctx.strokeStyle=obbPoints ? '#06b6d4' : '#22c55e';
-    ctx.fillStyle=obbPoints ? 'rgba(6,182,212,.16)' : 'rgba(34,197,94,.18)';
-
-    if(obbPoints){
+    if(maskSegments.length){
+      ctx.strokeStyle='#f97316';
+      ctx.fillStyle='rgba(249,115,22,.24)';
+      ctx.lineWidth=Math.max(2, Math.round(canvas.width/420));
+      drawMaskSegmentsOverlay(ctx, maskSegments);
+      // segmentation 只绘制 mask polygon，不再叠加 bbox 矩形框。
+      labelAnchor=getMaskLabelAnchor(maskSegments, box);
+      hasShape=true;
+    }else if(obbPoints){
+      ctx.strokeStyle='#06b6d4';
+      ctx.fillStyle='rgba(6,182,212,.16)';
       drawPolygonOverlay(ctx, obbPoints);
       labelAnchor=getPredictionLabelPosition(pred);
       hasShape=true;
@@ -719,6 +808,8 @@ function drawDetectionOverlay(predictions=[]){
       const w=Math.max(0, x2-x1);
       const h=Math.max(0, y2-y1);
       if(w>=2 && h>=2){
+        ctx.strokeStyle='#22c55e';
+        ctx.fillStyle='rgba(34,197,94,.18)';
         ctx.fillRect(x1,y1,w,h);
         ctx.strokeRect(x1,y1,w,h);
         labelAnchor=[x1,y1];
@@ -771,6 +862,7 @@ function drawDetectionOverlay(predictions=[]){
 window.addEventListener('resize',()=>{
   const last=window.__lastDetectionPredictions || [];
   if(last.length) drawDetectionOverlay(last);
+  if(productionLastPredictions.length) drawProductionOverlay(productionLastPredictions);
 });
 
 function setResultRunning(message='检测中...'){
@@ -787,7 +879,8 @@ function renderClassificationResult(data, options={}){
   if(isDetectionLikeTask(task)){
     const predictions=Array.isArray(data.predictions) ? data.predictions : [];
     window.__lastDetectionPredictions=predictions;
-    const taskText=normalizeTaskName(task)==='obb_detection' ? '旋转框检测' : '检测';
+    const normalizedTask=normalizeTaskName(task);
+    const taskText=taskDisplayName(normalizedTask);
     const updatedAt=data.updated_at || new Date().toLocaleTimeString();
     resultClassName.textContent=`耗时 ${data.latency_ms ?? '--'} ms`;
     resultConfidence.textContent=`${taskText} · 共 ${predictions.length} 个目标`;
@@ -801,11 +894,13 @@ function renderClassificationResult(data, options={}){
           const conf=Number(p.confidence ?? p.score);
           const confText=Number.isFinite(conf) ? `${(conf*100).toFixed(1)}%` : '--';
           const cls=escapeHtml(p.class_name ?? p.class ?? p.label ?? p.class_id ?? '目标');
-          return `<div class="target-row target-row-inline">
+          const maskText=normalizeTaskName(task)==='segmentation' ? `<span>面积：${escapeHtml(formatMaskArea(p))}</span>` : '';
+          return `<div class="target-row target-row-inline ${normalizeTaskName(task)==='segmentation' ? 'target-row-seg' : ''}">
             <span class="target-index">目标${idx+1}</span>
             <span class="target-class">${cls}</span>
             <span>位置：${escapeHtml(formatBBox(bbox))}</span>
             <span>中心点：${escapeHtml(formatPoint(center))}</span>
+            ${maskText}
             <span>置信度：${confText}</span>
             <span>更新时间：${escapeHtml(updatedAt)}</span>
           </div>`;
@@ -966,6 +1061,225 @@ function stopRealtimeClassification(show=true){
 function toggleRealtimeInferUI(){
   if(realtimeRunning) stopRealtimeClassification();
   else startRealtimeClassification();
+}
+
+function getProductionModelName(){
+  if(selectedModel){
+    const item=getSelectedModelItem();
+    if(item && item.has_meta!==false) return selectedModel;
+  }
+  const usable=modelItems.find((item)=>item.has_meta!==false);
+  return usable ? usable.name : '';
+}
+
+function clearProductionOverlay(){
+  const canvas=document.getElementById('productionOverlayCanvas');
+  if(!canvas) return;
+  const ctx=canvas.getContext('2d');
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  canvas.style.display='none';
+}
+
+function renderProductionPreview(url, detections=[]){
+  if(!productionPreview) return;
+  productionLastPredictions=Array.isArray(detections) ? detections : [];
+  productionPreview.innerHTML=`
+    <div class="preview-canvas-wrap production-canvas-wrap">
+      <img id="productionPreviewImg" src="${url}" alt="生产模式实时画面">
+      <canvas id="productionOverlayCanvas" aria-hidden="true"></canvas>
+    </div>
+  `;
+  const img=document.getElementById('productionPreviewImg');
+  if(!img) return;
+  img.addEventListener('load',()=>drawProductionOverlay(productionLastPredictions));
+  if(img.complete && img.naturalWidth>0){
+    requestAnimationFrame(()=>drawProductionOverlay(productionLastPredictions));
+  }
+}
+
+function drawProductionOverlay(predictions=[]){
+  const canvas=document.getElementById('productionOverlayCanvas');
+  const img=document.getElementById('productionPreviewImg');
+  const wrap=productionPreview ? productionPreview.querySelector('.preview-canvas-wrap') : null;
+  if(!canvas || !img || !wrap) return;
+  if(!Array.isArray(predictions) || predictions.length===0 || !img.naturalWidth || !img.naturalHeight){
+    clearProductionOverlay();
+    return;
+  }
+  canvas.width=img.naturalWidth;
+  canvas.height=img.naturalHeight;
+  const imgRect=img.getBoundingClientRect();
+  const wrapRect=wrap.getBoundingClientRect();
+  canvas.style.display='block';
+  canvas.style.left=`${imgRect.left-wrapRect.left}px`;
+  canvas.style.top=`${imgRect.top-wrapRect.top}px`;
+  canvas.style.width=`${imgRect.width}px`;
+  canvas.style.height=`${imgRect.height}px`;
+
+  const ctx=canvas.getContext('2d');
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.lineWidth=Math.max(3, Math.round(canvas.width/360));
+  ctx.font=`${Math.max(18, Math.round(canvas.width/48))}px sans-serif`;
+  ctx.textBaseline='top';
+
+  predictions.forEach((pred)=>{
+    const rawBox=Array.isArray(pred.bbox) ? pred.bbox.map(Number) : null;
+    const maskSegments=getValidMaskSegments(pred, canvas.width, canvas.height);
+    const points=pred.obb && Array.isArray(pred.obb.points) ? pred.obb.points : null;
+    let box=rawBox;
+    if(points && points.length>=4){
+      const xs=points.map(p=>Number(p[0])).filter(Number.isFinite);
+      const ys=points.map(p=>Number(p[1])).filter(Number.isFinite);
+      if(xs.length && ys.length) box=[Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+    }
+    if(!box || box.length<4 || box.some((x)=>!Number.isFinite(x))) return;
+    const x1=Math.max(0, Math.min(canvas.width, box[0]));
+    const y1=Math.max(0, Math.min(canvas.height, box[1]));
+    const x2=Math.max(0, Math.min(canvas.width, box[2]));
+    const y2=Math.max(0, Math.min(canvas.height, box[3]));
+    const w=Math.max(0, x2-x1);
+    const h=Math.max(0, y2-y1);
+    if(w<2 || h<2) return;
+    const cls=String(pred.class_name ?? pred.class ?? pred.label ?? pred.class_id ?? '目标');
+    const conf=Number(pred.confidence ?? pred.score);
+    const label=Number.isFinite(conf) ? `${cls} ${(conf*100).toFixed(1)}%` : cls;
+
+    if(maskSegments.length){
+      ctx.strokeStyle='#f97316';
+      ctx.fillStyle='rgba(249,115,22,.24)';
+      ctx.lineWidth=Math.max(2, Math.round(canvas.width/420));
+      drawMaskSegmentsOverlay(ctx, maskSegments);
+      // segmentation 只绘制 mask polygon，不再叠加 bbox 矩形框。
+    }else if(points && points.length>=4){
+      ctx.strokeStyle='#06b6d4';
+      ctx.fillStyle='rgba(6,182,212,.16)';
+      ctx.beginPath();
+      points.forEach((pt,idx)=>{
+        const px=Math.max(0, Math.min(canvas.width, Number(pt[0])));
+        const py=Math.max(0, Math.min(canvas.height, Number(pt[1])));
+        if(idx===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+      });
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }else{
+      ctx.strokeStyle='#22c55e';
+      ctx.fillStyle='rgba(34,197,94,.18)';
+      ctx.fillRect(x1,y1,w,h);
+      ctx.strokeRect(x1,y1,w,h);
+    }
+
+    const pad=Math.max(6, Math.round(canvas.width/180));
+    const textW=ctx.measureText(label).width;
+    const labelH=Math.max(24, Math.round(canvas.width/36));
+    const lx=Math.max(0, Math.min(canvas.width-(textW+pad*2), x1));
+    const ly=Math.max(0, y1-labelH-2);
+    ctx.fillStyle='rgba(15,23,42,.90)';
+    ctx.fillRect(lx,ly,textW+pad*2,labelH);
+    ctx.fillStyle='#fff';
+    ctx.fillText(label,lx+pad,ly+pad/2);
+
+    const center=getPredictionCenter(pred, box);
+    if(center && Number.isFinite(center[0]) && Number.isFinite(center[1])){
+      const cx=Math.max(0, Math.min(canvas.width, center[0]));
+      const cy=Math.max(0, Math.min(canvas.height, center[1]));
+      const r=Math.max(4, Math.round(canvas.width/180));
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI*2);
+      ctx.fillStyle='#ef4444';
+      ctx.fill();
+      ctx.lineWidth=Math.max(2, Math.round(canvas.width/500));
+      ctx.strokeStyle='#fff';
+      ctx.stroke();
+    }
+  });
+}
+
+async function productionInferOnce(){
+  if(!productionRunning || productionBusy) return;
+  let modelName=getProductionModelName();
+  if(!modelName){
+    if(!modelItems.length){
+      try{await loadModels();}catch(_e){}
+      modelName=getProductionModelName();
+    }
+  }
+  if(!modelName){
+    if(productionStatus) productionStatus.textContent='未找到可用模型';
+    if(productionResultSummary) productionResultSummary.textContent='请先部署模型';
+    return;
+  }
+
+  productionBusy=true;
+  try{
+    const payload={dataset:currentDataset,model_name:modelName};
+    if(!useBackendCamera){
+      payload.image_data=captureFrameAsJpeg();
+    }
+    const data=await apiPost('/api/validation/realtime_classify_once',payload);
+    const now=data.updated_at || new Date().toLocaleTimeString();
+    const task=normalizeTaskName(data.task || '');
+    const preds=Array.isArray(data.predictions) ? data.predictions : [];
+
+    if(productionModelName) productionModelName.textContent=modelName;
+    if(productionStatus) productionStatus.textContent='实时检测中';
+    if(productionLatency) productionLatency.textContent=`${data.latency_ms ?? '--'} ms`;
+    if(productionUpdatedAt) productionUpdatedAt.textContent=now;
+
+    if(data.realtime){
+      const url=data.realtime.url || `/api/validation/realtime_image/realtime_latest.jpg?t=${Date.now()}`;
+      renderProductionPreview(url, preds);
+    }
+
+    if(isDetectionLikeTask(task)){
+      const taskText=taskDisplayName(task);
+      if(productionResultSummary) productionResultSummary.textContent=`${taskText}到 ${preds.length} 个目标`;
+    }else{
+      const r=data.result || {};
+      if(productionResultSummary) productionResultSummary.textContent=`${r.class_name || '未识别'} ${r.confidence_percent || ''}`;
+    }
+  }catch(err){
+    if(productionStatus) productionStatus.textContent='检测异常';
+    if(productionResultSummary) productionResultSummary.textContent=err.message || '检测失败';
+  }finally{
+    productionBusy=false;
+  }
+}
+
+async function startProductionMonitor(){
+  if(productionRunning) return;
+  if(!modelItems.length){
+    try{await loadModels();}catch(_e){}
+  }
+  const modelName=getProductionModelName();
+  if(!modelName){
+    if(productionStatus) productionStatus.textContent='未找到可用模型';
+    if(productionResultSummary) productionResultSummary.textContent='请先部署模型';
+    updateCameraLifecycle();
+    return;
+  }
+
+  productionRunning=true;
+  productionLastPredictions=[];
+  if(productionModelName) productionModelName.textContent=modelName;
+  if(productionStatus) productionStatus.textContent='启动中';
+  if(productionResultSummary) productionResultSummary.textContent='等待检测';
+  if(productionLatency) productionLatency.textContent='--';
+  if(productionUpdatedAt) productionUpdatedAt.textContent='--';
+
+  await startCamera();
+  productionInferOnce();
+  productionTimer=setInterval(productionInferOnce, REALTIME_INTERVAL_MS);
+}
+
+function stopProductionMonitor(){
+  if(productionTimer){clearInterval(productionTimer);productionTimer=null;}
+  const wasRunning=productionRunning;
+  productionRunning=false;
+  productionBusy=false;
+  productionLastPredictions=[];
+  if(productionStatus && wasRunning) productionStatus.textContent='已停止';
+  updateCameraLifecycle();
 }
 
 async function initApp(){

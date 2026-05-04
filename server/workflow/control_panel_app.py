@@ -134,11 +134,47 @@ def get_current_batch_dir() -> Path:
     )
 
 
+
+
+def normalize_task_type(task_type: str | None) -> str:
+    task = str(task_type or "detection").strip().lower()
+    if task in {"seg", "segment", "segmentation", "instance_segmentation", "yolo_seg", "yolov8_seg"}:
+        return "segmentation"
+    if task in {"obb", "obb_detection", "oriented_detection", "rotated_detection"}:
+        return "obb"
+    if task in {"cls", "classify", "classification", "image_classification"}:
+        return "classification"
+    return "detection"
+
+
+def read_current_task_yaml_summary() -> dict[str, Any]:
+    if not TASK_YAML_PATH.exists():
+        return {"task_type": "detection", "mlflow_experiment": MLFLOW_DEFAULT_EXPERIMENT}
+    try:
+        yaml = yaml_module()
+        cfg = yaml.safe_load(TASK_YAML_PATH.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {"task_type": "detection", "mlflow_experiment": MLFLOW_DEFAULT_EXPERIMENT}
+    task_obj = cfg.get("task") if isinstance(cfg.get("task"), dict) else {}
+    task_type = normalize_task_type(task_obj.get("type") or task_obj.get("name") or cfg.get("task_type"))
+    mlflow_cfg = cfg.get("mlflow") if isinstance(cfg.get("mlflow"), dict) else {}
+    default_exp = {
+        "classification": "visionops-classification",
+        "detection": "visionops-detection",
+        "obb": "visionops-obb",
+        "segmentation": "visionops-segmentation",
+    }.get(task_type, MLFLOW_DEFAULT_EXPERIMENT)
+    exp = str(mlflow_cfg.get("experiment_name") or mlflow_cfg.get("experiment") or default_exp)
+    return {"task_type": task_type, "mlflow_experiment": exp}
+
 def get_dataset_yaml_path(task_type: str) -> Path:
-    if task_type in {"classification", "cls"}:
+    task_type = normalize_task_type(task_type)
+    if task_type == "classification":
         return PROJECT_ROOT / "data" / "raw_classification" / "data.yaml"
-    if task_type in {"obb", "obb_detection"}:
+    if task_type == "obb":
         return PROJECT_ROOT / "data" / "raw_obb" / "data.yaml"
+    if task_type == "segmentation":
+        return PROJECT_ROOT / "data" / "raw_segmentation" / "data.yaml"
     return PROJECT_ROOT / "data" / "raw_detection" / "data.yaml"
 
 
@@ -206,6 +242,76 @@ def update_task_classes(cfg: dict[str, Any], names: list[str]) -> dict[str, Any]
     return cfg
 
 
+
+def build_default_segmentation_task_config(names: list[str]) -> dict[str, Any]:
+    return {
+        "task": {"name": "segmentation", "type": "segmentation"},
+        "dataset": {
+            "raw_root": "data/raw_segmentation",
+            "raw_yaml": "data/raw_segmentation/data.yaml",
+            "processed_root": "data/processed_segmentation",
+            "processed_yaml": "data/processed_segmentation/data.yaml",
+        },
+        "classes": {"names": names, "num_classes": len(names)},
+        "model": {
+            "architecture": "yolov8n-seg",
+            "pretrained_weights": "models/pretrained/yolov8n-seg.pt",
+            "input_size": [640, 640],
+        },
+        "train": {
+            "epochs": 50,
+            "batch_size": 8,
+            "lr0": 0.001,
+            "device": "cuda",
+            "workers": 4,
+            "project": "models/runs/segment",
+            "name": "visionops_segmentation",
+            "exist_ok": True,
+        },
+        "export": {
+            "mode": "rockchip",
+            "checkpoint_path": "models/checkpoints_segmentation/best.pt",
+            "output_path": "models/export_segmentation/model.onnx",
+            "imgsz": 640,
+            "opset": 12,
+            "simplify": True,
+            "dynamic": False,
+            "yolo_exec": "/home/pc/anaconda3/envs/pt2onnx/bin/yolo",
+        },
+        "rknn": {
+            "python_exec": "/home/pc/anaconda3/envs/rknn311/bin/python",
+            "target_platform": "rk3588",
+            "onnx_model": "models/export_segmentation/model.onnx",
+            "rknn_model": "models/export_segmentation/model.rknn",
+            "perf_report": "models/export_segmentation/rknn_report.json",
+            "build": {"do_quantization": True, "optimization_level": 3},
+            "quantization": {
+                "dataset": "data/processed_segmentation/images/val",
+                "dataset_size": 100,
+                "quantized_dtype": "asymmetric_quantized-8",
+            },
+            "input": {
+                "mean_values": [[0, 0, 0]],
+                "std_values": [[255, 255, 255]],
+            },
+        },
+        "mlflow": {
+            "experiment_name": "visionops-segmentation",
+            "registered_model_name": "visionops-segmentation-rk3588",
+            "tracking_uri": "http://localhost:5000",
+            "promotion_threshold": {"map50": 0.5, "map50_95": 0.3, "latency_ms": 200.0},
+        },
+        "edge": {
+            "port": 8082,
+            "metrics_port": 9091,
+            "npu_core": "auto",
+            "conf_threshold": 0.25,
+            "nms_threshold": 0.45,
+            "mask_threshold": 0.5,
+            "warmup_runs": 3,
+        },
+    }
+
 def format_duration_ms(ms: int | float | None) -> str:
     if ms is None:
         return "-"
@@ -249,18 +355,26 @@ def pick_param(params: dict[str, Any], candidates: list[str]) -> str:
     return "-"
 
 
-def discover_local_model_artifacts() -> dict[str, bool | str]:
+def discover_local_model_artifacts(task_type: str | None = None) -> dict[str, bool | str]:
+    task_type = normalize_task_type(task_type or read_current_task_yaml_summary().get("task_type"))
+    suffix_map = {
+        "classification": "classification",
+        "detection": "detection",
+        "obb": "obb",
+        "segmentation": "segmentation",
+    }
+    suffix = suffix_map.get(task_type, "detection")
     candidates = {
         "best_pt": [
-            PROJECT_ROOT / "models" / "checkpoints_detection" / "best.pt",
+            PROJECT_ROOT / "models" / f"checkpoints_{suffix}" / "best.pt",
             PROJECT_ROOT / "models" / "checkpoints" / "best.pt",
         ],
         "onnx": [
-            PROJECT_ROOT / "models" / "export_detection" / "model.onnx",
+            PROJECT_ROOT / "models" / f"export_{suffix}" / "model.onnx",
             PROJECT_ROOT / "models" / "export" / "model.onnx",
         ],
         "rknn": [
-            PROJECT_ROOT / "models" / "export_detection" / "model.rknn",
+            PROJECT_ROOT / "models" / f"export_{suffix}" / "model.rknn",
             PROJECT_ROOT / "models" / "export" / "model.rknn",
         ],
     }
@@ -286,10 +400,10 @@ def run_to_summary(run: Any, experiment_id: str) -> dict[str, Any]:
     duration_ms = (end_ms - start_ms) if start_ms and end_ms else None
     run_name = getattr(info, "run_name", None) or params.get("run_name") or getattr(info, "run_id", "")
     metric_map = {
-        "best_map50": pick_metric(metrics, ["best_map50", "map50", "metrics/mAP50(B)", "mAP50", "box_map50"]),
-        "best_map50_95": pick_metric(metrics, ["best_map50_95", "map50_95", "metrics/mAP50-95(B)", "mAP50-95", "box_map"]),
-        "precision": pick_metric(metrics, ["precision", "metrics/precision(B)", "box_precision"]),
-        "recall": pick_metric(metrics, ["recall", "metrics/recall(B)", "box_recall"]),
+        "best_map50": pick_metric(metrics, ["best_map50", "map50", "mask_map50", "metrics/mAP50(M)", "metrics/mAP50(B)", "mAP50", "box_map50"]),
+        "best_map50_95": pick_metric(metrics, ["best_map50_95", "map50_95", "mask_map50_95", "metrics/mAP50-95(M)", "metrics/mAP50-95(B)", "mAP50-95", "box_map"]),
+        "precision": pick_metric(metrics, ["precision", "mask_precision", "metrics/precision(M)", "metrics/precision(B)", "box_precision"]),
+        "recall": pick_metric(metrics, ["recall", "mask_recall", "metrics/recall(M)", "metrics/recall(B)", "box_recall"]),
     }
     return {
         "run_id": getattr(info, "run_id", ""),
@@ -480,6 +594,8 @@ def api_status() -> dict[str, Any]:
 
     package_items = list_incoming_packages()
 
+    task_summary = read_current_task_yaml_summary()
+
     return {
         "project_root": str(PROJECT_ROOT),
         "incoming_dir": "data/incoming",
@@ -496,6 +612,8 @@ def api_status() -> dict[str, Any]:
         "x_anylabeling_cmd": X_ANYLABELING_CMD,
         "x_anylabeling_env": X_ANYLABELING_ENV,
         "task_yaml_exists": TASK_YAML_PATH.exists(),
+        "current_task_type": task_summary.get("task_type"),
+        "mlflow_experiment": task_summary.get("mlflow_experiment"),
     }
 
 
@@ -511,9 +629,11 @@ def api_mlflow_runs(experiment: str = MLFLOW_DEFAULT_EXPERIMENT, limit: int = 20
 
 @app.get("/api/mlflow/config")
 def api_mlflow_config() -> dict[str, Any]:
+    task_summary = read_current_task_yaml_summary()
     return {
         "tracking_uri": MLFLOW_TRACKING_URI,
-        "default_experiment": MLFLOW_DEFAULT_EXPERIMENT,
+        "default_experiment": task_summary.get("mlflow_experiment") or MLFLOW_DEFAULT_EXPERIMENT,
+        "current_task_type": task_summary.get("task_type"),
     }
 
 
@@ -621,12 +741,21 @@ def api_open_annotator() -> dict[str, Any]:
 
 
 @app.post("/api/accept-reviewed")
-def api_accept_reviewed() -> dict[str, Any]:
+def api_accept_reviewed(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = payload or {}
+    task_type = normalize_task_type(payload.get("task_type") or read_current_task_yaml_summary().get("task_type"))
+    cmd = ["python", "server/workflow/accept_reviewed_detection.py", "--task-type", task_type]
     job_id = jobs.start(
-        "accept-reviewed-detection",
-        ["python", "server/workflow/accept_reviewed_detection.py", "--move"],
+        "accept-reviewed-" + task_type,
+        cmd,
     )
-    return {"job_id": job_id, "message": "已开始确认审核完成并转换到 data/raw_detection"}
+    target = {
+        "classification": "data/raw_classification",
+        "detection": "data/raw_detection",
+        "obb": "data/raw_obb",
+        "segmentation": "data/raw_segmentation",
+    }.get(task_type, "data/raw_detection")
+    return {"job_id": job_id, "message": f"已开始确认审核完成并转换到 {target}", "task_type": task_type}
 
 
 @app.get("/api/task-yaml")
@@ -652,13 +781,17 @@ def api_save_task_yaml(payload: dict[str, Any]) -> dict[str, Any]:
 @app.post("/api/prepare-task-yaml")
 def api_prepare_task_yaml(payload: dict[str, Any]) -> dict[str, Any]:
     """选择任务类型后，从 preset 生成 task.yaml，并自动同步 data.yaml 中的类别信息。"""
-    task_type = str(payload.get("task_type") or "").strip()
+    task_type = normalize_task_type(payload.get("task_type") or "")
     preset_map = {
         "classification": "classification.yaml",
         "detection": "detection.yaml",
         "yolo_detection": "detection.yaml",
         "obb": "obb.yaml",
         "obb_detection": "obb.yaml",
+        "seg": "segmentation.yaml",
+        "segment": "segmentation.yaml",
+        "segmentation": "segmentation.yaml",
+        "yolov8_seg": "segmentation.yaml",
     }
 
     filename = preset_map.get(task_type)
@@ -666,16 +799,20 @@ def api_prepare_task_yaml(payload: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=f"未知任务类型: {task_type}")
 
     preset_path = PRESETS_DIR / filename
-    if not preset_path.exists():
-        raise HTTPException(status_code=404, detail=f"未找到 preset: {preset_path}")
-
     yaml = yaml_module()
-    cfg = yaml.safe_load(preset_path.read_text(encoding="utf-8")) or {}
-    if not isinstance(cfg, dict):
-        raise HTTPException(status_code=400, detail=f"preset 顶层不是字典: {preset_path}")
-
     names, data_yaml = read_dataset_classes(task_type)
-    cfg = update_task_classes(cfg, names)
+
+    if preset_path.exists():
+        cfg = yaml.safe_load(preset_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(cfg, dict):
+            raise HTTPException(status_code=400, detail=f"preset 顶层不是字典: {preset_path}")
+        cfg = update_task_classes(cfg, names)
+        preset_label = str(preset_path.relative_to(PROJECT_ROOT))
+    elif task_type == "segmentation":
+        cfg = build_default_segmentation_task_config(names)
+        preset_label = "内置 segmentation 默认模板（未找到 pipeline/configs/presets/segmentation.yaml）"
+    else:
+        raise HTTPException(status_code=404, detail=f"未找到 preset: {preset_path}")
 
     content = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
     TASK_YAML_PATH.write_text(content, encoding="utf-8")
@@ -683,7 +820,7 @@ def api_prepare_task_yaml(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "message": "已从模板生成 task.yaml，并自动同步类别信息",
         "task_type": task_type,
-        "preset": str(preset_path.relative_to(PROJECT_ROOT)),
+        "preset": preset_label,
         "data_yaml": str(data_yaml.relative_to(PROJECT_ROOT)),
         "num_classes": len(names),
         "names": names,
@@ -908,6 +1045,7 @@ HTML_PAGE = r'''
           <button onclick="prepareTaskYaml('classification')">分类任务</button>
           <button onclick="prepareTaskYaml('detection')">检测任务</button>
           <button onclick="prepareTaskYaml('obb')">OBB 任务</button>
+          <button onclick="prepareTaskYaml('segmentation')">分割任务</button>
           <button class="ghost" onclick="closePipelineModal()">取消</button>
         </div>
       </div>
@@ -927,7 +1065,7 @@ HTML_PAGE = r'''
   <div id="runHistoryModal" class="modal-mask">
     <div class="modal">
       <h2>历史模型记录</h2>
-      <p>展示 MLflow 实验 visionops-detection 最近 20 个 run，便于快速比较训练结果。</p>
+      <p>展示当前 task.yaml 对应 MLflow 实验最近 20 个 run，便于快速比较训练结果。</p>
       <div class="btn-row">
         <button class="ghost" onclick="refreshRunHistory()">刷新历史记录</button>
         <button class="secondary" onclick="openMlflow()">打开 MLflow</button>
@@ -968,6 +1106,7 @@ function escapeHtml(value) {
 }
 
 function renderStatus(data) {
+  currentMlflowExperiment = data.mlflow_experiment || currentMlflowExperiment || "visionops-detection";
   const rows = [
     ["项目根目录", data.project_root],
     ["上传包目录", data.incoming_dir],
@@ -979,6 +1118,8 @@ function renderStatus(data) {
     ["导出标签目录", data.labels_dir || "未生成"],
     ["导出标签数量", String(data.labels_count)],
     ["task.yaml 是否存在", data.task_yaml_exists ? "是" : "否"],
+    ["当前任务类型", data.current_task_type || "-"],
+    ["MLflow 实验", data.mlflow_experiment || "-"],
     ["X-AnyLabeling 命令", data.x_anylabeling_cmd],
     ["X-AnyLabeling 环境", data.x_anylabeling_env || "当前环境"],
     ["device_id", data.model_context.device_id || ""],
@@ -1041,7 +1182,7 @@ function renderMlflowStatus(state) {
   const badge = document.getElementById("mlflowConnBadge");
   const box = document.getElementById("modelStatusBox");
   const expPill = document.getElementById("mlflowExperimentPill");
-  expPill.textContent = "experiment: " + escapeHtml(state.experiment_name || "visionops-detection");
+  expPill.textContent = "experiment: " + escapeHtml(state.experiment_name || currentMlflowExperiment || "visionops-detection");
 
   if (!state.available || !state.ok) {
     badge.className = "mlflow-status err";
@@ -1100,7 +1241,7 @@ function renderMlflowStatus(state) {
     <div class="btn-row"><button class="ghost" onclick="openLatestRun()">打开最新 Run</button></div>`;
 }
 async function refreshModelStatus() {
-  const res = await fetch("/api/mlflow/latest-model-status?experiment=visionops-detection");
+  const res = await fetch("/api/mlflow/latest-model-status?experiment=" + encodeURIComponent(currentMlflowExperiment || "visionops-detection"));
   const data = await res.json();
   renderMlflowStatus(data);
 }
@@ -1156,7 +1297,7 @@ function renderRunHistory(state) {
 }
 
 async function refreshRunHistory() {
-  const res = await fetch("/api/mlflow/runs?experiment=visionops-detection&limit=20");
+  const res = await fetch("/api/mlflow/runs?experiment=" + encodeURIComponent(currentMlflowExperiment || "visionops-detection") + "&limit=20");
   const data = await res.json();
   mlflowState = data;
   renderRunHistory(data);
@@ -1287,9 +1428,12 @@ function previewDeployOther() {
   document.getElementById("deployOtherPreview").innerHTML = `设备参数预览：<br>device_id=${escapeHtml(deviceId)}<br>target=${escapeHtml(user)}@${escapeHtml(host)}:${escapeHtml(port)}<br>deploy_root=${escapeHtml(root)}<br><br>下一步建议把这些字段传给 edge/deploy/push.sh，例如通过命令行参数或环境变量完成多设备部署。`;
 }
 
-refreshStatus();
-refreshIncomingPackages();
-refreshModelStatus();
+async function initPanel() {
+  await refreshStatus();
+  refreshIncomingPackages();
+  refreshModelStatus();
+}
+initPanel();
 </script>
 </body>
 </html>

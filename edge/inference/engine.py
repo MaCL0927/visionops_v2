@@ -1,5 +1,5 @@
 """
-RK3588 边缘推理引擎（Detection / Classification / OBB 通用版）
+RK3588 边缘推理引擎（Detection / Classification / OBB / Segmentation 通用版）
 
 功能：
 - 基于 rknnlite2 运行 RKNN 模型
@@ -7,6 +7,7 @@ RK3588 边缘推理引擎（Detection / Classification / OBB 通用版）
 - 支持 YOLO Detection 后处理
 - 支持 Image Classification 后处理
 - 支持 YOLOv8 OBB 旋转框后处理
+- 支持 YOLOv8 Segmentation 分割后处理（box + mask polygon）
 
 典型启动：
 
@@ -59,7 +60,7 @@ class InferenceConfig:
     target_platform: str = "rk3588"
 
     # 新增：任务类型。默认 detection，保证旧启动方式不受影响。
-    task: str = "detection"  # detection / classification / obb_detection
+    task: str = "detection"  # detection / classification / obb_detection / segmentation
     npu_core: str = "auto"
 
     # detection 默认 [640, 640]；classification 建议启动时传 [224, 224]
@@ -69,9 +70,12 @@ class InferenceConfig:
     num_classes: int = 2
     class_names_file: Optional[str] = None
 
-    # detection 参数
+    # detection / obb_detection / segmentation 参数
     conf_threshold: float = 0.25
     nms_threshold: float = 0.45
+
+    # segmentation 参数
+    mask_threshold: float = 0.5
 
     # classification 参数
     topk: int = 5
@@ -91,6 +95,11 @@ class InferenceConfig:
             "rotated_detection", "rotated_bbox_detection", "yolo_obb", "yolov8_obb",
         }:
             return "obb_detection"
+        if task in {
+            "seg", "segment", "segmentation", "instance_segmentation",
+            "yolo_seg", "yolov8_seg", "mask_segmentation",
+        }:
+            return "segmentation"
         raise ValueError(f"不支持的 task: {self.task}")
 
 
@@ -341,6 +350,143 @@ def build_detection_prediction(
     }
 
 
+
+
+
+def normalize_yolo_seg_output(out: np.ndarray, num_classes: int) -> np.ndarray:
+    """
+    将 YOLOv8-seg 单输出统一成 [N, 4 + C + M]。
+
+    常见 RKNN/ONNX 输出：
+      - [1, 4 + C + 32, 8400]
+      - [1, 8400, 4 + C + 32]
+      - [4 + C + 32, 8400]
+      - [8400, 4 + C + 32]
+    """
+    arr = np.asarray(out, dtype=np.float32)
+    if arr.ndim == 3 and arr.shape[0] == 1:
+        arr = arr[0]
+    if arr.ndim != 2:
+        raise ValueError(f"不支持的 YOLOv8-seg 输出维度: {out.shape}")
+
+    min_channels = 4 + int(num_classes) + 1
+    # [C, N] -> [N, C]。通常 C 远小于 N。
+    if arr.shape[0] >= min_channels and arr.shape[0] < arr.shape[1]:
+        arr = arr.T
+    elif arr.shape[1] >= min_channels:
+        pass
+    else:
+        raise ValueError(
+            f"YOLOv8-seg 输出维度与类别数不匹配: shape={out.shape}, "
+            f"num_classes={num_classes}, min_channels={min_channels}"
+        )
+    return arr.astype(np.float32)
+
+
+def normalize_seg_proto(proto: np.ndarray, mask_dim: int) -> np.ndarray:
+    """将 proto 统一成 [M, H, W]。"""
+    arr = np.asarray(proto, dtype=np.float32)
+    if arr.ndim == 4 and arr.shape[0] == 1:
+        arr = arr[0]
+
+    if arr.ndim != 3:
+        raise ValueError(f"不支持的 YOLOv8-seg proto 输出维度: {proto.shape}")
+
+    if arr.shape[0] == mask_dim:
+        return arr.astype(np.float32)
+    if arr.shape[-1] == mask_dim:
+        return arr.transpose(2, 0, 1).astype(np.float32)
+
+    raise ValueError(
+        f"YOLOv8-seg proto 通道数不匹配: shape={proto.shape}, mask_dim={mask_dim}"
+    )
+
+
+def crop_mask_by_box(mask: np.ndarray, box_xyxy: np.ndarray) -> np.ndarray:
+    """在 input 尺度上按 bbox 裁剪 mask，bbox 外置零。"""
+    h, w = mask.shape[:2]
+    x1, y1, x2, y2 = [int(round(float(x))) for x in box_xyxy]
+    x1 = max(0, min(w, x1))
+    x2 = max(0, min(w, x2))
+    y1 = max(0, min(h, y1))
+    y2 = max(0, min(h, y2))
+
+    cropped = np.zeros_like(mask, dtype=np.float32)
+    if x2 > x1 and y2 > y1:
+        cropped[y1:y2, x1:x2] = mask[y1:y2, x1:x2]
+    return cropped
+
+
+def project_letterbox_mask_to_original(
+    mask_input: np.ndarray,
+    meta: Dict[str, Any],
+) -> np.ndarray:
+    """将 input letterbox 尺度的 mask 还原到原图尺寸。"""
+    import cv2
+
+    orig_h, orig_w = meta["orig_shape"]
+    input_h, input_w = meta["input_shape"]
+    ratio = float(meta.get("ratio", 1.0))
+    dw, dh = meta.get("pad", (0.0, 0.0))
+
+    # 与 letterbox 中 left/top 的 round 逻辑保持一致。
+    left = max(0, int(round(float(dw) - 0.1)))
+    top = max(0, int(round(float(dh) - 0.1)))
+    resized_w = min(input_w - left, int(round(orig_w * ratio)))
+    resized_h = min(input_h - top, int(round(orig_h * ratio)))
+
+    if resized_w <= 0 or resized_h <= 0:
+        return cv2.resize(mask_input, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
+
+    valid = mask_input[top: top + resized_h, left: left + resized_w]
+    if valid.size == 0:
+        return np.zeros((orig_h, orig_w), dtype=np.float32)
+
+    return cv2.resize(valid, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+
+
+def mask_to_segments(
+    binary_mask: np.ndarray,
+    max_segments: int = 3,
+    max_points_per_segment: int = 200,
+) -> Tuple[List[List[List[float]]], float]:
+    """
+    二值 mask -> polygon segments。
+
+    返回：
+      segments: [[[x,y], ...], ...]
+      area: mask 像素面积
+    """
+    import cv2
+
+    mask_u8 = (binary_mask.astype(np.uint8) * 255)
+    area = float(np.count_nonzero(mask_u8))
+    if area <= 0:
+        return [], 0.0
+
+    contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return [], area
+
+    contours = sorted(contours, key=cv2.contourArea, reverse=True)
+    segments: List[List[List[float]]] = []
+
+    for cnt in contours[:max_segments]:
+        if cv2.contourArea(cnt) < 4.0:
+            continue
+        epsilon = max(1.0, 0.002 * cv2.arcLength(cnt, True))
+        approx = cv2.approxPolyDP(cnt, epsilon, True).reshape(-1, 2)
+        if approx.shape[0] < 3:
+            continue
+
+        if approx.shape[0] > max_points_per_segment:
+            idx = np.linspace(0, approx.shape[0] - 1, max_points_per_segment).astype(np.int32)
+            approx = approx[idx]
+
+        segment = [[round(float(x), 2), round(float(y), 2)] for x, y in approx.tolist()]
+        segments.append(segment)
+
+    return segments, area
 
 def softmax_np(x: np.ndarray, axis: int = -1) -> np.ndarray:
     """数值稳定版 softmax，用于 DFL 解码。"""
@@ -781,6 +927,141 @@ def _decode_rockchip_yolov8_outputs(
     }
 
 
+def is_rockchip_seg_outputs(
+    outputs: List[np.ndarray],
+    num_classes: int,
+    mask_dim: int = 32,
+) -> bool:
+    """
+    判断是否为 airockchip/ultralytics_yolov8 format=rknn 导出的 YOLOv8-seg 多输出结构。
+
+    当前已验证的输出顺序：
+      0: box_80        [1, 64, 80, 80]
+      1: cls_80        [1, C, 80, 80]
+      2: score/sum_80  [1, 1, 80, 80]   可忽略
+      3: mask_80       [1, 32, 80, 80]
+      4: box_40        [1, 64, 40, 40]
+      5: cls_40        [1, C, 40, 40]
+      6: score/sum_40  [1, 1, 40, 40]   可忽略
+      7: mask_40       [1, 32, 40, 40]
+      8: box_20        [1, 64, 20, 20]
+      9: cls_20        [1, C, 20, 20]
+     10: score/sum_20  [1, 1, 20, 20]   可忽略
+     11: mask_20       [1, 32, 20, 20]
+     12: proto         [1, 32, 160, 160]
+    """
+    if outputs is None or len(outputs) < 13:
+        return False
+
+    shapes = [tuple(np.asarray(o).shape) for o in outputs]
+    expected = [
+        (1, 64, 80, 80),
+        (1, int(num_classes), 80, 80),
+        (1, 1, 80, 80),
+        (1, mask_dim, 80, 80),
+        (1, 64, 40, 40),
+        (1, int(num_classes), 40, 40),
+        (1, 1, 40, 40),
+        (1, mask_dim, 40, 40),
+        (1, 64, 20, 20),
+        (1, int(num_classes), 20, 20),
+        (1, 1, 20, 20),
+        (1, mask_dim, 20, 20),
+        (1, mask_dim, 160, 160),
+    ]
+
+    if len(shapes) >= 13 and shapes[:13] == expected:
+        return True
+
+    # 兼容未来输出顺序略有变化的情况：按关键特征宽松判断。
+    has_box_heads = 0
+    has_cls_heads = 0
+    has_coeff_heads = 0
+    has_proto = False
+
+    for arr in outputs:
+        a = np.asarray(arr)
+        if a.ndim != 4 or a.shape[0] != 1:
+            continue
+        c, h, w = int(a.shape[1]), int(a.shape[2]), int(a.shape[3])
+        if (h, w) in {(80, 80), (40, 40), (20, 20)}:
+            if c == 64:
+                has_box_heads += 1
+            elif c == int(num_classes):
+                has_cls_heads += 1
+            elif c == mask_dim:
+                has_coeff_heads += 1
+        elif (h, w) == (160, 160) and c == mask_dim:
+            has_proto = True
+
+    return has_box_heads >= 3 and has_cls_heads >= 3 and has_coeff_heads >= 3 and has_proto
+
+
+def decode_rockchip_seg_outputs(
+    outputs: List[np.ndarray],
+    num_classes: int,
+    input_size: Tuple[int, int],
+    mask_dim: int = 32,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    解码 Rockchip YOLOv8-seg RKNN 多输出。
+
+    return:
+      boxes_input_xyxy: [N, 4]，input letterbox 尺度 xyxy
+      class_scores:    [N, C]
+      mask_coeffs:     [N, M]
+      proto:           [M, Hp, Wp]
+    """
+    if not is_rockchip_seg_outputs(outputs, num_classes=num_classes, mask_dim=mask_dim):
+        raise ValueError(
+            "不是已知 Rockchip YOLOv8-seg 多输出结构，"
+            f"shapes={[tuple(np.asarray(o).shape) for o in outputs]}"
+        )
+
+    # 当前 Rockchip seg 输出顺序为每个尺度 4 个输出：box / cls / score_sum / mask_coeff。
+    groups = [
+        (0, 1, 3),   # 80x80
+        (4, 5, 7),   # 40x40
+        (8, 9, 11),  # 20x20
+    ]
+
+    boxes_all: List[np.ndarray] = []
+    cls_all: List[np.ndarray] = []
+    coeff_all: List[np.ndarray] = []
+
+    for box_idx, cls_idx, coeff_idx in groups:
+        box_out = np.asarray(outputs[box_idx], dtype=np.float32)
+        cls_out = np.asarray(outputs[cls_idx], dtype=np.float32)
+        coeff_out = np.asarray(outputs[coeff_idx], dtype=np.float32)
+
+        boxes = _rockchip_box_process(box_out, img_size=input_size)
+        boxes = _flatten_output(boxes).astype(np.float32)
+
+        cls_scores = _flatten_output(cls_out).astype(np.float32)
+        if cls_scores.shape[1] > int(num_classes):
+            cls_scores = cls_scores[:, : int(num_classes)]
+
+        # airockchip 的 cls 分支多数已经是概率；如果值域像 logits，再做 sigmoid。
+        if cls_scores.size > 0 and (float(np.max(cls_scores)) > 1.0 or float(np.min(cls_scores)) < 0.0):
+            cls_scores = sigmoid(cls_scores)
+
+        coeffs = _flatten_output(coeff_out).astype(np.float32)
+        if coeffs.shape[1] > mask_dim:
+            coeffs = coeffs[:, :mask_dim]
+
+        boxes_all.append(boxes)
+        cls_all.append(cls_scores)
+        coeff_all.append(coeffs)
+
+    boxes_input_xyxy = np.concatenate(boxes_all, axis=0)
+    class_scores = np.concatenate(cls_all, axis=0)
+    mask_coeffs = np.concatenate(coeff_all, axis=0)
+
+    proto = normalize_seg_proto(outputs[12], mask_dim=mask_dim)
+
+    return boxes_input_xyxy, class_scores, mask_coeffs, proto
+
+
 # ────────────────────────────────────────────────
 # RKNN 推理引擎
 # ────────────────────────────────────────────────
@@ -935,6 +1216,15 @@ class RKNNInferenceEngine:
                 fake[:, 4 + c, :] = np.random.rand(1, n).astype(np.float32) * np.pi / 2
                 return [fake]
 
+            if self.config.normalized_task() == "segmentation":
+                # 模拟 YOLOv8-seg 输出：[1, 4 + C + 32, N] + [1, 32, H/4, W/4]
+                mask_dim = 32
+                h, w = self.config.input_size
+                fake_det = np.random.rand(1, 4 + c + mask_dim, n).astype(np.float32)
+                fake_det[:, 0:4, :] *= float(max(h, w))
+                fake_proto = np.random.randn(1, mask_dim, max(1, h // 4), max(1, w // 4)).astype(np.float32)
+                return [fake_det, fake_proto]
+
             # 模拟检测输出：[1, N, 5 + C]
             fake = np.random.rand(1, n, 5 + c).astype(np.float32)
             return [fake]
@@ -971,6 +1261,8 @@ class RKNNInferenceEngine:
                 result = self._postprocess_detection(outputs, meta)
             elif task == "obb_detection":
                 result = self._postprocess_obb(outputs, meta)
+            elif task == "segmentation":
+                result = self._postprocess_segmentation(outputs, meta)
             else:
                 raise ValueError(f"不支持的任务类型: {task}")
 
@@ -1313,6 +1605,263 @@ class RKNNInferenceEngine:
             "task": "detection",
         }
 
+    def _postprocess_segmentation(
+        self,
+        outputs: Optional[List[np.ndarray]],
+        meta: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        YOLOv8 Segmentation 后处理。
+
+        兼容两种输出：
+        1. 标准单输出 + proto：
+             output[0]: [1, 4 + num_classes + mask_dim, 8400]
+             output[1]: [1, mask_dim, mask_h, mask_w]
+
+        2. Rockchip format=rknn 多输出 + proto：
+             [box_80, cls_80, sum_80, mask_80,
+              box_40, cls_40, sum_40, mask_40,
+              box_20, cls_20, sum_20, mask_20,
+              proto]
+        """
+        if outputs is None or len(outputs) < 2:
+            return {
+                "predictions": [],
+                "task": "segmentation",
+                "message": "empty outputs or missing proto output",
+                "output_shapes": [tuple(np.asarray(o).shape) for o in outputs] if outputs else [],
+            }
+
+        shape_info = [tuple(np.asarray(o).shape) for o in outputs]
+        num_classes = int(self.config.num_classes)
+        input_h, input_w = meta["input_shape"]
+        orig_h, orig_w = meta["orig_shape"]
+        ratio = float(meta["ratio"])
+        dw, dh = meta["pad"]
+
+        # --------------------------------------------------
+        # Rockchip YOLOv8-seg 多输出格式
+        # --------------------------------------------------
+        if is_rockchip_seg_outputs(outputs, num_classes=num_classes, mask_dim=32):
+            mask_dim = 32
+            boxes_input_xyxy, class_scores, mask_coeffs, proto = decode_rockchip_seg_outputs(
+                outputs=outputs,
+                num_classes=num_classes,
+                input_size=tuple(self.config.input_size),
+                mask_dim=mask_dim,
+            )
+            decode_format = "rockchip_yolov8_seg_multi_output"
+
+            if not self._postprocess_format_logged:
+                logger.info(
+                    f"[POSTPROCESS] 使用 Rockchip YOLOv8 Segmentation 多输出后处理: "
+                    f"shapes={shape_info}, num_classes={num_classes}, mask_dim={mask_dim}"
+                )
+                self._postprocess_format_logged = True
+
+        # --------------------------------------------------
+        # 标准 YOLOv8-seg 单输出 + proto 格式
+        # --------------------------------------------------
+        else:
+            det_out = outputs[0]
+            proto_out = outputs[1]
+            preds = normalize_yolo_seg_output(det_out, num_classes=num_classes)
+
+            mask_dim = int(preds.shape[1] - 4 - num_classes)
+            if mask_dim <= 0:
+                return {
+                    "predictions": [],
+                    "task": "segmentation",
+                    "message": f"invalid mask_dim={mask_dim}",
+                    "output_shapes": shape_info,
+                }
+
+            proto = normalize_seg_proto(proto_out, mask_dim=mask_dim)
+
+            boxes_xywh = preds[:, 0:4].astype(np.float32)
+            class_scores = preds[:, 4:4 + num_classes].astype(np.float32)
+            mask_coeffs = preds[:, 4 + num_classes:4 + num_classes + mask_dim].astype(np.float32)
+
+            if class_scores.size > 0 and (float(np.max(class_scores)) > 1.0 or float(np.min(class_scores)) < 0.0):
+                class_scores = sigmoid(class_scores)
+
+            # 单输出模型有时可能输出 0~1 归一化坐标。
+            if boxes_xywh.size > 0 and float(np.nanmax(boxes_xywh[:, 0:4])) <= 2.0:
+                boxes_xywh[:, [0, 2]] *= float(input_w)
+                boxes_xywh[:, [1, 3]] *= float(input_h)
+
+            boxes_input_xyxy = xywh_to_xyxy(boxes_xywh)
+            decode_format = "yolov8_seg_single_output_with_proto"
+
+            if not self._postprocess_format_logged:
+                logger.info(
+                    f"[POSTPROCESS] 使用 YOLOv8 Segmentation 单输出后处理: "
+                    f"shapes={shape_info}, num_classes={num_classes}, mask_dim={mask_dim}"
+                )
+                self._postprocess_format_logged = True
+
+        if class_scores.size == 0:
+            return {
+                "predictions": [],
+                "task": "segmentation",
+                "output_shapes": shape_info,
+                "decode_format": decode_format,
+                "message": "empty class scores",
+            }
+
+        class_ids = np.argmax(class_scores, axis=1)
+        scores = class_scores[np.arange(len(class_scores)), class_ids]
+
+        if os.getenv("SEG_DEBUG", "0") == "1":
+            logger.info(
+                "[SEG DEBUG] decoded stats: "
+                f"score_min={float(np.min(scores)):.6f}, "
+                f"score_max={float(np.max(scores)):.6f}, "
+                f"box_min={float(np.min(boxes_input_xyxy)):.6f}, "
+                f"box_max={float(np.max(boxes_input_xyxy)):.6f}, "
+                f"coeff_min={float(np.min(mask_coeffs)):.6f}, "
+                f"coeff_max={float(np.max(mask_coeffs)):.6f}, "
+                f"proto_min={float(np.min(proto)):.6f}, "
+                f"proto_max={float(np.max(proto)):.6f}, "
+                f"threshold={self.config.conf_threshold}, "
+                f"decode_format={decode_format}"
+            )
+
+        keep_mask = scores >= self.config.conf_threshold
+        if not np.any(keep_mask):
+            return {
+                "predictions": [],
+                "task": "segmentation",
+                "output_shapes": shape_info,
+                "decode_format": decode_format,
+                "message": "no predictions above confidence threshold",
+                "debug": {
+                    "score_max": round(float(np.max(scores)), 6) if scores.size else None,
+                    "score_min": round(float(np.min(scores)), 6) if scores.size else None,
+                    "conf_threshold": self.config.conf_threshold,
+                },
+            }
+
+        candidate_indices = np.where(keep_mask)[0]
+
+        # 防止低阈值时 NMS 处理过多候选，边缘端先保留 topK 候选。
+        max_candidates = int(os.getenv("SEG_MAX_CANDIDATES", "1000"))
+        if candidate_indices.size > max_candidates:
+            top_order = scores[candidate_indices].argsort()[::-1][:max_candidates]
+            candidate_indices = candidate_indices[top_order]
+
+        boxes_input_xyxy = boxes_input_xyxy[candidate_indices]
+        scores = scores[candidate_indices]
+        class_ids = class_ids[candidate_indices]
+        mask_coeffs = mask_coeffs[candidate_indices]
+
+        for i in range(len(boxes_input_xyxy)):
+            boxes_input_xyxy[i] = clip_box_xyxy(boxes_input_xyxy[i], input_w, input_h)
+
+        boxes_orig_xyxy = boxes_input_xyxy.copy()
+        boxes_orig_xyxy[:, [0, 2]] -= float(dw)
+        boxes_orig_xyxy[:, [1, 3]] -= float(dh)
+        boxes_orig_xyxy /= max(ratio, 1e-6)
+
+        for i in range(len(boxes_orig_xyxy)):
+            boxes_orig_xyxy[i] = clip_box_xyxy(boxes_orig_xyxy[i], orig_w, orig_h)
+
+        wh = boxes_orig_xyxy[:, 2:4] - boxes_orig_xyxy[:, 0:2]
+        valid_mask = (wh[:, 0] > 2.0) & (wh[:, 1] > 2.0)
+        if not np.any(valid_mask):
+            return {
+                "predictions": [],
+                "task": "segmentation",
+                "output_shapes": shape_info,
+                "decode_format": decode_format,
+                "message": "no valid segmentation boxes",
+            }
+
+        boxes_input_xyxy = boxes_input_xyxy[valid_mask]
+        boxes_orig_xyxy = boxes_orig_xyxy[valid_mask]
+        scores = scores[valid_mask]
+        class_ids = class_ids[valid_mask]
+        mask_coeffs = mask_coeffs[valid_mask]
+
+        keep = multiclass_nms(
+            boxes=boxes_orig_xyxy,
+            scores=scores,
+            class_ids=class_ids,
+            iou_thresh=self.config.nms_threshold,
+        )
+
+        if not keep:
+            return {
+                "predictions": [],
+                "task": "segmentation",
+                "output_shapes": shape_info,
+                "decode_format": decode_format,
+                "message": "all predictions removed by nms",
+            }
+
+        proto_flat = proto.reshape(mask_dim, -1)
+        predictions: List[Dict[str, Any]] = []
+
+        import cv2
+
+        for idx in keep:
+            cls_id = int(class_ids[idx])
+            score = float(scores[idx])
+            bbox_orig = boxes_orig_xyxy[idx]
+            bbox_input = boxes_input_xyxy[idx]
+            coeff = mask_coeffs[idx]
+
+            mask_prob = sigmoid(coeff @ proto_flat).reshape(proto.shape[1], proto.shape[2])
+            mask_input = cv2.resize(mask_prob, (input_w, input_h), interpolation=cv2.INTER_LINEAR)
+            mask_input = crop_mask_by_box(mask_input, bbox_input)
+            mask_orig = project_letterbox_mask_to_original(mask_input, meta)
+            binary_mask = mask_orig >= float(self.config.mask_threshold)
+            segments, mask_area = mask_to_segments(binary_mask)
+
+            x1, y1, x2, y2 = [float(x) for x in bbox_orig.tolist()]
+            cx = (x1 + x2) / 2.0
+            cy = (y1 + y2) / 2.0
+
+            predictions.append(
+                {
+                    "class_id": cls_id,
+                    "class_name": safe_class_name(self.config.class_names, cls_id),
+                    "confidence": round(score, 6),
+                    "bbox": [round(x1, 2), round(y1, 2), round(x2, 2), round(y2, 2)],
+                    "center": [round(cx, 2), round(cy, 2)],
+                    "center_x": round(cx, 2),
+                    "center_y": round(cy, 2),
+                    "mask": {
+                        "threshold": float(self.config.mask_threshold),
+                        "area": round(float(mask_area), 2),
+                        "shape": [int(orig_h), int(orig_w)],
+                        "segments": segments,
+                        "polygon": segments[0] if segments else [],
+                    },
+                }
+            )
+
+        predictions.sort(key=lambda x: x["confidence"], reverse=True)
+        return {
+            "predictions": predictions,
+            "task": "segmentation",
+            "num_classes": num_classes,
+            "class_names": self.config.class_names,
+            "output_shapes": shape_info,
+            "decode_format": decode_format,
+            "mask": {
+                "mask_dim": mask_dim,
+                "proto_shape": [int(x) for x in proto.shape],
+                "threshold": float(self.config.mask_threshold),
+                "return_format": "polygon_segments",
+            },
+            "nms": {
+                "type": "horizontal_bbox_nms",
+                "iou_threshold": self.config.nms_threshold,
+            },
+            "meta": meta,
+        }
+
     def _postprocess_obb(
         self,
         outputs: Optional[List[np.ndarray]],
@@ -1579,8 +2128,8 @@ def create_app(config: Optional[InferenceConfig] = None):
 
     app = FastAPI(
         title="VisionOps Edge Inference",
-        description="RK3588 Detection / Classification Inference Service",
-        version="2.1.0",
+        description="RK3588 Detection / Classification / OBB / Segmentation Inference Service",
+        version="2.2.0",
         lifespan=lifespan,
     )
 
@@ -1595,8 +2144,9 @@ def create_app(config: Optional[InferenceConfig] = None):
             "num_classes": config.num_classes,
             "class_names": config.class_names,
             "class_names_file": config.class_names_file,
-            "conf_threshold": config.conf_threshold if config.normalized_task() in {"detection", "obb_detection"} else None,
-            "nms_threshold": config.nms_threshold if config.normalized_task() in {"detection", "obb_detection"} else None,
+            "conf_threshold": config.conf_threshold if config.normalized_task() in {"detection", "obb_detection", "segmentation"} else None,
+            "nms_threshold": config.nms_threshold if config.normalized_task() in {"detection", "obb_detection", "segmentation"} else None,
+            "mask_threshold": config.mask_threshold if config.normalized_task() == "segmentation" else None,
             "topk": config.topk if config.normalized_task() == "classification" else None,
             "simulate_mode": engine._simulate_mode,
         }
@@ -1636,15 +2186,15 @@ if __name__ == "__main__":
     import argparse
     import uvicorn
 
-    parser = argparse.ArgumentParser(description="VisionOps RK3588 Detection / Classification / OBB Inference Service")
+    parser = argparse.ArgumentParser(description="VisionOps RK3588 Detection / Classification / OBB / Segmentation Inference Service")
     parser.add_argument("--model", default=os.getenv("MODEL_PATH", "/opt/visionops/models/current.rknn"))
     parser.add_argument("--host", default=os.getenv("HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.getenv("PORT", "8080")))
     parser.add_argument(
         "--task",
         default=os.getenv("TASK", "detection"),
-        choices=["detection", "classification", "obb_detection", "obb"],
-        help="推理任务类型：detection、classification 或 obb_detection",
+        choices=["detection", "classification", "obb_detection", "obb", "segmentation", "seg", "segment"],
+        help="推理任务类型：detection、classification、obb_detection 或 segmentation",
     )
     parser.add_argument(
         "--input-size",
@@ -1684,6 +2234,12 @@ if __name__ == "__main__":
         "--nms-threshold",
         type=float,
         default=float(os.getenv("NMS_THRESHOLD", "0.45")),
+    )
+    parser.add_argument(
+        "--mask-threshold",
+        type=float,
+        default=float(os.getenv("MASK_THRESHOLD", "0.5")),
+        help="segmentation mask 二值化阈值",
     )
     parser.add_argument(
         "--topk",
@@ -1730,6 +2286,7 @@ if __name__ == "__main__":
         class_names_file=args.class_names_file,
         conf_threshold=args.conf_threshold,
         nms_threshold=args.nms_threshold,
+        mask_threshold=args.mask_threshold,
         topk=args.topk,
         metrics_port=args.metrics_port,
         warmup_runs=args.warmup_runs,

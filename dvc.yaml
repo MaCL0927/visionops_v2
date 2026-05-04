@@ -21,6 +21,7 @@ stages:
       - pipeline/tasks/detection/preprocess.py
       - pipeline/tasks/classification/preprocess.py
       - pipeline/tasks/obb/preprocess.py
+      - pipeline/tasks/segmentation/preprocess.py
       - pipeline/core/config.py
       - pipeline/core/io.py
       - pipeline/configs/generated/task.generated.yaml
@@ -32,6 +33,7 @@ stages:
       - pipeline/tasks/detection/train.py
       - pipeline/tasks/classification/train.py
       - pipeline/tasks/obb/train.py
+      - pipeline/tasks/segmentation/train.py
       - pipeline/core/config.py
       - pipeline/core/io.py
       - pipeline/configs/generated/task.generated.yaml
@@ -43,6 +45,7 @@ stages:
       - pipeline/tasks/detection/evaluate.py
       - pipeline/tasks/classification/evaluate.py
       - pipeline/tasks/obb/evaluate.py
+      - pipeline/tasks/segmentation/evaluate.py
       - pipeline/core/config.py
       - pipeline/core/io.py
       - pipeline/configs/generated/task.generated.yaml
@@ -54,6 +57,7 @@ stages:
       - pipeline/tasks/detection/export_onnx.py
       - pipeline/tasks/classification/export_onnx.py
       - pipeline/tasks/obb/export_onnx.py
+      - pipeline/tasks/segmentation/export_onnx.py
       - pipeline/core/config.py
       - pipeline/core/io.py
       - pipeline/configs/generated/task.generated.yaml
@@ -65,6 +69,7 @@ stages:
       - pipeline/tasks/detection/convert_rknn.py
       - pipeline/tasks/classification/convert_rknn.py
       - pipeline/tasks/obb/convert_rknn.py
+      - pipeline/tasks/segmentation/convert_rknn.py
       - pipeline/core/config.py
       - pipeline/core/io.py
       - pipeline/configs/generated/task.generated.yaml
@@ -76,6 +81,7 @@ stages:
       - pipeline/tasks/detection/register_model.py
       - pipeline/tasks/classification/register_model.py
       - pipeline/tasks/obb/register_model.py
+      - pipeline/tasks/segmentation/register_model.py
       - pipeline/core/config.py
       - pipeline/core/io.py
       - pipeline/configs/generated/task.generated.yaml
