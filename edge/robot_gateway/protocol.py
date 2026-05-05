@@ -2,22 +2,22 @@
 # -*- coding: utf-8 -*-
 
 """
-VisionOps Robot Gateway 协议工具。
+VisionOps Gateway 协议工具。
 
-当前协议格式：
+协议格式：
     *{JSON}#
 
-注意：
-1. 这里要求机械臂实际发送的是合法 JSON。
-2. 对接文档里的 // 中文注释不能出现在真实 TCP 报文中。
-3. 当前版本只做协议闭环，不调用真实模型。
+当前用途：
+1. Gateway 接收 Web/Collector 发来的检测结果
+2. Gateway 转换为 *JSON# TCP 帧
+3. Gateway 主动推送给上位机或其他系统
 """
 
 from __future__ import annotations
 
 import json
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 
 FRAME_START = b"*"
@@ -26,8 +26,7 @@ FRAME_END = b"#"
 
 def now_timestamp() -> List[int]:
     """
-    暂时返回 [秒, 毫秒]。
-    后续可以按对接方要求改成机械臂需要的时间格式。
+    返回 [秒, 毫秒]。
     """
     t = time.time()
     sec = int(t)
@@ -35,235 +34,127 @@ def now_timestamp() -> List[int]:
     return [sec, ms]
 
 
-def extract_frames(buffer: bytes) -> Tuple[List[bytes], bytes]:
-    """
-    从 TCP 字节流中提取完整帧。
-
-    输入可能是：
-        b'*{"function":"camera"}#'
-        b'xxx*{"function":"camera"}#yyy'
-        b'*{"function":"camera"}#*{"function":"camera"}#'
-
-    返回：
-        frames: [b'{"function":"camera"}']
-        remaining_buffer: 未处理完的残留字节
-    """
-    frames: List[bytes] = []
-
-    while True:
-        start = buffer.find(FRAME_START)
-        if start < 0:
-            # 没有找到起始符，丢弃无效数据
-            return frames, b""
-
-        end = buffer.find(FRAME_END, start + 1)
-        if end < 0:
-            # 找到了 *，但还没收到 #，保留剩余数据继续等
-            return frames, buffer[start:]
-
-        payload = buffer[start + 1:end].strip()
-        if payload:
-            frames.append(payload)
-
-        buffer = buffer[end + 1:]
-
-
-def decode_frame(payload: bytes) -> Dict[str, Any]:
-    """
-    将一帧 JSON payload 解析成 dict。
-    """
-    try:
-        text = payload.decode("utf-8")
-    except UnicodeDecodeError as e:
-        raise ValueError(f"协议解码失败，不是 UTF-8: {e}") from e
-
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"JSON 解析失败: {e}; raw={text!r}") from e
-
-    if not isinstance(data, dict):
-        raise ValueError("JSON 根对象必须是 object")
-
-    return data
-
-
 def encode_frame(data: Dict[str, Any]) -> bytes:
     """
-    将 dict 编码成协议帧：
-        *{JSON}#
+    dict -> *{JSON}#
     """
     payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
     return FRAME_START + payload.encode("utf-8") + FRAME_END
 
 
-def normalize_camera_ids(camera: Any) -> List[int]:
+def _safe_float(value: Any, default: float | None = None) -> float | None:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _normalize_prediction(pred: Dict[str, Any]) -> Dict[str, Any]:
     """
-    对接文档中 camera 是字符串，例如 "1,2,3"。
-    这里兼容：
-        "1,2,3"
-        "1"
-        [1, 2, 3]
-        1
+    统一单个检测框字段。
+
+    支持 engine.py 常见输出：
+        class_id
+        class_name
+        confidence
+        bbox
+        center / center_x / center_y
     """
-    if camera is None:
-        return []
+    bbox = pred.get("bbox")
+    center = pred.get("center")
 
-    if isinstance(camera, int):
-        return [camera]
+    center_x = pred.get("center_x")
+    center_y = pred.get("center_y")
 
-    if isinstance(camera, list):
-        out = []
-        for item in camera:
-            try:
-                out.append(int(item))
-            except Exception:
-                pass
-        return out
+    if center is None and isinstance(bbox, list) and len(bbox) >= 4:
+        x1 = _safe_float(bbox[0], 0.0)
+        y1 = _safe_float(bbox[1], 0.0)
+        x2 = _safe_float(bbox[2], 0.0)
+        y2 = _safe_float(bbox[3], 0.0)
+        center_x = round((x1 + x2) / 2.0, 2)
+        center_y = round((y1 + y2) / 2.0, 2)
+        center = [center_x, center_y]
 
-    if isinstance(camera, str):
-        out = []
-        for part in camera.replace("，", ",").split(","):
-            part = part.strip()
-            if not part:
-                continue
-            try:
-                out.append(int(part))
-            except Exception:
-                pass
-        return out
-
-    return []
-
-
-def validate_camera_request(req: Dict[str, Any]) -> None:
-    """
-    校验机械臂触发请求。
-    """
-    if req.get("function") != "camera":
-        raise ValueError(f"不支持的 function: {req.get('function')}")
-
-    if "triggerindex" not in req:
-        raise ValueError("缺少 triggerindex")
-
-    if "triggerpos" not in req:
-        raise ValueError("缺少 triggerpos")
-
-    camera_ids = normalize_camera_ids(req.get("camera"))
-    if not camera_ids:
-        raise ValueError("缺少 camera，或 camera 格式无效")
-
-
-def build_mock_result(req: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    构造第一版模拟检测结果。
-
-    后续这里会替换成：
-        1. 触发相机
-        2. 调用 RKNN 推理服务
-        3. 将 bbox / mask / OBB 转成机械臂坐标
-        4. 返回真实结果
-    """
-    camera_ids = normalize_camera_ids(req.get("camera"))
-    camera_id = camera_ids[0] if camera_ids else 1
+    if center is not None and isinstance(center, list) and len(center) >= 2:
+        center_x = center[0]
+        center_y = center[1]
 
     return {
-        "function": "result",
-        "timestamp": req.get("timestamp", now_timestamp()),
-        "triggerpos": req.get("triggerpos", 0),
-        "triggerindex": req.get("triggerindex", 0),
-
-        # 第一版约定：
-        # 0 = 正常返回
-        # 1 = 未检测到目标
-        # -1 = 协议或内部错误
-        # 9999 = 标定状态，按对接文档保留
-        "result": 0,
-
-        # 第一版先填 0，后续接深度/测距/标定后再更新
-        "distance": 0.0,
-
-        # 返回实际参与检测的相机 ID
-        "camera_id": camera_id,
-
-        # 第一版先空字符串，后续如有扫码器再接入
-        "barcodes": "",
-
-        # 按对接文档保留 types 字段
-        # type: 1 左臂，2 右臂
-        "types": [
-            {
-                "type": 1,
-                "x": 100.01,
-                "y": 200.02,
-                "z": 300.03,
-                "ox": 0.0,
-                "oy": 0.0,
-                "oz": 0.0,
-                "ow": 1.0,
-                "length": 60.06,
-                "width": 70.07,
-                "height": 80.08,
-            }
-        ],
+        "class_id": pred.get("class_id"),
+        "class_name": pred.get("class_name"),
+        "confidence": pred.get("confidence"),
+        "bbox": bbox,
+        "center": center,
+        "center_x": center_x,
+        "center_y": center_y,
     }
 
-
-def build_error_result(req: Dict[str, Any] | None, message: str) -> Dict[str, Any]:
-    """
-    构造错误返回。
-    """
-    req = req or {}
-
-    return {
-        "function": "result",
-        "timestamp": req.get("timestamp", now_timestamp()),
-        "triggerpos": req.get("triggerpos", 0),
-        "triggerindex": req.get("triggerindex", 0),
-        "result": -1,
-        "distance": 0.0,
-        "camera_id": 0,
-        "barcodes": "",
-        "error": message,
-        "types": [],
-    }
 
 def build_detection_frame(
     inference_result: Dict[str, Any],
-    camera_id: int = 1
+    camera_id: int = 1,
+    frame_id: int | None = None,
 ) -> bytes:
     """
-    将推理结果封装为主动检测协议帧。
-    
-    协议格式：
-    *{
-      "function": "result",
-      "timestamp": [秒, 毫秒],
-      "camera_id": 1,
-      "task": "检测任务类型",
-      "predictions": [...]
-    }#
+    将检测结果封装为 TCP 推送帧。
+
+    输出示例：
+        *{
+          "function": "result",
+          "timestamp": [sec, ms],
+          "frame_id": 1,
+          "camera_id": 1,
+          "result": 0,
+          "task": "detection",
+          "latency_ms": 64.5,
+          "count": 1,
+          "predictions": [...]
+        }#
     """
     predictions = inference_result.get("predictions", [])
-    task = inference_result.get("task", "unknown")
-    
-    # 只保留关键字段，简化输出
-    simplified_predictions = []
-    for pred in predictions:
-        simplified_predictions.append({
-            "class_id": pred.get("class_id"),
-            "class_name": pred.get("class_name"),
-            "confidence": pred.get("confidence"),
-            "bbox": pred.get("bbox"),
-            "center": pred.get("center"),
-        })
-    
+    if not isinstance(predictions, list):
+        predictions = []
+
+    normalized_predictions = [
+        _normalize_prediction(p)
+        for p in predictions
+        if isinstance(p, dict)
+    ]
+
+    result_code = int(inference_result.get(
+        "result",
+        0 if normalized_predictions else 1,
+    ))
+
+    frame = {
+        "function": "result",
+        "timestamp": inference_result.get("timestamp", now_timestamp()),
+        "frame_id": inference_result.get("frame_id", frame_id),
+        "camera_id": int(inference_result.get("camera_id", camera_id)),
+        "result": result_code,
+        "task": inference_result.get("task", "detection"),
+        "latency_ms": inference_result.get("latency_ms"),
+        "count": len(normalized_predictions),
+        "predictions": normalized_predictions,
+    }
+
+    return encode_frame(frame)
+
+
+def build_error_frame(message: str, camera_id: int = 1, frame_id: int | None = None) -> bytes:
+    """
+    错误帧。
+    """
     frame = {
         "function": "result",
         "timestamp": now_timestamp(),
+        "frame_id": frame_id,
         "camera_id": camera_id,
-        "task": task,
-        "predictions": simplified_predictions,
+        "result": -1,
+        "task": "unknown",
+        "latency_ms": None,
+        "count": 0,
+        "error": message,
+        "predictions": [],
     }
-    
     return encode_frame(frame)

@@ -1195,39 +1195,49 @@ function drawProductionOverlay(predictions=[]){
   });
 }
 
-async function productionInferOnce(){
-  if(!productionRunning || productionBusy) return;
-  let modelName=getProductionModelName();
-  if(!modelName){
-    if(!modelItems.length){
-      try{await loadModels();}catch(_e){}
-      modelName=getProductionModelName();
-    }
-  }
-  if(!modelName){
-    if(productionStatus) productionStatus.textContent='未找到可用模型';
-    if(productionResultSummary) productionResultSummary.textContent='请先部署模型';
-    return;
-  }
+async function refreshProductionPushStatus(){
+  if(!productionRunning) return;
 
-  productionBusy=true;
   try{
-    const payload={dataset:currentDataset,model_name:modelName};
-    if(!useBackendCamera){
-      payload.image_data=captureFrameAsJpeg();
+    const status=await apiGet('/api/production/push/status');
+    const latest=status.latest_result || null;
+
+    if(productionModelName) productionModelName.textContent=status.model_name || getProductionModelName() || '--';
+
+    if(!status.running){
+      if(productionStatus) productionStatus.textContent='已停止';
+      return;
     }
-    const data=await apiPost('/api/validation/realtime_classify_once',payload);
-    const now=data.updated_at || new Date().toLocaleTimeString();
-    const task=normalizeTaskName(data.task || '');
-    const preds=Array.isArray(data.predictions) ? data.predictions : [];
 
-    if(productionModelName) productionModelName.textContent=modelName;
-    if(productionStatus) productionStatus.textContent='实时检测中';
-    if(productionLatency) productionLatency.textContent=`${data.latency_ms ?? '--'} ms`;
-    if(productionUpdatedAt) productionUpdatedAt.textContent=now;
+    const pushed=status.latest_push_response && Number.isFinite(Number(status.latest_push_response.pushed_clients))
+      ? Number(status.latest_push_response.pushed_clients)
+      : null;
 
-    if(data.realtime){
-      const url=data.realtime.url || `/api/validation/realtime_image/realtime_latest.jpg?t=${Date.now()}`;
+    if(productionStatus){
+      productionStatus.textContent=pushed===null
+        ? '连续检测中'
+        : `连续检测中 / 已连接上位机 ${pushed}`;
+    }
+
+    if(status.latest_error){
+      if(productionResultSummary) productionResultSummary.textContent=status.latest_error;
+      return;
+    }
+
+    if(!latest){
+      if(productionResultSummary) productionResultSummary.textContent='等待第一帧检测结果';
+      return;
+    }
+
+    const task=normalizeTaskName(latest.task || '');
+    const preds=Array.isArray(latest.predictions) ? latest.predictions : [];
+
+    if(productionModelName) productionModelName.textContent=status.model_name || getProductionModelName() || '--';
+    if(productionLatency) productionLatency.textContent=`${latest.latency_ms ?? '--'} ms`;
+    if(productionUpdatedAt) productionUpdatedAt.textContent=new Date().toLocaleTimeString();
+
+    if(latest.realtime){
+      const url=latest.realtime.url || `/api/validation/realtime_image/realtime_latest.jpg?t=${Date.now()}`;
       renderProductionPreview(url, preds);
     }
 
@@ -1235,14 +1245,12 @@ async function productionInferOnce(){
       const taskText=taskDisplayName(task);
       if(productionResultSummary) productionResultSummary.textContent=`${taskText}到 ${preds.length} 个目标`;
     }else{
-      const r=data.result || {};
+      const r=latest.result || {};
       if(productionResultSummary) productionResultSummary.textContent=`${r.class_name || '未识别'} ${r.confidence_percent || ''}`;
     }
   }catch(err){
-    if(productionStatus) productionStatus.textContent='检测异常';
-    if(productionResultSummary) productionResultSummary.textContent=err.message || '检测失败';
-  }finally{
-    productionBusy=false;
+    if(productionStatus) productionStatus.textContent='状态读取异常';
+    if(productionResultSummary) productionResultSummary.textContent=err.message || '读取生产检测状态失败';
   }
 }
 
@@ -1260,24 +1268,49 @@ async function startProductionMonitor(){
   }
 
   productionRunning=true;
+  productionBusy=false;
   productionLastPredictions=[];
   if(productionModelName) productionModelName.textContent=modelName;
-  if(productionStatus) productionStatus.textContent='启动中';
+  if(productionStatus) productionStatus.textContent='启动连续检测中';
   if(productionResultSummary) productionResultSummary.textContent='等待检测';
   if(productionLatency) productionLatency.textContent='--';
   if(productionUpdatedAt) productionUpdatedAt.textContent='--';
 
-  await startCamera();
-  productionInferOnce();
-  productionTimer=setInterval(productionInferOnce, REALTIME_INTERVAL_MS);
+  try{
+    await startCamera();
+    await apiPost('/api/production/push/start',{
+      dataset:currentDataset,
+      model_name:modelName,
+      interval_ms:REALTIME_INTERVAL_MS,
+      camera_id:1
+    });
+
+    if(productionStatus) productionStatus.textContent='连续检测中';
+    await refreshProductionPushStatus();
+
+    if(productionTimer){clearInterval(productionTimer);}
+    productionTimer=setInterval(refreshProductionPushStatus, REALTIME_INTERVAL_MS);
+  }catch(err){
+    productionRunning=false;
+    if(productionStatus) productionStatus.textContent='启动失败';
+    if(productionResultSummary) productionResultSummary.textContent=err.message || '生产连续检测启动失败';
+    updateCameraLifecycle();
+  }
 }
 
 function stopProductionMonitor(){
-  if(productionTimer){clearInterval(productionTimer);productionTimer=null;}
+  if(productionTimer){
+    clearInterval(productionTimer);
+    productionTimer=null;
+  }
+
   const wasRunning=productionRunning;
   productionRunning=false;
   productionBusy=false;
   productionLastPredictions=[];
+
+  apiPost('/api/production/push/stop').catch(()=>{});
+
   if(productionStatus && wasRunning) productionStatus.textContent='已停止';
   updateCameraLifecycle();
 }

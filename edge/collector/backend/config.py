@@ -47,4 +47,32 @@ VALIDATION_ENGINE_PATH = os.getenv(
 # v6.4+ 低频实时检测配置。前端默认每 1 秒请求一次单帧推理。
 VALIDATION_REALTIME_INTERVAL_MS = int(os.getenv("VISIONOPS_VALIDATION_REALTIME_INTERVAL_MS", "1000"))
 
+
+# 生产模式连续检测 + Gateway 推送配置
+# Web/Collector 作为唯一 RTSP 拉流进程，从 latest_frame 取图后调用推理服务，
+# 再将检测结果 POST 到 Gateway 的 HTTP 接收口。
+PRODUCTION_INFER_URL = os.getenv(
+    "VISIONOPS_PRODUCTION_INFER_URL",
+    f"http://{VALIDATION_INFER_HOST}:{VALIDATION_INFER_PORT}/infer",
+)
+
+PRODUCTION_GATEWAY_PUSH_URL = os.getenv(
+    "VISIONOPS_PRODUCTION_GATEWAY_PUSH_URL",
+    "http://127.0.0.1:9101/push_result",
+)
+
+PRODUCTION_DETECT_INTERVAL_MS = int(
+    os.getenv("VISIONOPS_PRODUCTION_DETECT_INTERVAL_MS", str(VALIDATION_REALTIME_INTERVAL_MS))
+)
+
+PRODUCTION_CAMERA_ID = int(os.getenv("VISIONOPS_PRODUCTION_CAMERA_ID", "1"))
+
+# Web 端全局检测结果推送配置。
+# 只要 Web 接口完成一次模型推理，就会 best-effort POST 到 Gateway HTTP 接收口，
+# 再由 Gateway 通过 9100 TCP 推给上位机。
+GATEWAY_PUSH_ENABLED = os.getenv("VISIONOPS_GATEWAY_PUSH_ENABLED", "1") not in {"0", "false", "False", "no", "NO"}
+GATEWAY_PUSH_URL = os.getenv("VISIONOPS_GATEWAY_PUSH_URL", PRODUCTION_GATEWAY_PUSH_URL)
+GATEWAY_PUSH_CAMERA_ID = int(os.getenv("VISIONOPS_GATEWAY_PUSH_CAMERA_ID", str(PRODUCTION_CAMERA_ID)))
+GATEWAY_PUSH_TIMEOUT_SEC = float(os.getenv("VISIONOPS_GATEWAY_PUSH_TIMEOUT_SEC", "0.8"))
+
 UI_VERSION = "v6.8-obb-polygon-validation"

@@ -8,10 +8,27 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
-from backend.config import DATA_ROOT, DEVICE_ID, USER_ID, UI_VERSION, DEFAULT_DATASET_NAME, CAMERA_SOURCE, UPLOAD_ENABLED, UPLOAD_HOST, UPLOAD_USER, UPLOAD_PORT, UPLOAD_TARGET_DIR
+from backend.config import (
+    DATA_ROOT,
+    DEVICE_ID,
+    USER_ID,
+    UI_VERSION,
+    DEFAULT_DATASET_NAME,
+    CAMERA_SOURCE,
+    UPLOAD_ENABLED,
+    UPLOAD_HOST,
+    UPLOAD_USER,
+    UPLOAD_PORT,
+    UPLOAD_TARGET_DIR,
+    PRODUCTION_DETECT_INTERVAL_MS,
+    PRODUCTION_GATEWAY_PUSH_URL,
+    PRODUCTION_CAMERA_ID,
+)
 from backend.services.models import list_rknn_models
 from backend.services.validation_images import get_realtime_image_path, get_validation_image_path, list_validation_images, save_realtime_image_bytes, save_realtime_image_data
 from backend.services.validation_infer import classify_image_with_model
+from backend.services.production_push import production_push_service
+from backend.services.gateway_push import push_result_to_gateway
 from backend.services.camera import backend_camera_enabled, camera_service, mjpeg_stream, read_one_jpeg
 from backend.services.storage import (
     FOLDER_TO_SUBDIR,
@@ -100,6 +117,14 @@ class ValidationRealtimeClassifyRequest(BaseModel):
     dataset: str = DEFAULT_DATASET_NAME
     model_name: str
     image_data: Optional[str] = None
+
+
+class ProductionPushStartRequest(BaseModel):
+    dataset: str = DEFAULT_DATASET_NAME
+    model_name: str
+    gateway_url: Optional[str] = None
+    interval_ms: Optional[int] = None
+    camera_id: Optional[int] = None
 
 
 @router.get("/health")
@@ -335,8 +360,18 @@ def validation_image(image_id: str, dataset: str = DEFAULT_DATASET_NAME):
 @router.post("/validation/classify_image")
 def validation_classify_image(req: ValidationClassifyRequest):
     try:
-        image_path = get_validation_image_path(req.image_id, req.dataset or default_dataset_name())
-        return classify_image_with_model(req.model_name, image_path)
+        ds = req.dataset or default_dataset_name()
+        image_path = get_validation_image_path(req.image_id, ds)
+        result = classify_image_with_model(req.model_name, image_path)
+        result["gateway_push"] = push_result_to_gateway(
+            result,
+            source="factory_image",
+            dataset=ds,
+            model_name=req.model_name,
+            image_id=req.image_id,
+            camera_id=PRODUCTION_CAMERA_ID,
+        )
+        return result
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -365,6 +400,14 @@ def validation_capture_classify(req: ValidationCaptureClassifyRequest):
             "url": f"/api/validation/image/{item['filename']}",
             "size_bytes": item.get("size_bytes"),
         }
+        result["gateway_push"] = push_result_to_gateway(
+            result,
+            source="factory_capture",
+            dataset=ds,
+            model_name=req.model_name,
+            image_id=item["filename"],
+            camera_id=PRODUCTION_CAMERA_ID,
+        )
         return result
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -403,8 +446,47 @@ def validation_realtime_classify_once(req: ValidationRealtimeClassifyRequest):
         result = classify_image_with_model(req.model_name, image_path)
         result["mode"] = "realtime"
         result["realtime"] = frame
+        result["gateway_push"] = push_result_to_gateway(
+            result,
+            source="factory_realtime",
+            dataset=ds,
+            model_name=req.model_name,
+            image_id=frame["filename"],
+            camera_id=PRODUCTION_CAMERA_ID,
+        )
         return result
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/production/push/start")
+def production_push_start(req: ProductionPushStartRequest):
+    """生产模式：启动后端连续检测 + Gateway 推送。"""
+    try:
+        return production_push_service.start(
+            model_name=req.model_name,
+            dataset=req.dataset or DEFAULT_DATASET_NAME,
+            gateway_url=req.gateway_url or PRODUCTION_GATEWAY_PUSH_URL,
+            interval_ms=req.interval_ms or PRODUCTION_DETECT_INTERVAL_MS,
+            camera_id=req.camera_id or PRODUCTION_CAMERA_ID,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/production/push/stop")
+def production_push_stop():
+    try:
+        return production_push_service.stop()
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/production/push/status")
+def production_push_status():
+    try:
+        return production_push_service.status()
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
