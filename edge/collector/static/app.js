@@ -1320,3 +1320,49 @@ async function initApp(){
   updateCameraLifecycle();
 }
 initApp();
+
+// 设置弹窗前端交互
+const settingsModal=document.getElementById('settingsModal');
+const openSettingsModalBtn=document.getElementById('openSettingsModal');
+const closeSettingsModalBtn=document.getElementById('closeSettingsModal');
+const settingTabs=document.querySelectorAll('.settings-main-tab');
+const settingPanels=document.querySelectorAll('.settings-panel');
+const settingCameraType=document.getElementById('settingCameraType');
+const cameraTypePanels={
+  usb:document.getElementById('cameraTypeUsb'),
+  rtsp:document.getElementById('cameraTypeRtsp'),
+  industrial:document.getElementById('cameraTypeIndustrial'),
+  mock:document.getElementById('cameraTypeMock')
+};
+function openSettingsModal(){
+  if(settingsModal) settingsModal.classList.add('active');
+}
+function closeSettingsModal(){
+  if(settingsModal) settingsModal.classList.remove('active');
+}
+function switchSettingsTab(tabId){
+  settingTabs.forEach(btn=>btn.classList.toggle('active',btn.dataset.settingsTab===tabId));
+  settingPanels.forEach(panel=>panel.classList.toggle('active',panel.id===tabId));
+}
+function updateCameraTypePanel(){
+  const type=(settingCameraType && settingCameraType.value) || 'rtsp';
+  Object.entries(cameraTypePanels).forEach(([key,panel])=>{
+    if(panel) panel.classList.toggle('active',key===type);
+  });
+}
+if(openSettingsModalBtn) openSettingsModalBtn.addEventListener('click',openSettingsModal);
+if(closeSettingsModalBtn) closeSettingsModalBtn.addEventListener('click',closeSettingsModal);
+if(settingsModal){
+  settingsModal.addEventListener('click',(e)=>{
+    if(e.target===settingsModal) closeSettingsModal();
+  });
+}
+settingTabs.forEach(btn=>btn.addEventListener('click',()=>switchSettingsTab(btn.dataset.settingsTab)));
+if(settingCameraType) settingCameraType.addEventListener('change',updateCameraTypePanel);
+if(document.getElementById('saveSettingsMock')){
+  document.getElementById('saveSettingsMock').addEventListener('click',()=>showToast('设置已保存'));
+}
+if(document.getElementById('resetSettingsMock')){
+  document.getElementById('resetSettingsMock').addEventListener('click',()=>showToast('已恢复默认显示值'));
+}
+updateCameraTypePanel();
