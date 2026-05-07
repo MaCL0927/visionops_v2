@@ -15,11 +15,6 @@ from backend.config import (
     UI_VERSION,
     DEFAULT_DATASET_NAME,
     CAMERA_SOURCE,
-    UPLOAD_ENABLED,
-    UPLOAD_HOST,
-    UPLOAD_USER,
-    UPLOAD_PORT,
-    UPLOAD_TARGET_DIR,
     PRODUCTION_DETECT_INTERVAL_MS,
     PRODUCTION_GATEWAY_PUSH_URL,
     PRODUCTION_CAMERA_ID,
@@ -30,6 +25,7 @@ from backend.services.validation_infer import classify_image_with_model
 from backend.services.production_push import production_push_service
 from backend.services.gateway_push import push_result_to_gateway
 from backend.services.camera import backend_camera_enabled, camera_service, mjpeg_stream, read_one_jpeg
+from backend.services.settings_store import get_upload_runtime_config
 from backend.services.storage import (
     FOLDER_TO_SUBDIR,
     create_dataset,
@@ -144,13 +140,7 @@ def health():
             "backend_enabled": backend_camera_enabled(),
             **camera_service.status(),
         },
-        "upload": {
-            "enabled": UPLOAD_ENABLED,
-            "host": UPLOAD_HOST,
-            "user": UPLOAD_USER,
-            "port": UPLOAD_PORT,
-            "target_dir": UPLOAD_TARGET_DIR,
-        },
+        "upload": get_upload_runtime_config(),
     }
 
 

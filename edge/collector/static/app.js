@@ -1,5 +1,14 @@
 const toast = document.getElementById('toast');
-function showToast(message){toast.textContent=message;toast.classList.add('show');clearTimeout(showToast.t);showToast.t=setTimeout(()=>toast.classList.remove('show'),2600)}
+
+function formatMessage(message){
+  if(message === undefined || message === null) return '';
+  if(typeof message === 'string') return message;
+  if(message.message && typeof message.message === 'string') return message.message;
+  if(Array.isArray(message)) return message.map(formatMessage).join('；');
+  try{return JSON.stringify(message, null, 0);}catch(_){return String(message);}
+}
+function showToast(message){toast.textContent=formatMessage(message);toast.classList.add('show');clearTimeout(showToast.t);showToast.t=setTimeout(()=>toast.classList.remove('show'),2600)}
+
 const centerNotice=document.getElementById('centerNotice');
 const centerNoticeBox=document.getElementById('centerNoticeBox');
 function showCenterNotice(message,type='success',timeout=3600){
@@ -11,8 +20,22 @@ function showCenterNotice(message,type='success',timeout=3600){
   showCenterNotice.t=setTimeout(()=>centerNotice.classList.remove('show'),timeout);
 }
 
-async function apiGet(url){const res=await fetch(url);const data=await res.json();if(!res.ok) throw new Error(data.detail || data.message || '请求失败');return data}
-async function apiPost(url, payload={}){const res=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});const data=await res.json();if(!res.ok) throw new Error(data.detail || data.message || '请求失败');return data}
+
+async function parseApiResponse(res){
+  const text = await res.text();
+  let data = {};
+  if(text){
+    try{data = JSON.parse(text);}catch(_){data = {message:text};}
+  }
+  if(!res.ok){
+    const detail = data.detail || data.message || data.error || '请求失败';
+    throw new Error(formatMessage(detail));
+  }
+  return data;
+}
+async function apiGet(url){const res=await fetch(url);return await parseApiResponse(res)}
+async function apiPost(url, payload={}){const res=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});return await parseApiResponse(res)}
+
 
 const modeToggle=document.getElementById('modeToggle');
 const factoryTabs=document.getElementById('factoryTabs');
@@ -188,6 +211,7 @@ async function startCamera(){
   // 普通笔记本调试时，仍优先使用浏览器 getUserMedia 读取电脑摄像头。
   if(backendCameraAvailable || useBackendCamera){
     useBackendCamera=true;
+    backendCamera.style.display='';
     backendCamera.src='/api/camera/stream?t=' + Date.now();
     backendCamera.classList.add('active','backend-active');
     cameraVideo.classList.remove('active');
@@ -212,6 +236,7 @@ async function stopCamera(callBackend=true){
   if(backendCamera){
     backendCamera.removeAttribute('src');
     backendCamera.classList.remove('active','backend-active');
+    backendCamera.style.display='none';
   }
   if(cameraVideo) cameraVideo.classList.remove('active');
   if(simulatedCamera) simulatedCamera.classList.add('active');
@@ -1321,7 +1346,8 @@ async function initApp(){
 }
 initApp();
 
-// 设置弹窗前端交互
+
+// 设置弹窗前端交互：v2.1.1 保存/回显 + RTSP/上传配置
 const settingsModal=document.getElementById('settingsModal');
 const openSettingsModalBtn=document.getElementById('openSettingsModal');
 const closeSettingsModalBtn=document.getElementById('closeSettingsModal');
@@ -1334,8 +1360,11 @@ const cameraTypePanels={
   industrial:document.getElementById('cameraTypeIndustrial'),
   mock:document.getElementById('cameraTypeMock')
 };
+let runtimeSettingsCache=null;
+
 function openSettingsModal(){
   if(settingsModal) settingsModal.classList.add('active');
+  loadRuntimeSettingsToForm();
 }
 function closeSettingsModal(){
   if(settingsModal) settingsModal.classList.remove('active');
@@ -1350,6 +1379,161 @@ function updateCameraTypePanel(){
     if(panel) panel.classList.toggle('active',key===type);
   });
 }
+function getByPath(obj,path){
+  return path.split('.').reduce((cur,key)=>{
+    if(cur===undefined || cur===null) return undefined;
+    return cur[key];
+  },obj);
+}
+function setByPath(obj,path,value){
+  const parts=path.split('.');
+  let cur=obj;
+  for(let i=0;i<parts.length-1;i++){
+    const key=parts[i];
+    if(!cur[key] || typeof cur[key] !== 'object') cur[key]={};
+    cur=cur[key];
+  }
+  cur[parts[parts.length-1]]=value;
+}
+function parseSettingValue(el){
+  if(el.type==='checkbox') return !!el.checked;
+  if(el.tagName==='SELECT'){
+    if(el.value==='true') return true;
+    if(el.value==='false') return false;
+    return el.value;
+  }
+  if(el.type==='number'){
+    if(el.value==='') return null;
+    const n=Number(el.value);
+    return Number.isNaN(n)?el.value:n;
+  }
+  return el.value;
+}
+function writeSettingValue(el,value){
+  if(value===undefined || value===null) return;
+  if(el.type==='checkbox'){
+    el.checked=!!value;
+    return;
+  }
+  el.value=String(value);
+}
+function collectSettingsFromForm(){
+  const settings=runtimeSettingsCache?JSON.parse(JSON.stringify(runtimeSettingsCache)):{version:'2.1.1'};
+  document.querySelectorAll('[data-setting]').forEach(el=>{
+    const path=el.dataset.setting;
+    if(!path) return;
+    setByPath(settings,path,parseSettingValue(el));
+  });
+  settings.version='2.1.1';
+  return settings;
+}
+function fillSettingsForm(settings){
+  if(!settings) return;
+  document.querySelectorAll('[data-setting]').forEach(el=>{
+    const value=getByPath(settings,el.dataset.setting);
+    writeSettingValue(el,value);
+  });
+  updateCameraTypePanel();
+}
+async function loadRuntimeSettingsToForm(){
+  try{
+    const data=await apiGet('/api/settings');
+    runtimeSettingsCache=data.settings || {};
+    fillSettingsForm(runtimeSettingsCache);
+  }catch(err){
+    showToast(err.message || '读取设置失败');
+  }
+}
+
+function buildRtspUrlFromForm(){
+  const ipEl=document.querySelector('[data-setting="camera.rtsp.ip"]');
+  const portEl=document.querySelector('[data-setting="camera.rtsp.port"]');
+  const channelEl=document.querySelector('[data-setting="camera.rtsp.channel"]');
+  const userEl=document.querySelector('[data-setting="camera.rtsp.username"]');
+  const passEl=document.querySelector('[data-setting="camera.rtsp.password"]');
+  const ip=(ipEl && ipEl.value || '').trim();
+  if(!ip) return '';
+  const port=(portEl && portEl.value || '554').trim() || '554';
+  const channel=(channelEl && channelEl.value || '102').trim() || '102';
+  const user=(userEl && userEl.value || 'admin').trim() || 'admin';
+  const pass=(passEl && passEl.value || '').trim();
+  return `rtsp://${user}:${pass}@${ip}:${port}/Streaming/Channels/${channel}`;
+}
+function syncRtspUrlFromFields(){
+  const urlEl=document.querySelector('[data-setting="camera.rtsp.url"]');
+  const url=buildRtspUrlFromForm();
+  if(urlEl && url) urlEl.value=url;
+}
+async function applyCameraSettingsAfterSave(){
+  const data=await apiPost('/api/settings/camera/apply',{});
+  return data;
+}
+
+function refreshBackendCameraPreview(){
+  backendCameraAvailable=true;
+  useBackendCamera=true;
+  useRealCamera=false;
+  if(backendCamera){
+    backendCamera.removeAttribute('src');
+    backendCamera.src='/api/camera/stream?t=' + Date.now();
+    backendCamera.style.display='';
+    backendCamera.classList.add('active','backend-active');
+  }
+  if(cameraVideo) cameraVideo.classList.remove('active');
+  if(simulatedCamera) simulatedCamera.classList.remove('active');
+}
+
+async function saveRuntimeSettingsFromForm(){
+  try{
+    if(settingCameraType && settingCameraType.value === 'rtsp') syncRtspUrlFromFields();
+    const settings=collectSettingsFromForm();
+    const data=await apiPost('/api/settings',settings);
+    runtimeSettingsCache=data.settings || settings;
+    fillSettingsForm(runtimeSettingsCache);
+    try{
+      const applyResult=await applyCameraSettingsAfterSave();
+      refreshBackendCameraPreview();
+      showToast(applyResult.message || data.message || '设置已保存并应用');
+    }catch(applyErr){
+      showToast(`设置已保存，但相机应用失败：${applyErr.message || applyErr}`);
+    }
+  }catch(err){
+    showToast(err.message || '保存设置失败');
+  }
+}
+async function resetRuntimeSettings(){
+  try{
+    const data=await apiPost('/api/settings/reset',{});
+    runtimeSettingsCache=data.settings || {};
+    fillSettingsForm(runtimeSettingsCache);
+    try{
+      await applyCameraSettingsAfterSave();
+      refreshBackendCameraPreview();
+    }catch(_){/* 恢复默认后的应用失败不影响回显 */}
+    showToast(data.message || '已恢复默认设置');
+  }catch(err){
+    showToast(err.message || '恢复默认设置失败');
+  }
+}
+
+
+async function testRtspCameraConnection(){
+  try{
+    if(settingCameraType) settingCameraType.value='rtsp';
+    updateCameraTypePanel();
+    syncRtspUrlFromFields();
+    const settings=collectSettingsFromForm();
+    const saved=await apiPost('/api/settings',settings);
+    runtimeSettingsCache=saved.settings || settings;
+    fillSettingsForm(runtimeSettingsCache);
+    const data=await apiPost('/api/settings/camera/test',{});
+    refreshBackendCameraPreview();
+    showToast(data.message || '相机连接测试通过');
+  }catch(err){
+    showToast(err.message || '相机连接测试失败');
+  }
+}
+
 if(openSettingsModalBtn) openSettingsModalBtn.addEventListener('click',openSettingsModal);
 if(closeSettingsModalBtn) closeSettingsModalBtn.addEventListener('click',closeSettingsModal);
 if(settingsModal){
@@ -1359,10 +1543,13 @@ if(settingsModal){
 }
 settingTabs.forEach(btn=>btn.addEventListener('click',()=>switchSettingsTab(btn.dataset.settingsTab)));
 if(settingCameraType) settingCameraType.addEventListener('change',updateCameraTypePanel);
-if(document.getElementById('saveSettingsMock')){
-  document.getElementById('saveSettingsMock').addEventListener('click',()=>showToast('设置已保存'));
-}
-if(document.getElementById('resetSettingsMock')){
-  document.getElementById('resetSettingsMock').addEventListener('click',()=>showToast('已恢复默认显示值'));
-}
+const saveSettingsBtn=document.getElementById('saveSettingsMock');
+const resetSettingsBtn=document.getElementById('resetSettingsMock');
+const testRtspCameraBtn=document.getElementById('testRtspCameraBtn');
+if(saveSettingsBtn) saveSettingsBtn.addEventListener('click',saveRuntimeSettingsFromForm);
+if(resetSettingsBtn) resetSettingsBtn.addEventListener('click',resetRuntimeSettings);
+if(testRtspCameraBtn) testRtspCameraBtn.addEventListener('click',testRtspCameraConnection);
+document.querySelectorAll('[data-setting^="camera.rtsp."]').forEach(el=>{
+  if(el.dataset.setting !== 'camera.rtsp.url') el.addEventListener('change',syncRtspUrlFromFields);
+});
 updateCameraTypePanel();

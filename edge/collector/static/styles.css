@@ -699,3 +699,12 @@
   .camera-source-title{display:flex!important;align-items:stretch;gap:10px}
   .camera-type-title-select{width:100%}
 }
+
+/* setting_v2.0：隐藏未激活摄像头元素，避免后端 img 空 src 形成中间遮挡条 */
+.camera-stage .camera-video:not(.active):not(.backend-active){
+  display:none!important;
+}
+.camera-stage #backendCamera:not([src]),
+.camera-stage #backendCamera[src=""]{
+  display:none!important;
+}

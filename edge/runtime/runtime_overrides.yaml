@@ -1,0 +1,112 @@
+version: 2.1.1
+camera:
+  type: rtsp
+  usb:
+    device_node: /dev/video0
+    backend: opencv
+    buffer_size: 1
+  rtsp:
+    ip: 192.168.2.64
+    port: 554
+    channel: '102'
+    username: admin
+    password: Abcd123_
+    transport: tcp
+    url: rtsp://admin:Abcd123_@192.168.2.64:554/Streaming/Channels/102
+  industrial:
+    vendor: hikrobot
+    trigger_mode: continuous
+    trigger_source: Line0
+    roi_x: 0
+    roi_y: 0
+    roi_wh: 1280x720
+  mock:
+    pattern: detection_scene
+    fps: 10
+    timestamp: true
+  common:
+    resolution: 1280x720
+    fps: 6
+    rotation: '0'
+    exposure_mode: auto
+    exposure: 0
+    gain: 0
+    white_balance: auto
+    brightness: 50
+    contrast: 50
+    preview_width: 960
+    jpeg_quality: 75
+    reconnect_max_fails: 30
+  calibration:
+    source: usb
+    calibration_type: mono
+    checkerboard: 9x6
+    square_size_mm: 25.0
+    active_file: ''
+vision_box:
+  device_id: rk3588-001
+  customer_id: CUST-001
+  default_mode: production
+  collector_port: 8090
+  production_port: 8080
+  validation_port: 8082
+  models_dir: /opt/visionops/models
+  data_dir: /opt/visionops/edge/collector/data
+  log_keep_days: 7
+  usb_auto_mount: true
+  disk_warn_percent: 80
+  time_sync: ntp
+  network:
+    eth0:
+      role: camera_lan
+      dhcp: false
+      ip: 192.168.2.10
+      netmask: 255.255.255.0
+      gateway: ''
+    eth1:
+      role: factory_lan
+      dhcp: true
+      ip: 192.168.1.200
+      netmask: 255.255.255.0
+      gateway: 192.168.1.1
+  upload:
+    enabled: true
+    host: 192.168.1.100
+    user: pc
+    port: 22
+    target_dir: /home/pc/桌面/visionops_v2/data/incoming
+    timeout_sec: 120
+algorithm:
+  common:
+    model_mode: auto
+    input_size: 640x640
+    npu_core: auto
+    realtime_interval_ms: 1000
+    production_fps_limit: 5
+    production_detect_interval_ms: 1000
+    warmup_runs: 3
+    label_display: class_conf
+    max_results: 100
+    log_level: INFO
+  classification:
+    topk: 5
+    score_threshold: 0.5
+    low_confidence_policy: review
+  detection:
+    conf_threshold: 0.25
+    nms_threshold: 0.45
+    show_center: true
+    max_detections: 100
+  obb_detection:
+    conf_threshold: 0.25
+    nms_threshold: 0.45
+    nms_mode: rotated
+    show_angle: true
+    show_polygon: true
+  segmentation:
+    conf_threshold: 0.25
+    nms_threshold: 0.45
+    mask_threshold: 0.5
+    mask_alpha: 0.35
+    show_mask: true
+    show_box: true

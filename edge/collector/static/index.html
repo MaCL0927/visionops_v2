@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>VisionOps Edge Collector UI</title>
-  <link rel="stylesheet" href="/static/styles.css?v=setting_v1_3" />
+  <link rel="stylesheet" href="/static/styles.css?v=setting_v2_1_1_rtsp" />
 </head>
 <body>
   <header class="topbar">
@@ -286,13 +286,13 @@
               <h3>相机设置</h3>
               <p>支持 USB/常规相机、RTSP 网络相机、工业相机和模拟相机。不同相机类型显示不同的参数区域。</p>
             </div>
-            <span class="settings-status-badge">预留后端接口</span>
+            <span class="settings-status-badge">已接入保存/回显</span>
           </div>
 
           <div class="settings-section camera-source-setting-block">
             <div class="settings-section-title camera-source-title">
               <b>相机类型与专属参数</b>
-              <select id="settingCameraType" class="camera-type-title-select" aria-label="相机类型">
+              <select id="settingCameraType" class="camera-type-title-select" aria-label="相机类型" data-setting="camera.type">
                 <option value="usb">USB / 常规相机</option>
                 <option value="rtsp" selected>RTSP 网络相机</option>
                 <option value="industrial">工业相机</option>
@@ -304,43 +304,43 @@
             <div id="cameraTypeUsb" class="camera-type-panel camera-inline-panel">
               <div class="settings-section-title"><b>USB / 常规相机参数</b><span>适合本地 USB 摄像头或浏览器摄像头</span></div>
               <div class="settings-grid three">
-                <label class="setting-field">设备节点<input value="/dev/video0" /></label>
-                <label class="setting-field">采集后端<select><option>OpenCV</option><option>V4L2</option><option>浏览器 getUserMedia</option></select></label>
-                <label class="setting-field">缓冲帧数<input type="number" value="1" min="1" /></label>
+                <label class="setting-field">设备节点<input data-setting="camera.usb.device_node" value="/dev/video0" /></label>
+                <label class="setting-field">采集后端<select data-setting="camera.usb.backend"><option value="opencv">OpenCV</option><option value="v4l2">V4L2</option><option value="browser">浏览器 getUserMedia</option></select></label>
+                <label class="setting-field">缓冲帧数<input data-setting="camera.usb.buffer_size" type="number" value="1" min="1" /></label>
               </div>
             </div>
 
             <div id="cameraTypeRtsp" class="camera-type-panel camera-inline-panel active">
               <div class="settings-section-title"><b>RTSP 网络相机参数</b><span>适合海康、大华等 IP 相机</span></div>
               <div class="settings-grid three">
-                <label class="setting-field">相机 IP<input value="192.168.2.64" /></label>
-                <label class="setting-field">端口<input type="number" value="554" /></label>
-                <label class="setting-field">通道<select><option>主码流 101</option><option selected>子码流 102</option></select></label>
-                <label class="setting-field">用户名<input value="admin" /></label>
-                <label class="setting-field">密码<input type="password" value="password" /></label>
-                <label class="setting-field">RTSP 传输<select><option selected>TCP</option><option>UDP</option></select></label>
-                <label class="setting-field full">RTSP URL<input value="rtsp://admin:password@192.168.2.64:554/Streaming/Channels/102" /></label>
+                <label class="setting-field">相机 IP<input data-setting="camera.rtsp.ip" value="192.168.2.64" /></label>
+                <label class="setting-field">端口<input data-setting="camera.rtsp.port" type="number" value="554" /></label>
+                <label class="setting-field">通道<select data-setting="camera.rtsp.channel"><option value="101">主码流 101</option><option value="102" selected>子码流 102</option></select></label>
+                <label class="setting-field">用户名<input data-setting="camera.rtsp.username" value="admin" /></label>
+                <label class="setting-field">密码<input data-setting="camera.rtsp.password" type="password" value="password" /></label>
+                <label class="setting-field">RTSP 传输<select data-setting="camera.rtsp.transport"><option value="tcp" selected>TCP</option><option value="udp">UDP</option></select></label>
+                <label class="setting-field full">RTSP URL<input data-setting="camera.rtsp.url" value="rtsp://admin:password@192.168.2.64:554/Streaming/Channels/102" /></label>
               </div>
             </div>
 
             <div id="cameraTypeIndustrial" class="camera-type-panel camera-inline-panel">
               <div class="settings-section-title"><b>工业相机参数</b><span>预留 GigE / USB3 Vision / SDK 接入</span></div>
               <div class="settings-grid three">
-                <label class="setting-field">厂家<select><option>海康机器人</option><option>大恒</option><option>Basler</option><option>其他</option></select></label>
-                <label class="setting-field">触发模式<select><option>连续采集</option><option>软触发</option><option>硬触发</option></select></label>
-                <label class="setting-field">触发源<select><option>Line0</option><option>Line1</option><option>Software</option></select></label>
-                <label class="setting-field">ROI X<input type="number" value="0" /></label>
-                <label class="setting-field">ROI Y<input type="number" value="0" /></label>
-                <label class="setting-field">ROI W/H<input value="1280 × 720" /></label>
+                <label class="setting-field">厂家<select data-setting="camera.industrial.vendor"><option value="hikrobot">海康机器人</option><option value="daheng">大恒</option><option value="basler">Basler</option><option value="other">其他</option></select></label>
+                <label class="setting-field">触发模式<select data-setting="camera.industrial.trigger_mode"><option value="continuous">连续采集</option><option value="software">软触发</option><option value="hardware">硬触发</option></select></label>
+                <label class="setting-field">触发源<select data-setting="camera.industrial.trigger_source"><option value="Line0">Line0</option><option value="Line1">Line1</option><option value="Software">Software</option></select></label>
+                <label class="setting-field">ROI X<input data-setting="camera.industrial.roi_x" type="number" value="0" /></label>
+                <label class="setting-field">ROI Y<input data-setting="camera.industrial.roi_y" type="number" value="0" /></label>
+                <label class="setting-field">ROI W/H<input data-setting="camera.industrial.roi_wh" value="1280x720" /></label>
               </div>
             </div>
 
             <div id="cameraTypeMock" class="camera-type-panel camera-inline-panel">
               <div class="settings-section-title"><b>模拟相机参数</b><span>用于无摄像头调试和演示</span></div>
               <div class="settings-grid three">
-                <label class="setting-field">模拟图案<select><option>检测框场景</option><option>棋盘格</option><option>纯色背景</option></select></label>
-                <label class="setting-field">模拟帧率<input type="number" value="10" /></label>
-                <label class="setting-field">是否叠加时间戳<select><option selected>是</option><option>否</option></select></label>
+                <label class="setting-field">模拟图案<select data-setting="camera.mock.pattern"><option value="detection_scene">检测框场景</option><option value="checkerboard">棋盘格</option><option value="plain">纯色背景</option></select></label>
+                <label class="setting-field">模拟帧率<input data-setting="camera.mock.fps" type="number" value="10" /></label>
+                <label class="setting-field">是否叠加时间戳<select data-setting="camera.mock.timestamp"><option value="true" selected>是</option><option value="false">否</option></select></label>
               </div>
             </div>
           </div>
@@ -349,49 +349,55 @@
             <div class="settings-section-title"><b>通用图像参数</b><span>适用于大部分相机</span></div>
             <div class="settings-grid three">
               <label class="setting-field">分辨率
-                <select>
-                  <option>640 × 480</option>
-                  <option selected>1280 × 720</option>
-                  <option>1920 × 1080</option>
-                  <option>自定义</option>
+                <select data-setting="camera.common.resolution">
+                  <option value="640x480">640 × 480</option>
+                  <option value="1280x720" selected>1280 × 720</option>
+                  <option value="1920x1080">1920 × 1080</option>
+                  <option value="custom">自定义</option>
                 </select>
               </label>
               <label class="setting-field">帧率 FPS
-                <input type="number" value="25" min="1" max="60" />
+                <input data-setting="camera.common.fps" type="number" value="6" min="1" max="60" />
               </label>
               <label class="setting-field">图像旋转
-                <select>
-                  <option selected>0°</option>
-                  <option>90°</option>
-                  <option>180°</option>
-                  <option>270°</option>
+                <select data-setting="camera.common.rotation">
+                  <option value="0" selected>0°</option>
+                  <option value="90">90°</option>
+                  <option value="180">180°</option>
+                  <option value="270">270°</option>
                 </select>
               </label>
               <label class="setting-field">曝光模式
-                <select>
-                  <option selected>自动曝光</option>
-                  <option>手动曝光</option>
+                <select data-setting="camera.common.exposure_mode">
+                  <option value="auto" selected>自动曝光</option>
+                  <option value="manual">手动曝光</option>
                 </select>
               </label>
               <label class="setting-field">曝光值
-                <input type="number" value="0" placeholder="例如 0 / 10000" />
+                <input data-setting="camera.common.exposure" type="number" value="0" placeholder="例如 0 / 10000" />
               </label>
               <label class="setting-field">增益
-                <input type="number" value="0" min="0" />
+                <input data-setting="camera.common.gain" type="number" value="0" min="0" />
               </label>
               <label class="setting-field">白平衡
-                <select>
-                  <option selected>自动白平衡</option>
-                  <option>手动白平衡</option>
-                  <option>日光</option>
-                  <option>荧光灯</option>
+                <select data-setting="camera.common.white_balance">
+                  <option value="auto" selected>自动白平衡</option>
+                  <option value="manual">手动白平衡</option>
+                  <option value="daylight">日光</option>
+                  <option value="fluorescent">荧光灯</option>
                 </select>
               </label>
               <label class="setting-field">亮度
-                <input type="number" value="50" min="0" max="100" />
+                <input data-setting="camera.common.brightness" type="number" value="50" min="0" max="100" />
               </label>
               <label class="setting-field">对比度
-                <input type="number" value="50" min="0" max="100" />
+                <input data-setting="camera.common.contrast" type="number" value="50" min="0" max="100" />
+              </label>
+              <label class="setting-field">预览宽度
+                <input data-setting="camera.common.preview_width" type="number" value="960" min="320" />
+              </label>
+              <label class="setting-field">JPEG 质量
+                <input data-setting="camera.common.jpeg_quality" type="number" value="75" min="10" max="100" />
               </label>
             </div>
           </div>
@@ -407,9 +413,9 @@
               <button class="mini-btn" type="button">选择 U 盘目录</button>
             </div>
             <div class="settings-grid three">
-              <label class="setting-field">标定类型<select><option>单目相机标定</option><option>相机-雷达外参</option><option>双目相机标定</option></select></label>
-              <label class="setting-field">棋盘格规格<input value="9 × 6" /></label>
-              <label class="setting-field">方格尺寸 mm<input type="number" value="25" /></label>
+              <label class="setting-field">标定类型<select data-setting="camera.calibration.calibration_type"><option value="mono">单目相机标定</option><option value="camera_lidar">相机-雷达外参</option><option value="stereo">双目相机标定</option></select></label>
+              <label class="setting-field">棋盘格规格<input data-setting="camera.calibration.checkerboard" value="9x6" /></label>
+              <label class="setting-field">方格尺寸 mm<input data-setting="camera.calibration.square_size_mm" type="number" value="25" /></label>
             </div>
           </div>
         </section>
@@ -429,39 +435,66 @@
               <article class="network-card">
                 <h4>内网口 eth0 / Camera LAN</h4>
                 <div class="settings-grid two compact-grid">
-                  <label class="setting-field">启用 DHCP<select><option>否</option><option>是</option></select></label>
-                  <label class="setting-field">IP 地址<input value="192.168.2.10" /></label>
-                  <label class="setting-field">子网掩码<input value="255.255.255.0" /></label>
-                  <label class="setting-field">网关<input placeholder="通常留空" /></label>
+                  <label class="setting-field">启用 DHCP<select data-setting="vision_box.network.eth0.dhcp"><option value="false" selected>否</option><option value="true">是</option></select></label>
+                  <label class="setting-field">IP 地址<input data-setting="vision_box.network.eth0.ip" value="192.168.2.10" /></label>
+                  <label class="setting-field">子网掩码<input data-setting="vision_box.network.eth0.netmask" value="255.255.255.0" /></label>
+                  <label class="setting-field">网关<input data-setting="vision_box.network.eth0.gateway" placeholder="通常留空" /></label>
                 </div>
               </article>
               <article class="network-card">
                 <h4>外网口 eth1 / Factory LAN</h4>
                 <div class="settings-grid two compact-grid">
-                  <label class="setting-field">启用 DHCP<select><option>否</option><option selected>是</option></select></label>
-                  <label class="setting-field">IP 地址<input value="192.168.1.200" /></label>
-                  <label class="setting-field">子网掩码<input value="255.255.255.0" /></label>
-                  <label class="setting-field">网关<input value="192.168.1.1" /></label>
+                  <label class="setting-field">启用 DHCP<select data-setting="vision_box.network.eth1.dhcp"><option value="false">否</option><option value="true" selected>是</option></select></label>
+                  <label class="setting-field">IP 地址<input data-setting="vision_box.network.eth1.ip" value="192.168.1.200" /></label>
+                  <label class="setting-field">子网掩码<input data-setting="vision_box.network.eth1.netmask" value="255.255.255.0" /></label>
+                  <label class="setting-field">网关<input data-setting="vision_box.network.eth1.gateway" value="192.168.1.1" /></label>
                 </div>
               </article>
+            </div>
+          </div>
+
+          <div class="settings-section upload-setting-block">
+            <div class="settings-section-title"><b>服务端上传配置</b><span>采集包上传到服务端 PC，通常走外网口 eth1 / Factory LAN</span></div>
+            <div class="settings-grid three">
+              <label class="setting-field">启用上传
+                <select data-setting="vision_box.upload.enabled">
+                  <option value="true" selected>开启</option>
+                  <option value="false">关闭</option>
+                </select>
+              </label>
+              <label class="setting-field">服务端 IP
+                <input data-setting="vision_box.upload.host" value="192.168.1.100" placeholder="例如：192.168.1.100" />
+              </label>
+              <label class="setting-field">SSH 用户
+                <input data-setting="vision_box.upload.user" value="pc" placeholder="例如：pc" />
+              </label>
+              <label class="setting-field">SSH 端口
+                <input data-setting="vision_box.upload.port" type="number" value="22" min="1" max="65535" />
+              </label>
+              <label class="setting-field full">服务端接收目录
+                <input data-setting="vision_box.upload.target_dir" value="/home/pc/桌面/visionops_v2/data/incoming" />
+              </label>
+              <label class="setting-field">上传超时时间 s
+                <input data-setting="vision_box.upload.timeout_sec" type="number" value="120" min="5" />
+              </label>
             </div>
           </div>
 
           <div class="settings-section">
             <div class="settings-section-title"><b>视觉盒子参数</b><span>设备身份、服务端口、存储和维护</span></div>
             <div class="settings-grid three">
-              <label class="setting-field">设备 ID<input value="rk3588-001" /></label>
-              <label class="setting-field">客户 ID<input value="CUST-001" /></label>
-              <label class="setting-field">默认启动模式<select><option selected>生产模式</option><option>工厂模式</option></select></label>
-              <label class="setting-field">Collector 端口<input type="number" value="8090" /></label>
-              <label class="setting-field">生产推理端口<input type="number" value="8080" /></label>
-              <label class="setting-field">模型验证端口<input type="number" value="8082" /></label>
-              <label class="setting-field">模型目录<input value="/opt/visionops/models" /></label>
-              <label class="setting-field">采集数据目录<input value="/opt/visionops/edge/collector/data/local_dataset" /></label>
-              <label class="setting-field">日志保留天数<input type="number" value="7" /></label>
-              <label class="setting-field">USB 自动挂载<select><option selected>开启</option><option>关闭</option></select></label>
-              <label class="setting-field">磁盘告警阈值<input type="number" value="80" /></label>
-              <label class="setting-field">时间同步<select><option selected>NTP 自动同步</option><option>手动设置</option></select></label>
+              <label class="setting-field">设备 ID<input data-setting="vision_box.device_id" value="rk3588-001" /></label>
+              <label class="setting-field">客户 ID<input data-setting="vision_box.customer_id" value="CUST-001" /></label>
+              <label class="setting-field">默认启动模式<select data-setting="vision_box.default_mode"><option value="production" selected>生产模式</option><option value="factory">工厂模式</option></select></label>
+              <label class="setting-field">Collector 端口<input data-setting="vision_box.collector_port" type="number" value="8090" /></label>
+              <label class="setting-field">生产推理端口<input data-setting="vision_box.production_port" type="number" value="8080" /></label>
+              <label class="setting-field">模型验证端口<input data-setting="vision_box.validation_port" type="number" value="8082" /></label>
+              <label class="setting-field">模型目录<input data-setting="vision_box.models_dir" value="/opt/visionops/models" /></label>
+              <label class="setting-field">采集数据目录<input data-setting="vision_box.data_dir" value="/opt/visionops/edge/collector/data/local_dataset" /></label>
+              <label class="setting-field">日志保留天数<input data-setting="vision_box.log_keep_days" type="number" value="7" /></label>
+              <label class="setting-field">USB 自动挂载<select data-setting="vision_box.usb_auto_mount"><option value="true" selected>开启</option><option value="false">关闭</option></select></label>
+              <label class="setting-field">磁盘告警阈值<input data-setting="vision_box.disk_warn_percent" type="number" value="80" /></label>
+              <label class="setting-field">时间同步<select data-setting="vision_box.time_sync"><option value="ntp" selected>NTP 自动同步</option><option value="manual">手动设置</option></select></label>
             </div>
           </div>
 
@@ -485,15 +518,15 @@
           <div class="settings-section">
             <div class="settings-section-title"><b>公共参数</b><span>四类任务通用</span></div>
             <div class="settings-grid three">
-              <label class="setting-field">当前模型<select><option>自动选择最新模型</option><option>手动选择模型</option></select></label>
-              <label class="setting-field">输入尺寸<select><option>224 × 224</option><option selected>640 × 640</option><option>自定义</option></select></label>
-              <label class="setting-field">NPU 核心<select><option selected>auto</option><option>core0</option><option>core1</option><option>core2</option><option>all</option></select></label>
-              <label class="setting-field">推理间隔 ms<input type="number" value="1000" /></label>
-              <label class="setting-field">生产 FPS 上限<input type="number" value="5" min="1" max="30" /></label>
-              <label class="setting-field">Warmup 次数<input type="number" value="3" /></label>
-              <label class="setting-field">显示标签<select><option selected>显示类别 + 置信度</option><option>只显示类别</option><option>隐藏标签</option></select></label>
-              <label class="setting-field">最多结果数<input type="number" value="100" /></label>
-              <label class="setting-field">日志等级<select><option>INFO</option><option>DEBUG</option><option>WARNING</option></select></label>
+              <label class="setting-field">当前模型<select data-setting="algorithm.common.model_mode"><option value="auto">自动选择最新模型</option><option value="manual">手动选择模型</option></select></label>
+              <label class="setting-field">输入尺寸<select data-setting="algorithm.common.input_size"><option value="224x224">224 × 224</option><option value="640x640" selected>640 × 640</option><option value="custom">自定义</option></select></label>
+              <label class="setting-field">NPU 核心<select data-setting="algorithm.common.npu_core"><option value="auto" selected>auto</option><option value="core0">core0</option><option value="core1">core1</option><option value="core2">core2</option><option value="all">all</option></select></label>
+              <label class="setting-field">推理间隔 ms<input data-setting="algorithm.common.realtime_interval_ms" type="number" value="1000" /></label>
+              <label class="setting-field">生产 FPS 上限<input data-setting="algorithm.common.production_fps_limit" type="number" value="5" min="1" max="30" /></label>
+              <label class="setting-field">Warmup 次数<input data-setting="algorithm.common.warmup_runs" type="number" value="3" /></label>
+              <label class="setting-field">显示标签<select data-setting="algorithm.common.label_display"><option value="class_conf" selected>显示类别 + 置信度</option><option value="class_only">只显示类别</option><option value="hidden">隐藏标签</option></select></label>
+              <label class="setting-field">最多结果数<input data-setting="algorithm.common.max_results" type="number" value="100" /></label>
+              <label class="setting-field">日志等级<select data-setting="algorithm.common.log_level"><option value="INFO">INFO</option><option value="DEBUG">DEBUG</option><option value="WARNING">WARNING</option></select></label>
             </div>
           </div>
 
@@ -501,30 +534,30 @@
             <article class="algorithm-task-card">
               <h4>分类 Classification</h4>
               <p>适合合格/不合格、产品类别判断。</p>
-              <label>TopK <input type="number" value="5" /></label>
-              <label>分类阈值 <input type="number" value="0.50" step="0.01" /></label>
-              <label>低置信度策略 <select><option>提示人工复核</option><option>直接输出最高类别</option><option>判定为未知</option></select></label>
+              <label>TopK <input data-setting="algorithm.classification.topk" type="number" value="5" /></label>
+              <label>分类阈值 <input data-setting="algorithm.classification.score_threshold" type="number" value="0.50" step="0.01" /></label>
+              <label>低置信度策略 <select data-setting="algorithm.classification.low_confidence_policy"><option value="review">提示人工复核</option><option value="top1">直接输出最高类别</option><option value="unknown">判定为未知</option></select></label>
             </article>
             <article class="algorithm-task-card">
               <h4>检测 Detection</h4>
               <p>适合水平框目标检测。</p>
-              <label>置信度阈值 <input type="number" value="0.25" step="0.01" /></label>
-              <label>NMS 阈值 <input type="number" value="0.45" step="0.01" /></label>
-              <label>显示中心点 <select><option selected>开启</option><option>关闭</option></select></label>
+              <label>置信度阈值 <input data-setting="algorithm.detection.conf_threshold" type="number" value="0.25" step="0.01" /></label>
+              <label>NMS 阈值 <input data-setting="algorithm.detection.nms_threshold" type="number" value="0.45" step="0.01" /></label>
+              <label>显示中心点 <select data-setting="algorithm.detection.show_center"><option value="true" selected>开启</option><option value="false">关闭</option></select></label>
             </article>
             <article class="algorithm-task-card">
               <h4>旋转框 OBB</h4>
               <p>适合倾斜目标、长条形零件检测。</p>
-              <label>OBB 置信度 <input type="number" value="0.25" step="0.01" /></label>
-              <label>NMS 类型 <select><option>水平外接框 NMS</option><option selected>Rotated NMS</option></select></label>
-              <label>角度显示 <select><option selected>显示角度</option><option>隐藏角度</option></select></label>
+              <label>OBB 置信度 <input data-setting="algorithm.obb_detection.conf_threshold" type="number" value="0.25" step="0.01" /></label>
+              <label>NMS 类型 <select data-setting="algorithm.obb_detection.nms_mode"><option value="horizontal">水平外接框 NMS</option><option value="rotated" selected>Rotated NMS</option></select></label>
+              <label>角度显示 <select data-setting="algorithm.obb_detection.show_angle"><option value="true" selected>显示角度</option><option value="false">隐藏角度</option></select></label>
             </article>
             <article class="algorithm-task-card">
               <h4>分割 Segmentation</h4>
               <p>适合缺陷区域、轮廓面积和形状判断。</p>
-              <label>Mask 阈值 <input type="number" value="0.50" step="0.01" /></label>
-              <label>Mask 透明度 <input type="number" value="0.35" step="0.05" /></label>
-              <label>显示方式 <select><option selected>Mask + 外接框</option><option>只显示 Mask</option><option>只显示轮廓</option></select></label>
+              <label>Mask 阈值 <input data-setting="algorithm.segmentation.mask_threshold" type="number" value="0.50" step="0.01" /></label>
+              <label>Mask 透明度 <input data-setting="algorithm.segmentation.mask_alpha" type="number" value="0.35" step="0.05" /></label>
+              <label>显示方式 <select data-setting="algorithm.segmentation.show_mode"><option value="mask_box" selected>Mask + 外接框</option><option value="mask_only">只显示 Mask</option><option value="contour_only">只显示轮廓</option></select></label>
             </article>
           </div>
         </section>
@@ -533,6 +566,7 @@
       </div>
 
       <div class="dialog-actions settings-actions">
+        <button id="testRtspCameraBtn" class="big-action secondary compact">测试相机连接</button>
         <button id="resetSettingsMock" class="big-action secondary compact">恢复默认</button>
         <button id="saveSettingsMock" class="big-action primary compact">保存设置</button>
       </div>
@@ -620,6 +654,6 @@
 
   <div id="toast" class="toast"></div>
   <div id="centerNotice" class="center-notice" role="status" aria-live="polite"><div id="centerNoticeBox" class="center-notice-box"></div></div>
-  <script src="/static/app.js?v=setting_v1_3"></script>
+  <script src="/static/app.js?v=setting_v2_1_1_rtsp"></script>
 </body>
 </html>

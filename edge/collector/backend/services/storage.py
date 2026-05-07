@@ -12,11 +12,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
 
-from backend.config import (
-    DATA_ROOT, DEVICE_ID, USER_ID, DEFAULT_DATASET_NAME,
-    UPLOAD_ENABLED, UPLOAD_HOST, UPLOAD_USER, UPLOAD_PORT,
-    UPLOAD_TARGET_DIR, UPLOAD_TIMEOUT_SEC,
-)
+from backend.config import DATA_ROOT, DEVICE_ID, USER_ID, DEFAULT_DATASET_NAME, UPLOAD_TIMEOUT_SEC
+from backend.services.settings_store import get_upload_runtime_config
 
 SUBDIRS = ["all_images", "positive", "negative", "upload_packages"]
 FOLDER_TO_SUBDIR = {"all": "all_images", "positive": "positive", "negative": "negative"}
@@ -430,51 +427,65 @@ def upload_package_to_pc(package_path: Path) -> Dict:
 
     为避免 Web 请求卡死，建议提前在 RK3588 上配置到电脑的 SSH 免密登录。
     """
-    if not UPLOAD_ENABLED:
+    upload_cfg = get_upload_runtime_config()
+    upload_enabled = bool(upload_cfg.get("enabled", True))
+    upload_host = str(upload_cfg.get("host") or "").strip()
+    upload_user = str(upload_cfg.get("user") or "pc").strip()
+    upload_port = int(upload_cfg.get("port") or 22)
+    upload_target_dir = str(upload_cfg.get("target_dir") or "").strip()
+    upload_timeout_sec = int(upload_cfg.get("timeout_sec") or UPLOAD_TIMEOUT_SEC)
+
+    if not upload_enabled:
         return {"enabled": False, "uploaded": False, "message": "远程上传已关闭，仅完成本地打包"}
-    if not UPLOAD_HOST:
+    if not upload_host:
         return {
             "enabled": True,
             "uploaded": False,
-            "message": "未配置 VISIONOPS_UPLOAD_HOST，仅完成本地打包",
+            "message": "未配置服务端上传 IP，仅完成本地打包",
+        }
+    if not upload_target_dir:
+        return {
+            "enabled": True,
+            "uploaded": False,
+            "message": "未配置服务端接收目录，仅完成本地打包",
         }
 
-    remote = f"{UPLOAD_USER}@{UPLOAD_HOST}"
+    remote = f"{upload_user}@{upload_host}"
     ssh_base = [
         "ssh",
-        "-p", str(UPLOAD_PORT),
+        "-p", str(upload_port),
         "-o", "BatchMode=yes",
         "-o", "ConnectTimeout=8",
         "-o", "StrictHostKeyChecking=accept-new",
     ]
     scp_base = [
         "scp",
-        "-P", str(UPLOAD_PORT),
+        "-P", str(upload_port),
         "-o", "BatchMode=yes",
         "-o", "ConnectTimeout=8",
         "-o", "StrictHostKeyChecking=accept-new",
     ]
 
-    mkdir_cmd = ssh_base + [remote, f"mkdir -p {shlex.quote(UPLOAD_TARGET_DIR)}"]
-    mkdir_res = _run_cmd(mkdir_cmd, timeout=30)
+    mkdir_cmd = ssh_base + [remote, f"mkdir -p {shlex.quote(upload_target_dir)}"]
+    mkdir_res = _run_cmd(mkdir_cmd, timeout=min(30, upload_timeout_sec))
     if mkdir_res.returncode != 0:
         return {
             "enabled": True,
             "uploaded": False,
             "message": "远程目录创建失败，请检查电脑 SSH 服务、IP、用户名或免密登录",
-            "target": f"{remote}:{UPLOAD_TARGET_DIR}",
+            "target": f"{remote}:{upload_target_dir}",
             "stderr": mkdir_res.stderr.strip(),
         }
 
-    remote_target = f"{remote}:{shlex.quote(UPLOAD_TARGET_DIR)}/"
+    remote_target = f"{remote}:{shlex.quote(upload_target_dir)}/"
     scp_cmd = scp_base + [str(package_path), remote_target]
-    scp_res = _run_cmd(scp_cmd, timeout=UPLOAD_TIMEOUT_SEC)
+    scp_res = _run_cmd(scp_cmd, timeout=upload_timeout_sec)
     if scp_res.returncode != 0:
         return {
             "enabled": True,
             "uploaded": False,
             "message": "上传电脑失败，请检查网络、SSH 免密、目标目录权限",
-            "target": f"{remote}:{UPLOAD_TARGET_DIR}",
+            "target": f"{remote}:{upload_target_dir}",
             "stderr": scp_res.stderr.strip(),
         }
 
@@ -482,7 +493,7 @@ def upload_package_to_pc(package_path: Path) -> Dict:
         "enabled": True,
         "uploaded": True,
         "message": "已上传到电脑端数据目录",
-        "target": f"{remote}:{UPLOAD_TARGET_DIR}/{package_path.name}",
+        "target": f"{remote}:{upload_target_dir}/{package_path.name}",
     }
 
 

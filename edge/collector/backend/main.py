@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.config import STATIC_DIR, UI_VERSION
 from backend.routers.collector import router as collector_router
+from backend.routers.settings import router as settings_router
 from backend.services.camera import backend_camera_enabled, camera_service
 from backend.services.storage import ensure_data_root
 
@@ -31,6 +32,7 @@ app = FastAPI(
 )
 
 app.include_router(collector_router)
+app.include_router(settings_router)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
