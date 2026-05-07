@@ -34,6 +34,35 @@ X_ANYLABELING_ENV = os.environ.get("X_ANYLABELING_ENV", "x-anylabeling-cu12")
 
 MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:5000")
 MLFLOW_DEFAULT_EXPERIMENT = os.environ.get("VISIONOPS_MLFLOW_EXPERIMENT", "visionops-detection")
+CLASSIFICATION_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+
+MLFLOW_S3_ENDPOINT_URL = os.environ.get("MLFLOW_S3_ENDPOINT_URL", "http://localhost:9000")
+MLFLOW_AWS_ACCESS_KEY_ID = os.environ.get(
+    "AWS_ACCESS_KEY_ID",
+    os.environ.get("MINIO_ROOT_USER", "minioadmin"),
+)
+MLFLOW_AWS_SECRET_ACCESS_KEY = os.environ.get(
+    "AWS_SECRET_ACCESS_KEY",
+    os.environ.get("MINIO_ROOT_PASSWORD", "minioadmin"),
+)
+
+
+def build_pipeline_env() -> dict[str, str]:
+    """
+    训练流水线由控制台后台 subprocess 启动时，需要显式带上 MLflow/MinIO
+    artifact store 相关环境变量。
+
+    否则 mlflow.log_artifact(...) 会连接到 S3/MinIO artifact store，
+    但 boto3 找不到 AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY，
+    从而报 NoCredentialsError。
+    """
+    env = os.environ.copy()
+    env.setdefault("MLFLOW_TRACKING_URI", MLFLOW_TRACKING_URI)
+    env.setdefault("MLFLOW_S3_ENDPOINT_URL", MLFLOW_S3_ENDPOINT_URL)
+    env.setdefault("AWS_ACCESS_KEY_ID", MLFLOW_AWS_ACCESS_KEY_ID)
+    env.setdefault("AWS_SECRET_ACCESS_KEY", MLFLOW_AWS_SECRET_ACCESS_KEY)
+    env.setdefault("AWS_DEFAULT_REGION", os.environ.get("AWS_DEFAULT_REGION", "us-east-1"))
+    return env
 
 
 app = FastAPI(title="VisionOps Workflow Control Panel")
@@ -170,7 +199,8 @@ def read_current_task_yaml_summary() -> dict[str, Any]:
 def get_dataset_yaml_path(task_type: str) -> Path:
     task_type = normalize_task_type(task_type)
     if task_type == "classification":
-        return PROJECT_ROOT / "data" / "raw_classification" / "data.yaml"
+        # classification 不依赖 data.yaml。这里仅作为显示路径返回 raw_root。
+        return PROJECT_ROOT / "data" / "raw_classification"
     if task_type == "obb":
         return PROJECT_ROOT / "data" / "raw_obb" / "data.yaml"
     if task_type == "segmentation":
@@ -178,8 +208,83 @@ def get_dataset_yaml_path(task_type: str) -> Path:
     return PROJECT_ROOT / "data" / "raw_detection" / "data.yaml"
 
 
+def read_classification_dataset_classes() -> tuple[list[str], Path]:
+    """
+    分类任务不需要 data.yaml。
+
+    ROI 分类数据制作完成后，分类训练数据应直接位于：
+      data/raw_classification/<类别名>/*.jpg|*.png|...
+
+    因此分类任务从子文件夹名称推导 classes.names 和 classes.num_classes。
+    """
+    raw_dir = PROJECT_ROOT / "data" / "raw_classification"
+
+    if not raw_dir.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "未找到 data/raw_classification。"
+                "请先在 /annotator 的“ROI 分类数据制作”中生成 ROI 候选并完成分类审核。"
+            ),
+        )
+
+    class_dirs = sorted([p for p in raw_dir.iterdir() if p.is_dir()], key=lambda p: p.name)
+    if not class_dirs:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "data/raw_classification 下没有类别文件夹。"
+                "请先在 /annotator 的“ROI 分类数据制作”中新增类别并分配 ROI。"
+            ),
+        )
+
+    names: list[str] = []
+    empty_classes: list[str] = []
+
+    for class_dir in class_dirs:
+        image_count = sum(
+            1 for p in class_dir.rglob("*")
+            if p.is_file() and p.suffix.lower() in CLASSIFICATION_IMAGE_EXTS
+        )
+        if image_count <= 0:
+            empty_classes.append(class_dir.name)
+        else:
+            names.append(class_dir.name)
+
+    if empty_classes:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "data/raw_classification 下存在空类别文件夹："
+                + "，".join(empty_classes)
+                + "。请删除空类别或补充样本后再开始分类流水线。"
+            ),
+        )
+
+    if len(names) < 2:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "分类任务至少需要 2 个有效类别。"
+                f"当前仅发现 {len(names)} 个类别：{names}。"
+            ),
+        )
+
+    return names, raw_dir
+
+
 def read_dataset_classes(task_type: str) -> tuple[list[str], Path]:
-    """从确认审核完成后生成的 data.yaml 中读取 names/nc。"""
+    """
+    读取当前任务类别。
+
+    - classification：不需要 data.yaml，直接扫描 data/raw_classification/<类别名>/。
+    - detection / obb / segmentation：继续从对应 data.yaml 中读取 names/nc。
+    """
+    task_type = normalize_task_type(task_type)
+
+    if task_type == "classification":
+        return read_classification_dataset_classes()
+
     yaml = yaml_module()
     data_yaml = get_dataset_yaml_path(task_type)
 
@@ -520,7 +625,7 @@ class JobManager:
                     stderr=subprocess.STDOUT,
                     text=True,
                     bufsize=1,
-                    env=os.environ.copy(),
+                    env=build_pipeline_env(),
                 )
 
                 assert proc.stdout is not None
@@ -851,6 +956,23 @@ def api_deploy() -> dict[str, Any]:
     return {"job_id": job_id, "message": "已开始部署模型"}
 
 
+@app.post("/api/deploy-roi-classification")
+def api_deploy_roi_classification() -> dict[str, Any]:
+    """
+    部署 ROI 分类双模型 bundle。
+
+    第一版为了保证边缘端 pipeline_engine.py、engine.py 等运行时代码同步，
+    默认带 --code。后续代码稳定后，如果只想部署模型，把下面 cmd 里的
+    "--code" 删除即可。
+    """
+    cmd = ["bash", "edge/deploy/push.sh", "--roi-classification", "--code"]
+    job_id = jobs.start("deploy-roi-classification", cmd)
+    return {
+        "job_id": job_id,
+        "message": "已开始部署 ROI 分类双模型，命令: " + " ".join(cmd),
+    }
+
+
 @app.get("/api/jobs/{job_id}")
 def api_job_status(job_id: str) -> dict[str, Any]:
     try:
@@ -1019,11 +1141,13 @@ HTML_PAGE = r'''
             <p>部署当前设备会执行 make deploy，沿用当前项目配置中的设备信息、模型路径和健康检查逻辑。</p>
             <div class="btn-row">
               <button onclick="startJob('/api/deploy')">部署当前设备</button>
+              <button class="success" onclick="startRoiClassificationDeploy()">部署 ROI 分类双模型</button>
               <button class="secondary" onclick="openDeployOtherModal()">部署其他设备</button>
             </div>
           </div>
           <div class="hint">
-            当前部署链路通常由 make deploy 调用 edge/deploy/push.sh 完成，通过 SSH/SCP 把同一个 RKNN 模型、类别配置和运行时上下文推送到边缘设备，再重启服务并健康检查。<br><br>
+            “部署当前设备”仍走原来的单模型部署链路，由 make deploy 调用 edge/deploy/push.sh。<br><br>
+            “部署 ROI 分类双模型”会调用 <code>bash edge/deploy/push.sh --roi-classification --code</code>，把 detection/classification 两个 RKNN 模型打包成双模型 bundle，并同步边缘端代码后重启服务。<br><br>
             “部署其他设备”先作为界面入口预留，下一步可接入设备 IP、SSH 用户、端口、部署目录等参数。
           </div>
         </div>
@@ -1040,7 +1164,7 @@ HTML_PAGE = r'''
     <div class="modal">
       <h2>开始训练流水线</h2>
       <div id="taskTypeStep">
-        <p>请选择任务类型。系统会从 pipeline/configs/presets 复制对应模板到 task.yaml，并自动从 data.yaml 同步 classes.names 和 classes.num_classes。</p>
+        <p>请选择任务类型。系统会从 pipeline/configs/presets 复制对应模板到 task.yaml。分类任务会从 data/raw_classification/<类别名>/ 推导类别；检测、OBB、分割任务会从对应 data.yaml 同步类别。</p>
         <div class="btn-row">
           <button onclick="prepareTaskYaml('classification')">分类任务</button>
           <button onclick="prepareTaskYaml('detection')">检测任务</button>
@@ -1415,6 +1539,12 @@ async function saveAndStartPipeline() {
   closePipelineModal(); currentJobId = data.job_id;
   document.getElementById("log").textContent = data.message + "\njob_id=" + currentJobId + "\n";
   if (timer) clearInterval(timer); timer = setInterval(fetchLogs, 1000);
+}
+
+async function startRoiClassificationDeploy() {
+  const msg = "确认部署 ROI 分类双模型？\n\n这会执行：\nbash edge/deploy/push.sh --roi-classification --code\n\n第一版会同步边缘端代码并重启推理服务。";
+  if (!confirm(msg)) return;
+  await startJob('/api/deploy-roi-classification');
 }
 
 function openDeployOtherModal() { document.getElementById("deployOtherModal").style.display = "flex"; }

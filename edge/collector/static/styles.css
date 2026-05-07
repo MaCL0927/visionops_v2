@@ -802,3 +802,43 @@
 .ntp-setting-block .settings-inline-status{
   margin-top:10px;
 }
+
+/* v6.8：ROI Classification 双模型 bundle 在模型列表中作为一个模型显示 */
+.model-card.pipeline-model-card{
+  border-color:#bfdbfe;
+  background:linear-gradient(180deg,#eff6ff 0%,#ffffff 78%);
+}
+.model-card.pipeline-model-card b::after{
+  content:'双模型';
+  display:inline-block;
+  margin-left:8px;
+  padding:3px 8px;
+  border-radius:999px;
+  background:#dbeafe;
+  color:#1d4ed8;
+  font-size:13px;
+  vertical-align:middle;
+}
+.model-card.pipeline-model-card.active{
+  border-color:#1d4ed8;
+  box-shadow:0 0 0 3px rgba(37,99,235,.12);
+}
+.target-row-roi{
+  grid-template-columns:64px minmax(120px,1fr) minmax(120px,1fr);
+  align-items:center;
+  column-gap:10px;
+  row-gap:6px;
+}
+.target-row-roi span{
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.target-row-roi .target-index{
+  color:#2563eb;
+  font-weight:900;
+}
+@media (max-width:1300px){
+  .target-row-roi{grid-template-columns:64px minmax(80px,1fr);}
+  .target-row-roi span{white-space:normal;}
+}

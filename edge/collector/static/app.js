@@ -558,12 +558,13 @@ function normalizeTaskName(task){
   if(['obb','obb_detection','oriented_detection','oriented_bbox_detection','rotated_detection','rotated_bbox_detection','yolo_obb','yolov8_obb'].includes(t)) return 'obb_detection';
   if(['seg','segment','segmentation','instance_segmentation','yolo_seg','yolov8_seg','mask_segmentation'].includes(t)) return 'segmentation';
   if(['detect','detection','yolo_detection','object_detection'].includes(t)) return 'detection';
+  if(['roi_classification','roi_cls','two_stage_classification','pipeline_roi_classification'].includes(t)) return 'roi_classification';
   if(['cls','classify','classification','image_classification'].includes(t)) return 'classification';
   return t;
 }
 function isDetectionLikeTask(task){
   const t=normalizeTaskName(task);
-  return t==='detection' || t==='obb_detection' || t==='segmentation';
+  return t==='detection' || t==='obb_detection' || t==='segmentation' || t==='roi_classification';
 }
 function taskDisplayName(task){
   const t=normalizeTaskName(task);
@@ -571,6 +572,7 @@ function taskDisplayName(task){
   if(t==='detection') return '检测';
   if(t==='obb_detection') return '旋转框检测';
   if(t==='segmentation') return '实例分割';
+  if(t==='roi_classification') return 'ROI分类双模型';
   return task || '未知';
 }
 
@@ -636,7 +638,8 @@ function updateSelectedModelUI(){
   if(item && item.has_meta!==false){
     const taskText=item.task_label || item.task || '未知任务';
     const clsText=item.num_classes ? ` · ${item.num_classes}类` : '';
-    selectedModelNameEl.textContent=`${selectedModel}（${taskText}${clsText}）`;
+    const pipelineText=item.is_pipeline ? ' · 双模型推理' : '';
+    selectedModelNameEl.textContent=`${selectedModel}（${taskText}${clsText}${pipelineText}）`;
   }else{
     selectedModelNameEl.textContent=`${selectedModel}（配置缺失）`;
   }
@@ -669,9 +672,11 @@ function renderModelList(){
     const taskText=item.has_meta ? (item.task_label || item.task || '未知任务') : '配置缺失';
     const classText=item.has_meta && item.num_classes ? `${item.num_classes}类` : '';
     const customerText=item.customer_id ? item.customer_id : '';
-    const sub=[item.label || taskText, classText, customerText, sizeText].filter(Boolean).join(' · ');
+    const pipelineText=item.is_pipeline ? '双模型推理' : '';
+    const sub=[item.label || taskText, pipelineText, classText, customerText, sizeText].filter(Boolean).join(' · ');
     const disabled=item.has_meta===false ? ' data-missing-meta="1"' : '';
-    return `<button class="model-card ${active}" data-model-name="${escapeHtml(item.name)}" title="${escapeHtml(item.meta_path || item.path || item.name)}"${disabled}><b>${escapeHtml(item.name)}</b><span>${escapeHtml(sub)}</span></button>`;
+    const extraClass=item.is_pipeline ? ' pipeline-model-card' : '';
+    return `<button class="model-card ${active}${extraClass}" data-model-name="${escapeHtml(item.name)}" title="${escapeHtml(item.pipeline_config || item.meta_path || item.path || item.name)}"${disabled}><b>${escapeHtml(item.name)}</b><span>${escapeHtml(sub)}</span></button>`;
   }).join('');
   modelList.querySelectorAll('.model-card').forEach((btn)=>{
     btn.addEventListener('click',()=>{
@@ -896,6 +901,43 @@ function getMaskOverlayAlpha(){
   return clampNumber(seg.mask_alpha,0.24,0,1);
 }
 
+function getRoiBoxFromPrediction(pred){
+  const roi=pred && pred.roi && typeof pred.roi==='object' ? pred.roi : null;
+  if(!roi || !Array.isArray(roi.bbox) || roi.bbox.length<4) return null;
+  const box=roi.bbox.map(Number);
+  return box.some((x)=>!Number.isFinite(x)) ? null : box;
+}
+function drawRoiBoxOverlay(ctx, roiBox, canvasWidth, canvasHeight){
+  if(!roiBox || roiBox.length<4) return;
+  const x1=Math.max(0, Math.min(canvasWidth, roiBox[0]));
+  const y1=Math.max(0, Math.min(canvasHeight, roiBox[1]));
+  const x2=Math.max(0, Math.min(canvasWidth, roiBox[2]));
+  const y2=Math.max(0, Math.min(canvasHeight, roiBox[3]));
+  const w=Math.max(0, x2-x1);
+  const h=Math.max(0, y2-y1);
+  if(w<2 || h<2) return;
+  ctx.save();
+  ctx.setLineDash([10,6]);
+  ctx.lineWidth=Math.max(2, Math.round(canvasWidth/420));
+  ctx.strokeStyle='#2563eb';
+  ctx.strokeRect(x1,y1,w,h);
+  ctx.setLineDash([]);
+  const label='ROI';
+  const pad=Math.max(5, Math.round(canvasWidth/220));
+  const oldFont=ctx.font;
+  ctx.font=`${Math.max(14, Math.round(canvasWidth/58))}px sans-serif`;
+  const textW=ctx.measureText(label).width;
+  const labelH=Math.max(20, Math.round(canvasWidth/48));
+  const lx=Math.max(0, Math.min(canvasWidth-(textW+pad*2), x1));
+  const ly=Math.min(canvasHeight-labelH, y2+2);
+  ctx.fillStyle='rgba(37,99,235,.92)';
+  ctx.fillRect(lx,ly,textW+pad*2,labelH);
+  ctx.fillStyle='#fff';
+  ctx.fillText(label,lx+pad,ly+pad/2);
+  ctx.font=oldFont;
+  ctx.restore();
+}
+
 function drawDetectionOverlay(predictions=[]){
   const canvas=document.getElementById('detectionOverlayCanvas');
   const img=document.getElementById('resultPreviewImg');
@@ -957,6 +999,10 @@ function drawDetectionOverlay(predictions=[]){
       }
     }
     if(!hasShape) return;
+
+    // ROI 分类双模型：绿色框是 detector bbox，蓝色虚线框是实际送入分类模型的 ROI。
+    const roiBox=getRoiBoxFromPrediction(pred);
+    if(roiBox) drawRoiBoxOverlay(ctx, roiBox, canvas.width, canvas.height);
 
     const cls=String(pred.class_name ?? pred.class ?? pred.label ?? pred.class_id ?? '目标');
     const conf=Number(pred.confidence ?? pred.score);
@@ -1022,6 +1068,47 @@ function renderClassificationResult(data, options={}){
     const normalizedTask=normalizeTaskName(task);
     const taskText=taskDisplayName(normalizedTask);
     const updatedAt=data.updated_at || new Date().toLocaleTimeString();
+
+    if(normalizedTask==='roi_classification'){
+      const rr=data.result || {};
+      const finalName=rr.class_name || data.final_label || data.final_decision || (predictions[0] && predictions[0].class_name) || '未识别';
+      const finalConf=Number(rr.confidence ?? data.final_confidence ?? (predictions[0] && predictions[0].confidence));
+      const finalConfText=Number.isFinite(finalConf) ? `${(finalConf*100).toFixed(1)}%` : (rr.confidence_percent || '--');
+      resultClassName.textContent=finalName;
+      resultConfidence.textContent=`${taskText} · ${finalConfText} · ${predictions.length} 个目标`;
+      resultLatency.textContent=`耗时 ${data.latency_ms ?? '--'} ms · 更新 ${updatedAt}`;
+
+      if(topkResult){
+        if(predictions.length){
+          topkResult.innerHTML='<b>ROI 分类明细</b>'+predictions.map((p,idx)=>{
+            const bbox=Array.isArray(p.bbox) ? p.bbox : [];
+            const center=getPredictionCenter(p);
+            const roiBox=getRoiBoxFromPrediction(p);
+            const det=p.detector || {};
+            const clsPred=p.classifier || {};
+            const detConf=Number(det.confidence);
+            const clsConf=Number(clsPred.confidence ?? p.confidence);
+            const detText=`${escapeHtml(det.class_name || '目标')} ${Number.isFinite(detConf) ? (detConf*100).toFixed(1)+'%' : '--'}`;
+            const clsText=`${escapeHtml(p.class_name || clsPred.class_name || '未识别')} ${Number.isFinite(clsConf) ? (clsConf*100).toFixed(1)+'%' : '--'}`;
+            return `<div class="target-row target-row-roi">
+              <span class="target-index">目标${idx+1}</span>
+              <span class="target-class">分类：${clsText}</span>
+              <span>检测：${detText}</span>
+              <span>检测框：${escapeHtml(formatBBox(bbox))}</span>
+              <span>ROI：${escapeHtml(formatBBox(roiBox))}</span>
+              <span>中心点：${escapeHtml(formatPoint(center))}</span>
+              <span>更新时间：${escapeHtml(updatedAt)}</span>
+            </div>`;
+          }).join('');
+        }else{
+          topkResult.innerHTML='<b>ROI 分类明细</b><div class="target-row empty">未检测到目标</div>';
+        }
+      }
+      drawDetectionOverlay(predictions);
+      if(!options.silent) showToast(`${taskText}完成：${finalName} ${finalConfText}`);
+      return;
+    }
+
     resultClassName.textContent=`耗时 ${data.latency_ms ?? '--'} ms`;
     resultConfidence.textContent=`${taskText} · 共 ${predictions.length} 个目标`;
     resultLatency.textContent=`更新 ${updatedAt}`;
@@ -1309,6 +1396,9 @@ function drawProductionOverlay(predictions=[]){
       ctx.strokeRect(x1,y1,w,h);
     }
 
+    const roiBox=getRoiBoxFromPrediction(pred);
+    if(roiBox) drawRoiBoxOverlay(ctx, roiBox, canvas.width, canvas.height);
+
     const pad=Math.max(6, Math.round(canvas.width/180));
     const textW=ctx.measureText(label).width;
     const labelH=Math.max(24, Math.round(canvas.width/36));
@@ -1383,7 +1473,12 @@ async function refreshProductionPushStatus(){
 
     if(isDetectionLikeTask(task)){
       const taskText=taskDisplayName(task);
-      if(productionResultSummary) productionResultSummary.textContent=`${taskText}到 ${preds.length} 个目标`;
+      if(task==='roi_classification'){
+        const r=latest.result || {};
+        if(productionResultSummary) productionResultSummary.textContent=`${taskText}：${r.class_name || '未识别'} ${r.confidence_percent || ''}`;
+      }else{
+        if(productionResultSummary) productionResultSummary.textContent=`${taskText}到 ${preds.length} 个目标`;
+      }
     }else{
       const r=latest.result || {};
       if(productionResultSummary) productionResultSummary.textContent=`${r.class_name || '未识别'} ${r.confidence_percent || ''}`;

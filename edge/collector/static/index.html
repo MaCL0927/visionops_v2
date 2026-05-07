@@ -170,7 +170,7 @@
             <div class="section-title">
               <div class="kicker">模型列表</div>
               <h1>选择模型</h1>
-              <p>系统已自动选择最新模型，也可以选择历史模型查看分类效果。</p>
+              <p>系统已自动选择最新模型。ROI 分类双模型会作为一个模型显示，选择后选图、拍照、实时检测和生产模式都会走双模型推理。</p>
             </div>
             <div id="modelList" class="model-list">
               <div class="empty-models">正在读取模型...</div>
@@ -183,7 +183,7 @@
               <div>
                 <div class="kicker">模型验证 / v6.7</div>
                 <h1>检测模型选图 / 拍照 / 实时验证</h1>
-                <p>系统会根据模型同名 YAML 自动识别分类/检测/旋转框/分割任务。检测与分割模型支持选图、拍照和实时验证，并在结果图上显示检测框、旋转框或分割区域。</p>
+                <p>系统会根据模型配置自动识别分类/检测/旋转框/分割/ROI分类双模型任务。ROI 分类双模型会显示 detector bbox、实际 ROI 和分类结果。</p>
               </div>
               <div class="validate-action-row">
                 <button id="runSingleImageInfer" class="big-action validate-btn compact">选图检测</button>

@@ -21,9 +21,10 @@ from fastapi.responses import HTMLResponse, FileResponse
 from .label_io import list_images, parse_yolo_label, save_yolo_label
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageDraw
 except Exception:  # pragma: no cover
     Image = None
+    ImageDraw = None
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -40,6 +41,14 @@ QUICK_SEG_MODEL = os.environ.get("VISIONOPS_QUICK_SEG_MODEL", "models/pretrained
 QUICK_YOLO_CMD = os.environ.get("VISIONOPS_QUICK_YOLO_CMD", "yolo")
 AUTO_LABEL_CONF = float(os.environ.get("VISIONOPS_QUICK_AUTO_CONF", "0.25"))
 QUICK_TRAIN_MIN_PER_CLASS = int(os.environ.get("VISIONOPS_QUICK_TRAIN_MIN_PER_CLASS", "3"))
+
+# ROI classification 数据制作：检测模型裁剪目标整体框，再由人工给 ROI 分配分类标签。
+ROI_CLS_RAW_DIR = Path(os.environ.get("VISIONOPS_ROI_CLS_RAW_DIR", str(DATA_DIR / "raw_classification")))
+ROI_CLS_SESSIONS_DIR = Path(os.environ.get("VISIONOPS_ROI_CLS_SESSIONS_DIR", str(DATA_DIR / "roi_classification_sessions")))
+ROI_CLS_DEFAULT_DET_MODEL = os.environ.get("VISIONOPS_ROI_CLS_DEFAULT_DET_MODEL", "models/checkpoints_detection/best.pt")
+ROI_CLS_DEFAULT_CONF = float(os.environ.get("VISIONOPS_ROI_CLS_DEFAULT_CONF", "0.35"))
+ROI_CLS_DEFAULT_PADDING = float(os.environ.get("VISIONOPS_ROI_CLS_DEFAULT_PADDING", "0.05"))
+ROI_CLS_MAX_CANDIDATES = int(os.environ.get("VISIONOPS_ROI_CLS_MAX_CANDIDATES", "0"))
 
 router = APIRouter()
 
@@ -396,6 +405,556 @@ def run_shell_command(cmd: str, log_file) -> None:
     code = proc.wait()
     if code != 0:
         raise RuntimeError(f"命令执行失败，returncode={code}")
+
+
+
+# -----------------------------------------------------------------------------
+# ROI classification 数据制作
+# -----------------------------------------------------------------------------
+
+
+def resolve_project_path(value: str | Path) -> Path:
+    """把前端传入的相对路径统一解析到项目根目录下。"""
+    p = Path(str(value)).expanduser()
+    if not p.is_absolute():
+        p = PROJECT_ROOT / p
+    return p.resolve()
+
+
+def safe_label_name(name: str) -> str:
+    """分类目录名安全化，防止空类别和路径穿越。"""
+    cleaned = str(name).strip().replace("\\", "_").replace("/", "_")
+    cleaned = cleaned.replace("..", "_")
+    cleaned = "_".join(cleaned.split())
+    if not cleaned:
+        raise ValueError("类别名不能为空")
+    return cleaned
+
+
+def roi_cls_raw_dir() -> Path:
+    p = ROI_CLS_RAW_DIR
+    if not p.is_absolute():
+        p = PROJECT_ROOT / p
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def reset_roi_cls_raw_dir() -> Path:
+    """清空 data/raw_classification，避免新一轮 ROI 分类数据和旧数据混在一起。"""
+    root = roi_cls_raw_dir()
+    for child in root.iterdir():
+        if child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def roi_cls_sessions_dir() -> Path:
+    p = ROI_CLS_SESSIONS_DIR
+    if not p.is_absolute():
+        p = PROJECT_ROOT / p
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def reset_roi_cls_sessions_dir() -> Path:
+    """清空 data/roi_classification_sessions，避免每次生成都累积历史 session 文件夹。"""
+    root = roi_cls_sessions_dir()
+    for child in root.iterdir():
+        if child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def roi_cls_manifest_path(session_id: str) -> Path:
+    sid = Path(str(session_id)).name
+    return roi_cls_sessions_dir() / sid / "manifest.json"
+
+
+def load_roi_cls_manifest(session_id: str) -> dict[str, Any]:
+    path = roi_cls_manifest_path(session_id)
+    data = read_json(path, default=None)
+    if not data:
+        raise FileNotFoundError(f"未找到 ROI 分类 session: {session_id}")
+    return data
+
+
+def save_roi_cls_manifest(data: dict[str, Any]) -> None:
+    session_id = str(data.get("session_id") or "")
+    if not session_id:
+        raise ValueError("manifest 缺少 session_id")
+    data["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    write_json(roi_cls_manifest_path(session_id), data)
+
+
+def list_roi_cls_classes() -> list[dict[str, Any]]:
+    root = roi_cls_raw_dir()
+    classes: list[dict[str, Any]] = []
+    for class_dir in sorted(root.iterdir()):
+        if not class_dir.is_dir():
+            continue
+        count = sum(1 for p in class_dir.rglob("*") if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".webp"})
+        classes.append({"name": class_dir.name, "count": count})
+    return classes
+
+
+def create_roi_cls_class(name: str) -> dict[str, Any]:
+    label = safe_label_name(name)
+    class_dir = roi_cls_raw_dir() / label
+    class_dir.mkdir(parents=True, exist_ok=True)
+    return {"name": label, "path": rel(class_dir), "count": len(list(class_dir.glob("*")))}
+
+
+def list_roi_cls_detectors() -> list[dict[str, Any]]:
+    candidates: list[Path] = []
+    default_model = resolve_project_path(ROI_CLS_DEFAULT_DET_MODEL)
+    candidates.append(default_model)
+
+    # ROI 分类数据制作只使用正式 detection pipeline 的检测模型。
+    # 不再扫描 data/raw_collected/ 下的 quick_train 临时模型，避免误选临时/过期模型。
+    checkpoints_dir = PROJECT_ROOT / "models" / "checkpoints_detection"
+    if checkpoints_dir.exists():
+        candidates.extend(checkpoints_dir.glob("*.pt"))
+        candidates.extend(checkpoints_dir.rglob("*.pt"))
+
+    seen: set[str] = set()
+    result: list[dict[str, Any]] = []
+    for path in candidates:
+        try:
+            p = path.resolve()
+        except Exception:
+            continue
+        key = str(p)
+        if key in seen or not p.exists() or not p.is_file():
+            continue
+        seen.add(key)
+        result.append({
+            "name": p.name,
+            "path": rel(p),
+            "mtime": datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+        })
+    result.sort(key=lambda x: x.get("mtime", ""), reverse=True)
+    return result
+
+
+def list_roi_cls_sessions(limit: int = 20) -> list[dict[str, Any]]:
+    root = roi_cls_sessions_dir()
+    items: list[dict[str, Any]] = []
+    for manifest_path in root.glob("*/manifest.json"):
+        data = read_json(manifest_path, default={}) or {}
+        session_id = data.get("session_id") or manifest_path.parent.name
+        candidates = data.get("items", []) if isinstance(data.get("items"), list) else []
+        labeled = sum(1 for x in candidates if x.get("status") == "labeled")
+        items.append({
+            "session_id": session_id,
+            "batch_id": data.get("batch_id", ""),
+            "created_at": data.get("created_at", ""),
+            "updated_at": data.get("updated_at", ""),
+            "total": len(candidates),
+            "labeled": labeled,
+            "path": rel(manifest_path.parent),
+        })
+    items.sort(key=lambda x: x.get("updated_at") or x.get("created_at") or "", reverse=True)
+    return items[:limit]
+
+
+def normalize_model_names(names: Any) -> dict[int, str]:
+    if isinstance(names, dict):
+        out: dict[int, str] = {}
+        for k, v in names.items():
+            try:
+                out[int(k)] = str(v)
+            except Exception:
+                continue
+        return out
+    if isinstance(names, list):
+        return {i: str(v) for i, v in enumerate(names)}
+    return {}
+
+
+def pick_detection_box(
+    yolo_result: Any,
+    image_w: int,
+    image_h: int,
+    target_class_id: int | None,
+    select_policy: str,
+) -> tuple[list[float], float, int] | None:
+    if yolo_result.boxes is None or len(yolo_result.boxes) == 0:
+        return None
+
+    xyxy = yolo_result.boxes.xyxy.cpu().numpy()
+    conf = yolo_result.boxes.conf.cpu().numpy()
+    cls = yolo_result.boxes.cls.cpu().numpy().astype(int)
+    frame_area = max(1.0, float(image_w * image_h))
+
+    candidates: list[tuple[float, list[float], float, int]] = []
+    for i in range(len(xyxy)):
+        class_id = int(cls[i])
+        if target_class_id is not None and class_id != target_class_id:
+            continue
+        x1, y1, x2, y2 = [float(v) for v in xyxy[i]]
+        bw = max(0.0, x2 - x1)
+        bh = max(0.0, y2 - y1)
+        area = bw * bh
+        if area <= 1:
+            continue
+        if select_policy == "highest_conf":
+            score = float(conf[i])
+        elif select_policy == "largest_area":
+            score = area
+        else:
+            score = float(conf[i]) * 0.7 + min(area / frame_area, 1.0) * 0.3
+        candidates.append((score, [x1, y1, x2, y2], float(conf[i]), class_id))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    _, box, det_conf, det_cls = candidates[0]
+    return box, det_conf, det_cls
+
+
+def crop_roi_with_padding(
+    image_path: Path,
+    bbox: list[float],
+    padding_ratio: float,
+    crop_path: Path,
+    preview_path: Path,
+) -> dict[str, Any]:
+    if Image is None:
+        raise RuntimeError("Pillow 未安装，无法裁剪 ROI。请安装 pillow。")
+
+    with Image.open(image_path) as im:
+        im = im.convert("RGB")
+        w, h = im.size
+        x1, y1, x2, y2 = bbox
+        bw = max(1.0, x2 - x1)
+        bh = max(1.0, y2 - y1)
+        px = bw * padding_ratio
+        py = bh * padding_ratio
+        rx1 = max(0, int(round(x1 - px)))
+        ry1 = max(0, int(round(y1 - py)))
+        rx2 = min(w, int(round(x2 + px)))
+        ry2 = min(h, int(round(y2 + py)))
+        if rx2 <= rx1 or ry2 <= ry1:
+            raise RuntimeError(f"ROI 无效: {bbox}")
+
+        crop = im.crop((rx1, ry1, rx2, ry2))
+        crop_path.parent.mkdir(parents=True, exist_ok=True)
+        crop.save(crop_path, quality=95)
+
+        preview_path.parent.mkdir(parents=True, exist_ok=True)
+        preview = im.copy()
+        if ImageDraw is not None:
+            draw = ImageDraw.Draw(preview)
+            draw.rectangle((int(x1), int(y1), int(x2), int(y2)), outline=(0, 255, 0), width=4)
+            draw.rectangle((rx1, ry1, rx2, ry2), outline=(255, 0, 0), width=3)
+        preview.thumbnail((960, 720))
+        preview.save(preview_path, quality=90)
+
+    return {
+        "image_size": [w, h],
+        "roi_bbox": [rx1, ry1, rx2, ry2],
+        "roi_size": [rx2 - rx1, ry2 - ry1],
+    }
+
+
+def _roi_cls_build_worker(log_file, update, batch_dir: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        from ultralytics import YOLO
+    except Exception as exc:
+        raise RuntimeError(f"无法导入 ultralytics.YOLO，请确认服务端环境已安装 ultralytics: {exc}")
+
+    _, images_dir, _, _, _ = get_batch_paths()
+    images = list_images(images_dir)
+    if not images:
+        raise RuntimeError(f"未找到图片: {images_dir}")
+
+    model_value = payload.get("detector_model") or ROI_CLS_DEFAULT_DET_MODEL
+    model_path = resolve_project_path(model_value)
+    if not model_path.exists():
+        raise RuntimeError(f"检测模型不存在: {model_path}")
+
+    update(6, "正在清空旧的 ROI 分类训练数据和历史候选 session")
+    raw_dir = reset_roi_cls_raw_dir()
+    sessions_dir = reset_roi_cls_sessions_dir()
+    log_file.write(f"[INFO] reset raw_classification_dir={raw_dir}\n")
+    log_file.write(f"[INFO] reset roi_classification_sessions_dir={sessions_dir}\n")
+    log_file.flush()
+
+    conf = float(payload.get("conf_threshold", ROI_CLS_DEFAULT_CONF))
+    padding_ratio = float(payload.get("padding_ratio", ROI_CLS_DEFAULT_PADDING))
+    select_policy = str(payload.get("select_policy", "conf_area"))
+    target_class_id_raw = payload.get("target_class_id", None)
+    target_class_name = str(payload.get("target_class_name") or "").strip()
+    target_class_id: int | None = None
+    if target_class_id_raw not in {None, "", "null"}:
+        target_class_id = int(target_class_id_raw)
+
+    # 每次只保留一个当前 ROI 候选 session，避免 data/roi_classification_sessions 下不断新增历史文件夹。
+    session_id = "current"
+    session_dir = roi_cls_sessions_dir() / session_id
+    candidates_dir = session_dir / "candidates"
+    previews_dir = session_dir / "previews"
+    candidates_dir.mkdir(parents=True, exist_ok=True)
+    previews_dir.mkdir(parents=True, exist_ok=True)
+
+    log_file.write(f"[INFO] session_id={session_id}\n")
+    log_file.write(f"[INFO] images_dir={images_dir}\n")
+    log_file.write(f"[INFO] detector_model={model_path}\n")
+    log_file.flush()
+
+    update(10, "正在加载检测模型")
+    model = YOLO(str(model_path))
+    model_names = normalize_model_names(getattr(model, "names", {}))
+    # 目标类别名优先级高于目标类别 ID：两者同时填写时，以类别名为准。
+    if target_class_name:
+        inv = {v: k for k, v in model_names.items()}
+        if target_class_name not in inv:
+            raise RuntimeError(f"检测模型中找不到类别 {target_class_name}，当前类别: {model_names}")
+        target_class_id = inv[target_class_name]
+
+    items: list[dict[str, Any]] = []
+    miss_count = 0
+    max_candidates = ROI_CLS_MAX_CANDIDATES if ROI_CLS_MAX_CANDIDATES > 0 else len(images)
+
+    update(15, f"开始检测并裁剪 ROI，共 {len(images)} 张")
+    for idx, img_path in enumerate(images):
+        if len(items) >= max_candidates:
+            break
+        progress = 15 + int((idx + 1) / max(1, len(images)) * 75)
+        if idx % 5 == 0:
+            update(progress, f"正在处理 {idx + 1}/{len(images)}: {img_path.name}")
+
+        try:
+            image_w, image_h = get_image_size(img_path)
+            result = model.predict(str(img_path), conf=conf, verbose=False)[0]
+            picked = pick_detection_box(
+                yolo_result=result,
+                image_w=image_w,
+                image_h=image_h,
+                target_class_id=target_class_id,
+                select_policy=select_policy,
+            )
+            if picked is None:
+                miss_count += 1
+                continue
+
+            bbox, det_conf, det_cls = picked
+            item_id = f"crop_{len(items) + 1:06d}"
+            crop_path = candidates_dir / f"{item_id}.jpg"
+            preview_path = previews_dir / f"{item_id}.jpg"
+            crop_info = crop_roi_with_padding(
+                image_path=img_path,
+                bbox=bbox,
+                padding_ratio=padding_ratio,
+                crop_path=crop_path,
+                preview_path=preview_path,
+            )
+            items.append({
+                "id": item_id,
+                "status": "pending",
+                "source_image": rel(img_path),
+                "source_filename": img_path.name,
+                "crop_path": rel(crop_path),
+                "preview_path": rel(preview_path),
+                "bbox": [round(float(v), 2) for v in bbox],
+                "roi_bbox": crop_info["roi_bbox"],
+                "roi_size": crop_info["roi_size"],
+                "image_size": crop_info["image_size"],
+                "det_conf": float(det_conf),
+                "det_class_id": int(det_cls),
+                "det_class_name": model_names.get(int(det_cls), str(det_cls)),
+                "assigned_label": "",
+                "exported_path": "",
+            })
+        except Exception as exc:
+            log_file.write(f"[WARN] {img_path.name}: {exc}\n")
+            log_file.flush()
+            continue
+
+    manifest = {
+        "session_id": session_id,
+        "task_type": "roi_classification_data",
+        "batch_id": batch_dir.name,
+        "images_dir": rel(images_dir),
+        "detector_model": rel(model_path),
+        "target_class_id": target_class_id,
+        "target_class_name": target_class_name,
+        "conf_threshold": conf,
+        "padding_ratio": padding_ratio,
+        "select_policy": select_policy,
+        "raw_classification_dir": rel(roi_cls_raw_dir()),
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "total_images": len(images),
+        "candidate_count": len(items),
+        "miss_count": miss_count,
+        "items": items,
+    }
+    write_json(session_dir / "manifest.json", manifest)
+    update(95, "正在写入 ROI 分类候选 manifest")
+    return {
+        "message": f"ROI 候选生成完成：{len(items)} 个，未检测到目标 {miss_count} 张",
+        "session_id": session_id,
+        "candidate_count": len(items),
+        "miss_count": miss_count,
+        "manifest_path": rel(session_dir / "manifest.json"),
+    }
+
+
+@router.get("/api/annotator/roi-cls/session")
+def roi_cls_session_info() -> dict[str, Any]:
+    try:
+        batch_dir, images_dir, _, _, _ = get_batch_paths()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {
+        "batch_id": batch_dir.name,
+        "images_dir": rel(images_dir),
+        "image_count": len(list_images(images_dir)),
+        "raw_classification_dir": rel(roi_cls_raw_dir()),
+        "sessions_dir": rel(roi_cls_sessions_dir()),
+        "detectors": list_roi_cls_detectors(),
+        "classes": list_roi_cls_classes(),
+        "sessions": list_roi_cls_sessions(),
+        "defaults": {
+            "detector_model": ROI_CLS_DEFAULT_DET_MODEL,
+            "conf_threshold": ROI_CLS_DEFAULT_CONF,
+            "padding_ratio": ROI_CLS_DEFAULT_PADDING,
+            "select_policy": "conf_area",
+        },
+    }
+
+
+@router.post("/api/annotator/roi-cls/classes")
+def roi_cls_add_class(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        created = create_roi_cls_class(str(payload.get("class_name") or payload.get("label") or ""))
+        return {"message": "类别已创建", "class": created, "classes": list_roi_cls_classes()}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/api/annotator/roi-cls/build-candidates")
+def roi_cls_build_candidates(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        batch_dir = get_current_batch_dir()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    job_id = quick_jobs.start(batch_dir, "roi-cls-build-candidates", _roi_cls_build_worker, batch_dir, payload)
+    return {"job_id": job_id, "message": "ROI 分类候选生成任务已开始"}
+
+
+@router.get("/api/annotator/roi-cls/sessions/{session_id}")
+def roi_cls_get_session(session_id: str) -> dict[str, Any]:
+    try:
+        data = load_roi_cls_manifest(session_id)
+        return {"manifest": data, "classes": list_roi_cls_classes()}
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get("/api/annotator/roi-cls/file/{session_id}/{kind}/{filename}")
+def roi_cls_file(session_id: str, kind: str, filename: str) -> FileResponse:
+    kind = Path(kind).name
+    filename = Path(filename).name
+    if kind not in {"candidates", "previews"}:
+        raise HTTPException(status_code=400, detail=f"不支持的文件类型: {kind}")
+    path = roi_cls_sessions_dir() / Path(session_id).name / kind / filename
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"文件不存在: {rel(path)}")
+    return FileResponse(path)
+
+
+@router.post("/api/annotator/roi-cls/label")
+def roi_cls_label_candidate(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        session_id = str(payload.get("session_id") or "")
+        item_id = str(payload.get("item_id") or "")
+        label = safe_label_name(str(payload.get("label") or ""))
+        if not session_id or not item_id:
+            raise ValueError("session_id 和 item_id 不能为空")
+
+        create_roi_cls_class(label)
+        data = load_roi_cls_manifest(session_id)
+        items = data.get("items", [])
+        item = next((x for x in items if x.get("id") == item_id), None)
+        if item is None:
+            raise FileNotFoundError(f"未找到候选项: {item_id}")
+        crop_path = PROJECT_ROOT / item.get("crop_path", "")
+        if not crop_path.exists():
+            raise FileNotFoundError(f"ROI 图片不存在: {crop_path}")
+
+        source_stem = Path(str(item.get("source_filename") or item_id)).stem
+        dst_dir = roi_cls_raw_dir() / label
+        dst_dir.mkdir(parents=True, exist_ok=True)
+        dst_name = f"{session_id}_{item_id}_{source_stem}{crop_path.suffix.lower()}"
+        dst_path = dst_dir / dst_name
+
+        # 如果该候选之前已经被分到其他类别，重新选择类别时要把旧类别中的样本删除，
+        # 避免同一张 ROI 同时出现在多个分类目录里。
+        old_exported = str(item.get("exported_path") or "").strip()
+        if old_exported:
+            old_path = PROJECT_ROOT / old_exported if not Path(old_exported).is_absolute() else Path(old_exported)
+            try:
+                if old_path.exists() and old_path.resolve() != dst_path.resolve():
+                    old_path.unlink()
+            except Exception:
+                pass
+        for existing in roi_cls_raw_dir().glob(f"*/{dst_name}"):
+            try:
+                if existing.resolve() != dst_path.resolve():
+                    existing.unlink()
+            except Exception:
+                pass
+
+        shutil.copy2(crop_path, dst_path)
+
+        item["status"] = "labeled"
+        item["assigned_label"] = label
+        item["exported_path"] = rel(dst_path)
+        item["labeled_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        save_roi_cls_manifest(data)
+        return {
+            "message": f"已保存为分类样本: {label}",
+            "item": item,
+            "classes": list_roi_cls_classes(),
+            "manifest": data,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/api/annotator/roi-cls/skip")
+def roi_cls_skip_candidate(payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        session_id = str(payload.get("session_id") or "")
+        item_id = str(payload.get("item_id") or "")
+        data = load_roi_cls_manifest(session_id)
+        item = next((x for x in data.get("items", []) if x.get("id") == item_id), None)
+        if item is None:
+            raise FileNotFoundError(f"未找到候选项: {item_id}")
+        old_exported = str(item.get("exported_path") or "").strip()
+        if old_exported:
+            old_path = PROJECT_ROOT / old_exported if not Path(old_exported).is_absolute() else Path(old_exported)
+            try:
+                if old_path.exists():
+                    old_path.unlink()
+            except Exception:
+                pass
+        item["status"] = "skipped"
+        item["assigned_label"] = ""
+        item["exported_path"] = ""
+        item["skipped_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        save_roi_cls_manifest(data)
+        return {"message": "已跳过", "item": item, "manifest": data, "classes": list_roi_cls_classes()}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @router.get("/annotator", response_class=HTMLResponse)
@@ -774,11 +1333,62 @@ ANNOTATOR_HTML = r'''
       text-shadow:0 1px 2px rgba(255,255,255,.85);
     }
     .assist-panel { margin-top:18px; padding-top:14px; border-top:1px solid #e5e7eb; }
+    .roi-launch-panel { margin-top:18px; padding-top:14px; border-top:1px solid #e5e7eb; }
+    .roi-modal { width:min(1500px, 98vw); max-height:96vh; overflow:hidden; padding:0; display:flex; flex-direction:column; }
+    .roi-modal-header { display:flex; align-items:center; justify-content:space-between; gap:14px; padding:20px 24px; border-bottom:1px solid #e5e7eb; }
+    .roi-modal-header h2 { margin:0; font-size:26px; }
+    .roi-modal-header .muted { font-size:15px; }
+    .roi-modal-body { display:grid; grid-template-columns:390px minmax(0,1fr); gap:0; min-height:0; overflow:hidden; }
+    .roi-modal-left { padding:22px; border-right:1px solid #e5e7eb; overflow:auto; max-height:calc(96vh - 84px); }
+    .roi-modal-main { padding:22px 24px; overflow:auto; max-height:calc(96vh - 84px); }
+    .roi-modal h3, .roi-modal .section-title { font-size:19px; }
+    .roi-modal .muted, .roi-modal .hint, .roi-modal .quick-msg, .roi-modal .roi-small { font-size:15px; }
+    .roi-modal button, .roi-modal select, .roi-modal input { font-size:16px; padding:11px 13px; }
+    .roi-preview { width:100%; max-height:360px; object-fit:contain; background:#f8fafc; border:1px solid #e5e7eb; border-radius:12px; margin:8px 0; }
+    .roi-crop { width:100%; max-height:260px; object-fit:contain; background:#111827; border-radius:12px; margin:8px 0; }
+    .roi-class-buttons { display:flex; flex-wrap:wrap; gap:10px; margin:10px 0; }
+    .roi-class-buttons button { background:#eef2ff; color:#3730a3; border:1px solid #c7d2fe; padding:10px 12px; }
+    .roi-small { font-size:15px; color:#475569; line-height:1.6; white-space:pre-wrap; }
+    .roi-nav { display:flex; gap:10px; margin:10px 0; }
+    .roi-modal-grid { display:grid; grid-template-columns:minmax(420px, 1.05fr) minmax(320px, .95fr); gap:18px; align-items:start; }
+    .roi-field-label { margin:12px 0 6px; font-size:15px; font-weight:800; color:#111827; }
+    .roi-param-note { margin:6px 0 0; color:#64748b; font-size:13px; line-height:1.45; }
+    .roi-class-card { background:#f8fafc; border:1px solid #e5e7eb; border-radius:14px; padding:14px; margin-bottom:14px; }
     .progress { height:14px; background:#e5e7eb; border-radius:999px; overflow:hidden; margin-top:10px; }
     .progress-inner { height:100%; width:0%; background:#2563eb; transition:width .3s ease; }
     .quick-msg { margin-top:8px; font-size:12px; color:#475569; line-height:1.45; }
     .modal-mask { display:none; position:fixed; inset:0; background:rgba(15,23,42,.45); z-index:10; align-items:center; justify-content:center; }
     .modal { width:420px; background:#fff; border-radius:16px; padding:18px; box-shadow:0 20px 60px rgba(15,23,42,.3); }
+
+    /* ROI 分类数据制作弹窗必须覆盖通用 .modal 的 420px 宽度。
+       上一版 .modal 写在 .roi-modal 后面，导致 .roi-modal 被压回 420px，
+       右侧审核区只剩很窄一条。这里用更高优先级的 .modal.roi-modal 修正。 */
+    .modal.roi-modal {
+      width:min(1500px, 98vw); height:min(1050px, 96vh); max-height:96vh;
+      padding:0; display:flex; flex-direction:column; overflow:hidden;
+    }
+    .modal.roi-modal .roi-modal-body {
+      flex:1; min-height:0; display:grid;
+      grid-template-columns:minmax(380px, 420px) minmax(760px, 1fr);
+      overflow:hidden;
+    }
+    .modal.roi-modal .roi-modal-left,
+    .modal.roi-modal .roi-modal-main {
+      max-height:none; min-height:0; overflow:auto;
+    }
+    .modal.roi-modal .roi-preview { max-height:360px; }
+    .modal.roi-modal .roi-crop { max-height:260px; }
+    @media (max-width: 1180px) {
+      .modal.roi-modal { width:98vw; height:96vh; }
+      .modal.roi-modal .roi-modal-body { grid-template-columns:360px minmax(0,1fr); }
+      .roi-modal-grid { grid-template-columns:1fr; }
+    }
+    @media (max-width: 880px) {
+      .modal.roi-modal .roi-modal-body { grid-template-columns:1fr; overflow:auto; }
+      .modal.roi-modal .roi-modal-left,
+      .modal.roi-modal .roi-modal-main { overflow:visible; max-height:none; }
+    }
+
     .class-grid { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; }
     .class-chip { background:#eef2ff; color:#3730a3; border:1px solid #c7d2fe; }
 
@@ -850,6 +1460,14 @@ ANNOTATOR_HTML = r'''
         <div id="quickMsg" class="quick-msg">状态：未开始</div>
       </div>
 
+      <div class="roi-launch-panel">
+        <h3>ROI 分类数据制作</h3>
+        <div class="hint">
+          用 detection 模型把当前 batch 的目标整体框裁剪成分类 ROI，再人工分配类别，输出到 data/raw_classification/&lt;类别&gt;/。
+        </div>
+        <button class="green big" onclick="openRoiModal()">打开 ROI 分类数据制作</button>
+      </div>
+
       <h3>当前标注</h3>
       <div id="boxList" class="boxlist"></div>
     </div>
@@ -875,6 +1493,99 @@ ANNOTATOR_HTML = r'''
     </div>
   </div>
 
+  <div id="roiClsModal" class="modal-mask">
+    <div class="modal roi-modal">
+      <div class="roi-modal-header">
+        <div>
+          <h2>ROI 分类数据制作</h2>
+          <div class="muted">第一版 roi_classification：检测框整体裁剪 → 人工选择分类类别 → 保存到 data/raw_classification。</div>
+        </div>
+        <button class="gray" onclick="closeRoiModal()">关闭</button>
+      </div>
+
+      <div class="roi-modal-body">
+        <div class="roi-modal-left">
+          <div class="hint">
+            生成候选时会先清空 <b>data/raw_classification/</b> 下已有数据，并删除旧的 ROI 候选 session，避免新旧分类样本混在一起。请确认旧数据不再需要后再生成。
+          </div>
+
+          <div class="section-title">1. 检测模型</div>
+          <select id="roiDetectorSelect"></select>
+
+          <div class="section-title">2. 检测与裁剪参数</div>
+          <div class="row">
+            <div style="width:48%">
+              <div class="roi-field-label">目标类别 ID</div>
+              <input id="roiTargetClassId" placeholder="可空，例如 0" />
+              <div class="roi-param-note">只裁剪该检测类别；留空表示所有类别都可作为候选。</div>
+            </div>
+            <div style="width:48%">
+              <div class="roi-field-label">目标类别名</div>
+              <input id="roiTargetClassName" placeholder="可空，例如 tube" />
+              <div class="roi-param-note">和类别 ID 二选一即可；同时填写时优先使用类别名。</div>
+            </div>
+          </div>
+          <div class="row">
+            <div style="width:48%">
+              <div class="roi-field-label">检测阈值 conf</div>
+              <input id="roiConf" placeholder="默认 0.35" />
+              <div class="roi-param-note">低于该置信度的检测框不会参与裁剪；数值越高，候选越少但更可靠。</div>
+            </div>
+            <div style="width:48%">
+              <div class="roi-field-label">裁剪扩边 padding</div>
+              <input id="roiPadding" placeholder="默认 0.05，可设 0" />
+              <div class="roi-param-note">0 表示严格按检测框裁剪；0.05 表示四周各扩展框宽/高的 5%。</div>
+            </div>
+          </div>
+          <div class="roi-field-label">多框选择策略</div>
+          <select id="roiSelectPolicy">
+            <option value="conf_area">置信度+面积</option>
+            <option value="highest_conf">最高置信度</option>
+            <option value="largest_area">最大面积</option>
+          </select>
+          <div class="roi-param-note">每张图只取一个目标框作为 ROI 候选；如果画面中只有一个目标，默认“置信度+面积”即可。</div>
+          <div style="height:14px"></div>
+          <button class="green big" onclick="buildRoiCandidates()">生成 ROI 候选</button>
+          <div class="progress"><div id="roiProgress" class="progress-inner"></div></div>
+          <div id="roiMsg" class="quick-msg">状态：未开始</div>
+        </div>
+
+        <div class="roi-modal-main">
+          <div class="roi-class-card">
+            <div class="section-title" style="margin-top:0">3. 分类类别</div>
+            <div class="muted">点击类别按钮即可把当前 ROI 保存到 data/raw_classification/&lt;类别&gt;/。类别不限于 ok/ng，可按缺陷类型新增。</div>
+            <div id="roiClassButtons" class="roi-class-buttons"></div>
+            <div class="row">
+              <input id="roiNewClassInput" placeholder="新增分类类别，例如 ok / gap_large / scratch" style="width:70%" />
+              <button class="gray" onclick="addRoiClass()">新增</button>
+            </div>
+          </div>
+
+          <div class="section-title">4. 候选 ROI 审核</div>
+          <div id="roiCandidateInfo" class="roi-small">暂无候选。</div>
+          <div class="roi-modal-grid">
+            <div>
+              <div class="muted">原图预览：绿色为检测框，红色为实际裁剪 ROI</div>
+              <img id="roiPreviewImg" class="roi-preview" style="display:none" />
+            </div>
+            <div>
+              <div class="muted">裁剪后的分类 ROI（已限制显示高度，实际训练图仍为原始裁剪尺寸）</div>
+              <img id="roiCropImg" class="roi-crop" style="display:none" />
+            </div>
+          </div>
+          <div class="roi-nav">
+            <button class="gray" onclick="prevRoiCandidate()">上一张</button>
+            <button class="gray" onclick="nextRoiCandidate()">下一张</button>
+            <button class="orange" onclick="skipRoiCandidate()">跳过</button>
+          </div>
+          <div class="hint">
+            先确认裁剪 ROI 是否完整覆盖目标，再点击上方类别按钮完成归类。分类类别不限制为 ok/ng，可以按实际缺陷类型新增。
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
 <script>
 let session = null;
 let currentIndex = 0;
@@ -893,6 +1604,11 @@ let pendingAnnotation = null;
 let baseScale = 1, zoom = 1, scale = 1, offsetX = 0, offsetY = 0;
 let mouseCanvas = null;
 let quickJobTimer = null;
+let roiJobTimer = null;
+let roiInfo = null;
+let roiSession = null;
+let roiCandidates = [];
+let roiCurrentIndex = 0;
 let labelSource = 'none';
 let dirty = false;
 
@@ -914,6 +1630,7 @@ async function init() {
   renderClassSummary();
   resizeCanvas();
   await loadImage(0);
+  await loadRoiClsInfo();
 }
 
 async function refreshSession() {
@@ -1188,6 +1905,220 @@ async function autoLabelRemaining() {
   await startQuickJob('/api/annotator/auto-label-remaining', '预标注剩余图片');
 }
 
+function setRoiProgress(percent, text) {
+  const bar = document.getElementById('roiProgress');
+  const msg = document.getElementById('roiMsg');
+  if (bar) bar.style.width = Math.max(0, Math.min(100, percent || 0)) + '%';
+  if (msg) msg.textContent = text || '';
+}
+
+async function openRoiModal() {
+  const modal = document.getElementById('roiClsModal');
+  if (modal) modal.style.display = 'flex';
+  await loadRoiClsInfo();
+}
+
+function closeRoiModal() {
+  const modal = document.getElementById('roiClsModal');
+  if (modal) modal.style.display = 'none';
+}
+
+async function loadRoiClsInfo() {
+  const res = await fetch('/api/annotator/roi-cls/session');
+  const data = await res.json();
+  if (!res.ok) {
+    setRoiProgress(0, data.detail || 'ROI 分类数据制作信息加载失败');
+    return;
+  }
+  roiInfo = data;
+  renderRoiDetectorOptions();
+  renderRoiClassButtons();
+  if (Array.isArray(data.sessions) && data.sessions.length) {
+    await loadRoiSession(data.sessions[0].session_id, false);
+  } else {
+    renderRoiCandidate();
+  }
+}
+
+function renderRoiDetectorOptions() {
+  const sel = document.getElementById('roiDetectorSelect');
+  if (!sel || !roiInfo) return;
+  const detectors = Array.isArray(roiInfo.detectors) ? roiInfo.detectors : [];
+  if (!detectors.length) {
+    sel.innerHTML = '<option value="">未发现检测模型，请先在 models/checkpoints_detection/ 下放置 .pt 模型</option>';
+  } else {
+    sel.innerHTML = detectors.map(m => `<option value="${escapeHtml(m.path)}">${escapeHtml(m.path)}</option>`).join('');
+  }
+  const d = roiInfo.defaults || {};
+  document.getElementById('roiConf').value = d.conf_threshold || '0.35';
+  document.getElementById('roiPadding').value = d.padding_ratio || '0.05';
+  document.getElementById('roiSelectPolicy').value = d.select_policy || 'conf_area';
+}
+
+function escapeHtml(s) {
+  return String(s || '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+}
+
+function renderRoiClassButtons() {
+  const el = document.getElementById('roiClassButtons');
+  if (!el) return;
+  const classes = roiInfo && Array.isArray(roiInfo.classes) ? roiInfo.classes : [];
+  if (!classes.length) {
+    el.innerHTML = '<div class="muted">暂无分类类别。先新增 ok / ng 或其他具体类别。</div>';
+    return;
+  }
+  el.innerHTML = classes.map(c =>
+    `<button onclick="labelRoiCandidate('${escapeJs(c.name)}')">${escapeHtml(c.name)} (${c.count || 0})</button>`
+  ).join('');
+}
+
+function escapeJs(s) {
+  return String(s || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+async function addRoiClass() {
+  const input = document.getElementById('roiNewClassInput');
+  const name = input.value.trim();
+  if (!name) { alert('请输入类别名'); return; }
+  const res = await fetch('/api/annotator/roi-cls/classes', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({class_name:name})
+  });
+  const data = await res.json();
+  if (!res.ok) { alert(data.detail || '新增类别失败'); return; }
+  input.value = '';
+  await loadRoiClsInfo();
+  setRoiProgress(0, '类别已新增：' + data.class.name);
+}
+
+async function buildRoiCandidates() {
+  const detectorModel = document.getElementById('roiDetectorSelect').value;
+  if (!detectorModel) { alert('请先选择检测模型。模型需要位于 models/checkpoints_detection/ 下。'); return; }
+
+  const ok = confirm('将使用 detection 模型对当前 batch 的 all_images 批量检测，并把检测框整体裁剪为 ROI 候选。\n\n注意：开始生成前会清空 data/raw_classification/ 下已有分类数据，并删除旧的 ROI 候选 session，避免新旧样本混乱。继续？');
+  if (!ok) return;
+
+  const payload = {
+    detector_model: detectorModel,
+    target_class_id: document.getElementById('roiTargetClassId').value.trim(),
+    target_class_name: document.getElementById('roiTargetClassName').value.trim(),
+    conf_threshold: document.getElementById('roiConf').value.trim() || 0.35,
+    padding_ratio: document.getElementById('roiPadding').value.trim() || 0.05,
+    select_policy: document.getElementById('roiSelectPolicy').value || 'conf_area'
+  };
+  if (payload.target_class_id === '') payload.target_class_id = null;
+
+  const res = await fetch('/api/annotator/roi-cls/build-candidates', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)
+  });
+  const data = await res.json();
+  if (!res.ok) { alert(data.detail || '生成 ROI 候选失败'); return; }
+  setRoiProgress(5, data.message + '\njob_id=' + data.job_id);
+  if (roiJobTimer) clearInterval(roiJobTimer);
+  roiJobTimer = setInterval(() => pollRoiJob(data.job_id), 1500);
+  pollRoiJob(data.job_id);
+}
+
+async function pollRoiJob(jobId) {
+  const res = await fetch('/api/annotator/jobs/' + jobId);
+  const data = await res.json();
+  if (!res.ok) { setRoiProgress(100, data.detail || 'ROI 任务状态读取失败'); return; }
+  const text = `任务：${data.name}\n状态：${data.status}\n进度：${data.progress || 0}%\n${data.message || ''}`;
+  setRoiProgress(data.progress || 0, text);
+  if (data.status === 'success' || data.status === 'failed') {
+    if (roiJobTimer) clearInterval(roiJobTimer);
+    roiJobTimer = null;
+    await loadRoiClsInfo();
+    if (data.status === 'success' && data.session_id) {
+      await loadRoiSession(data.session_id, true);
+    }
+  }
+}
+
+async function loadRoiSession(sessionId, showMsg=true) {
+  if (!sessionId) return;
+  const res = await fetch('/api/annotator/roi-cls/sessions/' + encodeURIComponent(sessionId));
+  const data = await res.json();
+  if (!res.ok) { if(showMsg) alert(data.detail || '加载 ROI session 失败'); return; }
+  roiSession = data.manifest;
+  roiInfo = roiInfo || {};
+  roiInfo.classes = data.classes || roiInfo.classes || [];
+  roiCandidates = Array.isArray(roiSession.items) ? roiSession.items : [];
+  const firstPending = roiCandidates.findIndex(x => x.status !== 'labeled' && x.status !== 'skipped');
+  roiCurrentIndex = firstPending >= 0 ? firstPending : 0;
+  renderRoiClassButtons();
+  renderRoiCandidate();
+}
+
+function renderRoiCandidate() {
+  const info = document.getElementById('roiCandidateInfo');
+  const preview = document.getElementById('roiPreviewImg');
+  const crop = document.getElementById('roiCropImg');
+  if (!info || !preview || !crop) return;
+  if (!roiCandidates.length) {
+    info.textContent = '暂无候选。请先点击“生成 ROI 候选”。';
+    preview.style.display = 'none';
+    crop.style.display = 'none';
+    return;
+  }
+  roiCurrentIndex = Math.max(0, Math.min(roiCurrentIndex, roiCandidates.length - 1));
+  const item = roiCandidates[roiCurrentIndex];
+  const labeled = roiCandidates.filter(x => x.status === 'labeled').length;
+  const skipped = roiCandidates.filter(x => x.status === 'skipped').length;
+  info.textContent = `${roiCurrentIndex + 1} / ${roiCandidates.length}\n已分类: ${labeled}，跳过: ${skipped}\n状态: ${item.status || 'pending'} ${item.assigned_label ? '→ ' + item.assigned_label : ''}\n来源: ${item.source_filename || '-'}\n检测: ${item.det_class_name || item.det_class_id} conf=${Number(item.det_conf || 0).toFixed(3)}\nROI尺寸: ${(item.roi_size || []).join(' x ')}`;
+  const sid = roiSession.session_id;
+  preview.src = `/api/annotator/roi-cls/file/${encodeURIComponent(sid)}/previews/${encodeURIComponent(item.id + '.jpg')}?t=${Date.now()}`;
+  crop.src = `/api/annotator/roi-cls/file/${encodeURIComponent(sid)}/candidates/${encodeURIComponent(item.id + '.jpg')}?t=${Date.now()}`;
+  preview.style.display = 'block';
+  crop.style.display = 'block';
+}
+
+function nextUnfinishedRoiIndex(start) {
+  if (!roiCandidates.length) return 0;
+  for (let i = start; i < roiCandidates.length; i++) {
+    if (roiCandidates[i].status !== 'labeled' && roiCandidates[i].status !== 'skipped') return i;
+  }
+  for (let i = 0; i < roiCandidates.length; i++) {
+    if (roiCandidates[i].status !== 'labeled' && roiCandidates[i].status !== 'skipped') return i;
+  }
+  return Math.min(start, roiCandidates.length - 1);
+}
+
+function nextRoiCandidate() { if (!roiCandidates.length) return; roiCurrentIndex = Math.min(roiCandidates.length - 1, roiCurrentIndex + 1); renderRoiCandidate(); }
+function prevRoiCandidate() { if (!roiCandidates.length) return; roiCurrentIndex = Math.max(0, roiCurrentIndex - 1); renderRoiCandidate(); }
+
+async function labelRoiCandidate(label) {
+  if (!roiSession || !roiCandidates.length) { alert('暂无 ROI 候选'); return; }
+  const item = roiCandidates[roiCurrentIndex];
+  const res = await fetch('/api/annotator/roi-cls/label', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({session_id:roiSession.session_id, item_id:item.id, label})
+  });
+  const data = await res.json();
+  if (!res.ok) { alert(data.detail || '保存 ROI 分类样本失败'); return; }
+  roiSession = data.manifest;
+  roiCandidates = Array.isArray(roiSession.items) ? roiSession.items : [];
+  roiInfo.classes = data.classes || roiInfo.classes || [];
+  renderRoiClassButtons();
+  roiCurrentIndex = nextUnfinishedRoiIndex(roiCurrentIndex + 1);
+  renderRoiCandidate();
+  setRoiProgress(0, data.message);
+}
+
+async function skipRoiCandidate() {
+  if (!roiSession || !roiCandidates.length) return;
+  const item = roiCandidates[roiCurrentIndex];
+  const res = await fetch('/api/annotator/roi-cls/skip', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({session_id:roiSession.session_id, item_id:item.id})
+  });
+  const data = await res.json();
+  if (!res.ok) { alert(data.detail || '跳过失败'); return; }
+  roiSession = data.manifest;
+  roiCandidates = Array.isArray(roiSession.items) ? roiSession.items : [];
+  roiCurrentIndex = nextUnfinishedRoiIndex(roiCurrentIndex + 1);
+  renderRoiCandidate();
+}
+
 
 let reviewJobTimer = null;
 
@@ -1240,7 +2171,7 @@ window.addEventListener('keydown', async e => {
   if(k==='q') deleteSelected();
   if(k==='e') await confirmAutoLabel();
   if(k==='enter') finishSegmentationPolygon();
-  if(k==='escape'){ pendingAnnotation=null; closeClassModal(); stopDraw(); }
+  if(k==='escape'){ pendingAnnotation=null; closeClassModal(); closeRoiModal(); stopDraw(); }
 });
 window.addEventListener('resize', resizeCanvas);
 init();

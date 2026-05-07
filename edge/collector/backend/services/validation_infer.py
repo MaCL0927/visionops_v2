@@ -44,6 +44,7 @@ _loaded_model_path: str = ""
 _loaded_meta_path: str = ""
 _loaded_task: str = ""
 _loaded_algorithm_signature: str = ""
+_loaded_pipeline_config: str = ""
 _force_algorithm_reload: bool = False
 
 
@@ -82,6 +83,109 @@ def _meta_path_for_model(model_path: Path) -> Path:
     if not meta_path.exists() or not meta_path.is_file():
         raise FileNotFoundError(f"缺少同名模型配置文件: {meta_path.name}")
     return meta_path
+
+
+def _safe_pipeline_config(model_name: str) -> Path:
+    """校验并返回 ROI Classification bundle 的 pipeline.yaml。"""
+    name = Path(model_name or "").name
+    if not name or name in {".", ".."}:
+        raise ValueError("请先选择模型")
+    if name.endswith(".rknn"):
+        raise ValueError("当前名称是单模型 RKNN，不是 ROI 双模型 bundle")
+
+    models_dir = get_effective_models_dir().resolve()
+    bundle_dir = (models_dir / name).resolve()
+    if models_dir not in bundle_dir.parents and bundle_dir != models_dir:
+        raise ValueError("非法模型路径")
+    if not bundle_dir.exists() or not bundle_dir.is_dir():
+        raise FileNotFoundError(f"ROI 双模型 bundle 不存在: {name}")
+    pipeline_config = bundle_dir / "pipeline.yaml"
+    if not pipeline_config.exists() or not pipeline_config.is_file():
+        raise FileNotFoundError(f"缺少 ROI 双模型配置文件: {name}/pipeline.yaml")
+    return pipeline_config
+
+
+def _resolve_bundle_path(bundle_dir: Path, value: Any) -> Path:
+    p = Path(str(value or ""))
+    if p.is_absolute():
+        return p.resolve()
+    return (bundle_dir / p).resolve()
+
+
+def _read_yaml(path: Path) -> Dict[str, Any]:
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception as e:
+        raise ValueError(f"读取 YAML 失败: {path}, {e}") from e
+    if not isinstance(data, dict):
+        raise ValueError(f"YAML 格式错误: {path}")
+    return data
+
+
+def _read_roi_pipeline_meta(pipeline_config: Path) -> Dict[str, Any]:
+    data = _read_yaml(pipeline_config)
+    pipeline_type = str(data.get("pipeline_type") or data.get("task") or "").strip().lower()
+    if pipeline_type != "roi_classification":
+        raise ValueError(f"不是 ROI 分类双模型配置: {pipeline_config}")
+
+    bundle_dir = pipeline_config.parent
+    stage1 = data.get("stage1") if isinstance(data.get("stage1"), dict) else {}
+    stage2 = data.get("stage2") if isinstance(data.get("stage2"), dict) else {}
+    roi_cfg = data.get("roi") if isinstance(data.get("roi"), dict) else {}
+
+    detector_path = _resolve_bundle_path(bundle_dir, stage1.get("model_path") or "detector.rknn")
+    classifier_path = _resolve_bundle_path(bundle_dir, stage2.get("model_path") or "classifier.rknn")
+    if not detector_path.exists():
+        raise FileNotFoundError(f"ROI bundle 缺少检测模型: {detector_path}")
+    if not classifier_path.exists():
+        raise FileNotFoundError(f"ROI bundle 缺少分类模型: {classifier_path}")
+
+    detector_names = _list_from_names(stage1.get("class_names") or stage1.get("names"))
+    classifier_names = _list_from_names(stage2.get("class_names") or stage2.get("names"))
+    try:
+        detector_num = int(stage1.get("num_classes") or len(detector_names))
+    except Exception:
+        detector_num = len(detector_names)
+    try:
+        classifier_num = int(stage2.get("num_classes") or len(classifier_names))
+    except Exception:
+        classifier_num = len(classifier_names)
+    if not detector_names and detector_num > 0:
+        detector_names = [str(i) for i in range(detector_num)]
+    if not classifier_names and classifier_num > 0:
+        classifier_names = [str(i) for i in range(classifier_num)]
+
+    return {
+        "path": str(pipeline_config.resolve()),
+        "raw": data,
+        "task": "roi_classification",
+        "pipeline_config": str(pipeline_config.resolve()),
+        "pipeline_name": str(data.get("pipeline_name") or bundle_dir.name),
+        "bundle_dir": str(bundle_dir.resolve()),
+        "input_size": stage2.get("input_size") or [224, 224],
+        "num_classes": classifier_num,
+        "class_names": classifier_names,
+        "algorithm": {},
+        "algorithm_signature": "roi_classification:" + str(pipeline_config.resolve()),
+        "detector": {
+            "model_path": str(detector_path),
+            "input_size": stage1.get("input_size") or [640, 640],
+            "num_classes": detector_num,
+            "class_names": detector_names,
+            "conf_threshold": stage1.get("conf_threshold"),
+            "nms_threshold": stage1.get("nms_threshold"),
+            "target_class_id": stage1.get("target_class_id"),
+            "target_class_name": stage1.get("target_class_name"),
+        },
+        "classifier": {
+            "model_path": str(classifier_path),
+            "input_size": stage2.get("input_size") or [224, 224],
+            "num_classes": classifier_num,
+            "class_names": classifier_names,
+            "topk": stage2.get("topk"),
+        },
+        "roi": roi_cfg,
+    }
 
 
 def _read_model_meta(model_path: Path) -> Dict[str, Any]:
@@ -271,7 +375,7 @@ def invalidate_algorithm_runtime(reason: str = "") -> None:
 
 def _stop_validation_process() -> None:
     """停止当前 collector 进程持有的验证 engine。"""
-    global _validation_process, _loaded_model_name, _loaded_model_path, _loaded_meta_path, _loaded_task, _loaded_algorithm_signature, _force_algorithm_reload
+    global _validation_process, _loaded_model_name, _loaded_model_path, _loaded_meta_path, _loaded_task, _loaded_algorithm_signature, _loaded_pipeline_config, _force_algorithm_reload
     if _validation_process is not None and _validation_process.poll() is None:
         _validation_process.terminate()
         try:
@@ -285,6 +389,7 @@ def _stop_validation_process() -> None:
     _loaded_meta_path = ""
     _loaded_task = ""
     _loaded_algorithm_signature = ""
+    _loaded_pipeline_config = ""
     _force_algorithm_reload = False
     _close_log_file()
 
@@ -329,12 +434,12 @@ def _is_validation_engine_cmdline(cmdline: str) -> bool:
     if not cmdline:
         return False
     port = str(_validation_port())
-    # 只清理验证 engine.py，避免误杀其他服务。
-    if "engine.py" not in cmdline:
+    # 只清理验证 engine.py / pipeline_engine.py，避免误杀其他服务。
+    if "engine.py" not in cmdline and "pipeline_engine.py" not in cmdline:
         return False
     if f"--port {port}" in cmdline or f"--port={port}" in cmdline:
         return True
-    # 兼容极少数通过环境变量 PORT 启动的情况。
+    # 兼容 systemd 环境变量 PORT=8082 启动。
     if f"PORT={port}" in cmdline:
         return True
     return False
@@ -456,9 +561,171 @@ def _switch_model_via_system_service(model_path: Path, meta_path: str, meta: Dic
     health = _json_get(_health_url(), timeout=2.0)
     return {"health": health, "stdout": result.stdout}
 
-def ensure_validation_engine(model_name: str) -> Dict[str, Any]:
-    global _validation_process, _validation_log_file, _loaded_model_name, _loaded_model_path, _loaded_meta_path, _loaded_task, _loaded_algorithm_signature, _force_algorithm_reload
+def _resolve_pipeline_engine_path() -> Path:
+    candidates = [
+        Path("/opt/visionops/edge/inference/pipeline_engine.py"),
+        Path(__file__).resolve().parents[3] / "inference" / "pipeline_engine.py",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p.resolve()
+    return candidates[0]
 
+
+def _install_text_with_sudo(content: str, target: str, mode: str = "644") -> None:
+    tmp = Path(f"/tmp/visionops_collector_{Path(target).name}_{int(time.time()*1000)}")
+    tmp.write_text(content, encoding="utf-8")
+    try:
+        subprocess.run(["sudo", "-n", "install", "-m", mode, str(tmp), target], check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    finally:
+        try:
+            tmp.unlink()
+        except Exception:
+            pass
+
+
+def _health_matches_roi_pipeline(health: Dict[str, Any], pipeline_config: Path, ignore_force: bool = False) -> bool:
+    global _force_algorithm_reload
+    if _force_algorithm_reload and not ignore_force:
+        return False
+    if not isinstance(health, dict) or health.get("status") != "ok":
+        return False
+    if str(health.get("task", "")).lower() != "roi_classification":
+        return False
+    health_pipeline = _normalize_abs_path(health.get("pipeline_config"))
+    target_pipeline = _normalize_abs_path(pipeline_config)
+    return bool(health_pipeline and health_pipeline == target_pipeline)
+
+
+def _switch_roi_pipeline_via_system_service(pipeline_config: Path, meta: Dict[str, Any]) -> Dict[str, Any]:
+    """切换到 ROI Classification pipeline_engine.py。"""
+    pipeline_engine = _resolve_pipeline_engine_path()
+    if not pipeline_engine.exists():
+        raise FileNotFoundError(f"未找到 ROI 双模型推理入口: {pipeline_engine}")
+
+    port = _validation_port()
+    metrics_port = int(os.getenv("METRICS_PORT", "9091"))
+    npu_core = str(VALIDATION_NPU_CORE or "auto")
+
+    # 明确清理 8082 上旧 engine.py / pipeline_engine.py，避免模型切换时端口被旧进程占用。
+    _stop_validation_process()
+    subprocess.run(["sudo", "-n", "systemctl", "stop", "visionops-inference"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    _kill_validation_engine_on_port()
+    if not _wait_validation_port_free(timeout=5.0):
+        raise RuntimeError(f"验证端口 {port} 仍被占用，无法启动 ROI 双模型推理服务")
+
+    env_content = f"""# Auto generated by collector validation_infer.py for roi_classification
+TASK=roi_classification
+VISIONOPS_TASK=roi_classification
+PIPELINE_CONFIG={pipeline_config}
+INFERENCE_URL=http://localhost:{port}
+NPU_CORE={npu_core}
+PORT={port}
+METRICS_PORT={metrics_port}
+WARMUP_RUNS={int(VALIDATION_WARMUP_RUNS)}
+"""
+    service_content = f"""[Unit]
+Description=VisionOps RK3588 ROI Classification Pipeline Service
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/visionops
+EnvironmentFile=/opt/visionops/.env
+ExecStart=/opt/visionops/venv/bin/python {pipeline_engine} --pipeline-config ${{PIPELINE_CONFIG}} --host 0.0.0.0 --port ${{PORT}} --metrics-port ${{METRICS_PORT}}
+Restart=always
+RestartSec=5
+TimeoutStartSec=30
+TimeoutStopSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=visionops-inference
+
+[Install]
+WantedBy=multi-user.target
+"""
+    subprocess.run(["sudo", "-n", "mkdir", "-p", "/opt/visionops/edge/runtime"], check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    _install_text_with_sudo(env_content, "/opt/visionops/.env")
+    _install_text_with_sudo(env_content, "/opt/visionops/edge/runtime/edge.env")
+    _install_text_with_sudo(service_content, "/etc/systemd/system/visionops-inference.service")
+
+    for cmd in [
+        ["sudo", "-n", "systemctl", "daemon-reload"],
+        ["sudo", "-n", "systemctl", "enable", "visionops-inference"],
+        ["sudo", "-n", "systemctl", "restart", "visionops-inference"],
+    ]:
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+    deadline = time.time() + max(20.0, float(VALIDATION_INFER_TIMEOUT_SEC) + 5.0)
+    last_err = ""
+    while time.time() < deadline:
+        try:
+            health = _json_get(_health_url(), timeout=2.0)
+            if _health_matches_roi_pipeline(health, pipeline_config, ignore_force=True):
+                return {"health": health, "stdout": "systemd roi_classification service restarted"}
+            last_err = json.dumps(health, ensure_ascii=False)
+        except Exception as exc:
+            last_err = str(exc)
+        time.sleep(0.5)
+
+    logs = ""
+    try:
+        logs = subprocess.check_output(["sudo", "-n", "journalctl", "-u", "visionops-inference", "-n", "80", "--no-pager"], text=True, stderr=subprocess.STDOUT)
+    except Exception:
+        logs = _read_last_log_lines()
+    raise RuntimeError(f"ROI 双模型服务启动后健康检查失败: {last_err}\n最近日志:\n{logs}")
+
+def ensure_validation_engine(model_name: str) -> Dict[str, Any]:
+    global _validation_process, _validation_log_file, _loaded_model_name, _loaded_model_path, _loaded_meta_path, _loaded_task, _loaded_algorithm_signature, _loaded_pipeline_config, _force_algorithm_reload
+
+    name = Path(model_name or "").name
+
+    # ROI Classification 双模型 bundle：模型选择界面只传 bundle 目录名。
+    if name and not name.endswith(".rknn"):
+        pipeline_config = _safe_pipeline_config(name)
+        meta = _read_roi_pipeline_meta(pipeline_config)
+        task = "roi_classification"
+
+        try:
+            health = _json_get(_health_url(), timeout=1.0)
+            if _health_matches_roi_pipeline(health, pipeline_config):
+                _loaded_model_name = name
+                _loaded_model_path = str(pipeline_config.parent)
+                _loaded_meta_path = str(pipeline_config)
+                _loaded_task = task
+                _loaded_algorithm_signature = str(meta.get("algorithm_signature") or "")
+                _loaded_pipeline_config = str(pipeline_config)
+                _force_algorithm_reload = False
+                return {"reused": True, "health": health, "model_path": str(pipeline_config.parent), "meta": meta}
+            logger.info(
+                "验证端口已有服务但不是目标 ROI pipeline，将重启 pipeline_engine。current_task=%s, current_pipeline=%s, target_pipeline=%s",
+                health.get("task"), health.get("pipeline_config"), str(pipeline_config),
+            )
+        except Exception:
+            pass
+
+        switched = _switch_roi_pipeline_via_system_service(pipeline_config, meta)
+        health = switched.get("health", {})
+        if not _health_matches_roi_pipeline(health, pipeline_config, ignore_force=True):
+            raise RuntimeError(
+                "切换后健康检查与目标 ROI pipeline 不一致："
+                f"health.task={health.get('task')}, health.pipeline_config={health.get('pipeline_config')}, "
+                f"target_pipeline={pipeline_config}"
+            )
+
+        _loaded_model_name = name
+        _loaded_model_path = str(pipeline_config.parent)
+        _loaded_meta_path = str(pipeline_config)
+        _loaded_task = task
+        _loaded_algorithm_signature = str(meta.get("algorithm_signature") or "")
+        _loaded_pipeline_config = str(pipeline_config)
+        _force_algorithm_reload = False
+        _validation_process = None
+        return {"reused": False, "health": health, "model_path": str(pipeline_config.parent), "meta": meta}
+
+    # 单 RKNN 模型：保持原有逻辑。
     model_path = _safe_model_path(model_name)
     meta = _read_model_meta(model_path)
     meta_path = meta["path"]
@@ -473,6 +740,7 @@ def ensure_validation_engine(model_name: str) -> Dict[str, Any]:
             _loaded_meta_path = meta_path
             _loaded_task = task
             _loaded_algorithm_signature = str(meta.get("algorithm_signature") or "")
+            _loaded_pipeline_config = ""
             return {"reused": True, "health": health, "model_path": str(model_path), "meta": meta}
         logger.info(
             "验证端口已有服务但不是目标模型，将通过 switch_model.sh 切换。current_model=%s, current_task=%s, target_model=%s, target_task=%s",
@@ -483,8 +751,9 @@ def ensure_validation_engine(model_name: str) -> Dict[str, Any]:
         pass
 
     # 2) 统一通过 systemd 服务切换模型，不再由 collector 直接启动第二个 engine.py。
-    #    这可以避免检测/分类来回切换时多个 engine.py 抢占同一端口。
+    #    这可以避免检测/分类/ROI双模型来回切换时多个进程抢占同一端口。
     _stop_validation_process()
+    _kill_validation_engine_on_port()
     switched = _switch_model_via_system_service(model_path, meta_path, meta)
     health = switched.get("health", {})
     if not _health_matches_model(health, model_path, meta_path, meta, ignore_force=True):
@@ -501,6 +770,7 @@ def ensure_validation_engine(model_name: str) -> Dict[str, Any]:
     _loaded_meta_path = meta_path
     _loaded_task = task
     _loaded_algorithm_signature = str(meta.get("algorithm_signature") or "")
+    _loaded_pipeline_config = ""
     _force_algorithm_reload = False
     _validation_process = None
     return {"reused": False, "health": health, "model_path": str(model_path), "meta": meta}
@@ -646,6 +916,29 @@ def infer_image_with_model(model_name: str, image_path: Path) -> Dict[str, Any]:
         except Exception:
             pass
         base["topk"] = topk
+    elif task == "roi_classification":
+        predictions = _ensure_detection_centers(raw.get("predictions", []))
+        base["predictions"] = predictions
+        base["detection"] = _summarize_detection({"predictions": predictions})
+        base["roi"] = raw.get("roi")
+        base["detector"] = raw.get("detector")
+        base["classifier"] = raw.get("classifier")
+        final_label = raw.get("final_label") or raw.get("final_decision")
+        final_conf = raw.get("final_confidence")
+        if final_conf is None and predictions:
+            final_conf = predictions[0].get("confidence")
+        try:
+            final_conf_float = float(final_conf) if final_conf is not None else None
+        except Exception:
+            final_conf_float = None
+        base["result"] = {
+            "class_id": predictions[0].get("class_id") if predictions else None,
+            "class_name": str(final_label or "未识别"),
+            "confidence": final_conf_float,
+            "confidence_percent": f"{final_conf_float * 100:.1f}%" if final_conf_float is not None else "--",
+        }
+        classifier_obj = raw.get("classifier") if isinstance(raw.get("classifier"), dict) else {}
+        base["topk"] = classifier_obj.get("topk", []) if isinstance(classifier_obj.get("topk"), list) else []
     elif task in {"detection", "obb_detection", "segmentation"}:
         predictions = _ensure_detection_centers(raw.get("predictions", []))
         algo = meta.get("algorithm", {}) if isinstance(meta.get("algorithm"), dict) else {}
