@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import hashlib
+import json
 import os
 import shutil
 import tempfile
@@ -106,12 +108,17 @@ def _build_standard_rtsp_url(rtsp: Dict[str, Any]) -> str:
     port = _as_int(rtsp.get("port", 554), 554)
     channel = str(rtsp.get("channel") or "102").strip() or "102"
     username = str(rtsp.get("username") or "admin").strip() or "admin"
-    password = str(rtsp.get("password") or "password").strip()
-    return f"rtsp://{username}:{password}@{ip}:{port}/Streaming/Channels/{channel}"
+    password = str(rtsp.get("password") or "").strip()
+    # 默认使用 Hikvision 常见小写 channels；如果用户填写了完整 url，会优先保留用户 url。
+    return f"rtsp://{username}:{password}@{ip}:{port}/Streaming/channels/{channel}"
 
 
 def normalize_rtsp_settings_dict(data: Dict[str, Any]) -> Dict[str, Any]:
-    """确保 RTSP 类型下 url 与 IP/端口/通道/账号密码保持一致。"""
+    """确保 RTSP 配置稳定。
+
+    v2.2 调整：优先保留用户填写的完整 rtsp.url。只有 url 为空时，才根据
+    IP/端口/通道/账号密码拼接，避免默认密码被保存后反复连接并触发相机锁定。
+    """
     if not isinstance(data, dict):
         return data
     camera = data.setdefault("camera", {})
@@ -122,11 +129,13 @@ def normalize_rtsp_settings_dict(data: Dict[str, Any]) -> Dict[str, Any]:
     rtsp = camera.setdefault("rtsp", {})
     if not isinstance(rtsp, dict):
         camera["rtsp"] = rtsp = {}
-    # v2.1 当前只正式支持海康/大华常见 RTSP 拼接；用户自定义 URL 仍可直接写入该字段。
-    # 只要 IP 存在，就以后端拼接结果为准，避免改了密码或通道但 URL 仍是旧值。
-    standard_url = _build_standard_rtsp_url(rtsp)
-    if standard_url:
-        rtsp["url"] = standard_url
+    existing_url = str(rtsp.get("url") or "").strip()
+    if existing_url.startswith("rtsp://"):
+        rtsp["url"] = existing_url
+    else:
+        standard_url = _build_standard_rtsp_url(rtsp)
+        if standard_url.startswith("rtsp://"):
+            rtsp["url"] = standard_url
     transport = str(rtsp.get("transport") or "tcp").lower()
     rtsp["transport"] = "udp" if transport == "udp" else "tcp"
     camera["type"] = "rtsp"
@@ -184,6 +193,184 @@ def get_upload_runtime_config(settings: VisionOpsRuntimeSettings = None) -> Dict
     }
 
 
+
+def _clamp_int(value: Any, default: int, min_value: int = None, max_value: int = None) -> int:
+    result = _as_int(value, default)
+    if min_value is not None:
+        result = max(min_value, result)
+    if max_value is not None:
+        result = min(max_value, result)
+    return result
+
+
+def _clamp_float(value: Any, default: float, min_value: float = None, max_value: float = None) -> float:
+    result = _as_float(value, default)
+    if min_value is not None:
+        result = max(min_value, result)
+    if max_value is not None:
+        result = min(max_value, result)
+    return result
+
+
+def _safe_task_name(task: Any) -> str:
+    name = str(task or "").strip().lower()
+    if name in {"cls", "classify", "classification", "image_classification"}:
+        return "classification"
+    if name in {"det", "detect", "detection", "object_detection"}:
+        return "detection"
+    if name in {"obb", "obb_detection", "oriented_detection", "rotated_detection", "yolo_obb", "yolov8_obb"}:
+        return "obb_detection"
+    if name in {"seg", "segment", "segmentation", "instance_segmentation", "yolo_seg", "yolov8_seg", "mask_segmentation"}:
+        return "segmentation"
+    return name or "detection"
+
+
+def get_algorithm_runtime_config(settings: VisionOpsRuntimeSettings = None) -> Dict[str, Any]:
+    """读取设置界面的算法运行时配置。
+
+    返回的是轻量 dict，可被前端、生产模式和验证推理服务即时读取。
+    """
+    if settings is None:
+        settings = load_settings()
+    data = model_to_dict(settings).get("algorithm", {})
+    common = data.get("common", {}) if isinstance(data, dict) else {}
+    classification = data.get("classification", {}) if isinstance(data, dict) else {}
+    detection = data.get("detection", {}) if isinstance(data, dict) else {}
+    obb = data.get("obb_detection", {}) if isinstance(data, dict) else {}
+    segmentation = data.get("segmentation", {}) if isinstance(data, dict) else {}
+
+    fps_limit = _clamp_int(common.get("production_fps_limit", 5), 5, 1, 30)
+    interval_from_fps = int(round(1000.0 / max(1, fps_limit)))
+    # 界面当前暴露的是“生产 FPS 上限”，因此生产检测间隔由 FPS 自动换算。
+    production_interval = interval_from_fps
+
+    return {
+        "common": {
+            "model_mode": str(common.get("model_mode") or "auto"),
+            "input_size": str(common.get("input_size") or "640x640"),
+            "npu_core": str(common.get("npu_core") or "auto"),
+            "realtime_interval_ms": _clamp_int(common.get("realtime_interval_ms", 1000), 1000, 100, 60000),
+            "production_fps_limit": fps_limit,
+            "production_detect_interval_ms": _clamp_int(production_interval, interval_from_fps, 100, 60000),
+            "warmup_runs": _clamp_int(common.get("warmup_runs", 3), 3, 0, 20),
+            "label_display": str(common.get("label_display") or "class_conf"),
+            "max_results": _clamp_int(common.get("max_results", 100), 100, 1, 1000),
+            "log_level": str(common.get("log_level") or "INFO").upper(),
+        },
+        "classification": {
+            "topk": _clamp_int(classification.get("topk", 5), 5, 1, 100),
+            "score_threshold": _clamp_float(classification.get("score_threshold", 0.5), 0.5, 0.0, 1.0),
+            "low_confidence_policy": str(classification.get("low_confidence_policy") or "review"),
+        },
+        "detection": {
+            "conf_threshold": _clamp_float(detection.get("conf_threshold", 0.25), 0.25, 0.0, 1.0),
+            "nms_threshold": _clamp_float(detection.get("nms_threshold", 0.45), 0.45, 0.0, 1.0),
+            "show_center": bool(detection.get("show_center", True)),
+            "max_detections": _clamp_int(detection.get("max_detections", 100), 100, 1, 1000),
+        },
+        "obb_detection": {
+            "conf_threshold": _clamp_float(obb.get("conf_threshold", 0.25), 0.25, 0.0, 1.0),
+            "nms_threshold": _clamp_float(obb.get("nms_threshold", 0.45), 0.45, 0.0, 1.0),
+            "nms_mode": str(obb.get("nms_mode") or "rotated"),
+            "show_angle": bool(obb.get("show_angle", True)),
+            "show_polygon": bool(obb.get("show_polygon", True)),
+        },
+        "segmentation": {
+            "conf_threshold": _clamp_float(segmentation.get("conf_threshold", 0.25), 0.25, 0.0, 1.0),
+            "nms_threshold": _clamp_float(segmentation.get("nms_threshold", 0.45), 0.45, 0.0, 1.0),
+            "mask_threshold": _clamp_float(segmentation.get("mask_threshold", 0.5), 0.5, 0.0, 1.0),
+            "mask_alpha": _clamp_float(segmentation.get("mask_alpha", 0.35), 0.35, 0.0, 1.0),
+            "show_mask": bool(segmentation.get("show_mask", True)),
+            "show_box": bool(segmentation.get("show_box", True)),
+            "show_mode": str(segmentation.get("show_mode") or "mask_box"),
+        },
+    }
+
+
+def get_algorithm_effective_config(task: Any = None, model_meta: Dict[str, Any] = None, settings: VisionOpsRuntimeSettings = None) -> Dict[str, Any]:
+    """合成某个任务实际要传给 engine.py 的算法参数。"""
+    algo = get_algorithm_runtime_config(settings)
+    common = dict(algo.get("common", {}))
+    model_meta = model_meta or {}
+    task_name = _safe_task_name(task or model_meta.get("task") or model_meta.get("model", {}).get("task"))
+
+    result = {
+        "task": task_name,
+        "npu_core": common["npu_core"],
+        "warmup_runs": common["warmup_runs"],
+        "realtime_interval_ms": common["realtime_interval_ms"],
+        "production_detect_interval_ms": common["production_detect_interval_ms"],
+        "production_fps_limit": common["production_fps_limit"],
+        "max_results": common["max_results"],
+        "label_display": common["label_display"],
+    }
+
+    if task_name == "classification":
+        result.update(algo["classification"])
+        result.setdefault("conf_threshold", 0.25)
+        result.setdefault("nms_threshold", 0.45)
+        result.setdefault("mask_threshold", 0.5)
+    elif task_name == "obb_detection":
+        result.update(algo["obb_detection"])
+        result.setdefault("topk", algo["classification"]["topk"])
+        result.setdefault("mask_threshold", 0.5)
+    elif task_name == "segmentation":
+        result.update(algo["segmentation"])
+        result.setdefault("topk", algo["classification"]["topk"])
+    else:
+        result.update(algo["detection"])
+        result.setdefault("topk", algo["classification"]["topk"])
+        result.setdefault("mask_threshold", 0.5)
+
+    result["signature"] = make_algorithm_signature(result)
+    return result
+
+
+def make_algorithm_signature(effective: Dict[str, Any]) -> str:
+    keys = [
+        "task", "npu_core", "warmup_runs", "topk", "score_threshold",
+        "conf_threshold", "nms_threshold", "mask_threshold", "nms_mode",
+    ]
+    payload = {key: effective.get(key) for key in keys if key in effective}
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
+
+
+def write_runtime_algorithm_env(settings: VisionOpsRuntimeSettings = None) -> Path:
+    """写 edge/runtime/runtime_algorithm.env，供 switch_model.sh 选择模型时读取。"""
+    if settings is None:
+        settings = load_settings()
+    algo = get_algorithm_runtime_config(settings)
+    runtime_dir = get_settings_path().parent
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    path = runtime_dir / "runtime_algorithm.env"
+
+    common = algo["common"]
+    cls = algo["classification"]
+    det = algo["detection"]
+    obb = algo["obb_detection"]
+    seg = algo["segmentation"]
+    lines = [
+        "# Auto generated by VisionOps Collector settings v2.2",
+        f"VISIONOPS_RUNTIME_NPU_CORE={common['npu_core']}",
+        f"VISIONOPS_RUNTIME_WARMUP_RUNS={common['warmup_runs']}",
+        f"VISIONOPS_RUNTIME_REALTIME_INTERVAL_MS={common['realtime_interval_ms']}",
+        f"VISIONOPS_RUNTIME_PRODUCTION_DETECT_INTERVAL_MS={common['production_detect_interval_ms']}",
+        f"VISIONOPS_RUNTIME_MAX_RESULTS={common['max_results']}",
+        f"VISIONOPS_RUNTIME_CLASSIFICATION_TOPK={cls['topk']}",
+        f"VISIONOPS_RUNTIME_CLASSIFICATION_SCORE_THRESHOLD={cls['score_threshold']}",
+        f"VISIONOPS_RUNTIME_DETECTION_CONF_THRESHOLD={det['conf_threshold']}",
+        f"VISIONOPS_RUNTIME_DETECTION_NMS_THRESHOLD={det['nms_threshold']}",
+        f"VISIONOPS_RUNTIME_OBB_CONF_THRESHOLD={obb['conf_threshold']}",
+        f"VISIONOPS_RUNTIME_OBB_NMS_THRESHOLD={obb['nms_threshold']}",
+        f"VISIONOPS_RUNTIME_OBB_NMS_MODE={obb['nms_mode']}",
+        f"VISIONOPS_RUNTIME_SEGMENTATION_CONF_THRESHOLD={seg['conf_threshold']}",
+        f"VISIONOPS_RUNTIME_SEGMENTATION_NMS_THRESHOLD={seg['nms_threshold']}",
+        f"VISIONOPS_RUNTIME_SEGMENTATION_MASK_THRESHOLD={seg['mask_threshold']}",
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
 def build_default_settings() -> VisionOpsRuntimeSettings:
     """从当前运行配置生成默认回显值。"""
     defaults = model_to_dict(VisionOpsRuntimeSettings())
@@ -214,7 +401,7 @@ def build_default_settings() -> VisionOpsRuntimeSettings:
     }
 
     defaults = _migrate_upload_to_vision_box(normalize_rtsp_settings_dict(defaults))
-    defaults["version"] = "2.1.1"
+    defaults["version"] = "2.2"
     return VisionOpsRuntimeSettings(**defaults)
 
 
@@ -243,7 +430,7 @@ def save_settings(settings: VisionOpsRuntimeSettings) -> VisionOpsRuntimeSetting
     path = get_settings_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     data = _migrate_upload_to_vision_box(normalize_rtsp_settings_dict(model_to_dict(settings)))
-    data["version"] = "2.1.1"
+    data["version"] = "2.2"
 
     fd, tmp_name = tempfile.mkstemp(prefix=".runtime_overrides.", suffix=".yaml", dir=str(path.parent))
     try:
@@ -255,7 +442,12 @@ def save_settings(settings: VisionOpsRuntimeSettings) -> VisionOpsRuntimeSetting
     finally:
         if os.path.exists(tmp_name):
             os.unlink(tmp_name)
-    return load_settings()
+    saved = load_settings()
+    try:
+        write_runtime_algorithm_env(saved)
+    except Exception:
+        pass
+    return saved
 
 
 def reset_settings() -> VisionOpsRuntimeSettings:

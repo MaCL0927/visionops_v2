@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>VisionOps Edge Collector UI</title>
-  <link rel="stylesheet" href="/static/styles.css?v=setting_v2_1_1_rtsp" />
+  <link rel="stylesheet" href="/static/styles.css?v=setting_v2_2_highlight" />
 </head>
 <body>
   <header class="topbar">
@@ -310,7 +310,7 @@
               </div>
             </div>
 
-            <div id="cameraTypeRtsp" class="camera-type-panel camera-inline-panel active">
+            <div id="cameraTypeRtsp" class="camera-type-panel camera-inline-panel implemented-setting-block active">
               <div class="settings-section-title"><b>RTSP 网络相机参数</b><span>适合海康、大华等 IP 相机</span></div>
               <div class="settings-grid three">
                 <label class="setting-field">相机 IP<input data-setting="camera.rtsp.ip" value="192.168.2.64" /></label>
@@ -356,7 +356,7 @@
                   <option value="custom">自定义</option>
                 </select>
               </label>
-              <label class="setting-field">帧率 FPS
+              <label class="setting-field implemented-setting-field">帧率 FPS
                 <input data-setting="camera.common.fps" type="number" value="6" min="1" max="60" />
               </label>
               <label class="setting-field">图像旋转
@@ -393,10 +393,10 @@
               <label class="setting-field">对比度
                 <input data-setting="camera.common.contrast" type="number" value="50" min="0" max="100" />
               </label>
-              <label class="setting-field">预览宽度
+              <label class="setting-field implemented-setting-field">预览宽度
                 <input data-setting="camera.common.preview_width" type="number" value="960" min="320" />
               </label>
-              <label class="setting-field">JPEG 质量
+              <label class="setting-field implemented-setting-field">JPEG 质量
                 <input data-setting="camera.common.jpeg_quality" type="number" value="75" min="10" max="100" />
               </label>
             </div>
@@ -453,7 +453,7 @@
             </div>
           </div>
 
-          <div class="settings-section upload-setting-block">
+          <div class="settings-section upload-setting-block implemented-setting-block">
             <div class="settings-section-title"><b>服务端上传配置</b><span>采集包上传到服务端 PC，通常走外网口 eth1 / Factory LAN</span></div>
             <div class="settings-grid three">
               <label class="setting-field">启用上传
@@ -515,7 +515,7 @@
             <span class="settings-status-badge">分类 / 检测 / OBB / 分割</span>
           </div>
 
-          <div class="settings-section">
+          <div class="settings-section implemented-setting-block">
             <div class="settings-section-title"><b>公共参数</b><span>四类任务通用</span></div>
             <div class="settings-grid three">
               <label class="setting-field">当前模型<select data-setting="algorithm.common.model_mode"><option value="auto">自动选择最新模型</option><option value="manual">手动选择模型</option></select></label>
@@ -531,30 +531,33 @@
           </div>
 
           <div class="algorithm-task-grid">
-            <article class="algorithm-task-card">
+            <article class="algorithm-task-card implemented-setting-block">
               <h4>分类 Classification</h4>
               <p>适合合格/不合格、产品类别判断。</p>
               <label>TopK <input data-setting="algorithm.classification.topk" type="number" value="5" /></label>
               <label>分类阈值 <input data-setting="algorithm.classification.score_threshold" type="number" value="0.50" step="0.01" /></label>
               <label>低置信度策略 <select data-setting="algorithm.classification.low_confidence_policy"><option value="review">提示人工复核</option><option value="top1">直接输出最高类别</option><option value="unknown">判定为未知</option></select></label>
             </article>
-            <article class="algorithm-task-card">
+            <article class="algorithm-task-card implemented-setting-block">
               <h4>检测 Detection</h4>
               <p>适合水平框目标检测。</p>
               <label>置信度阈值 <input data-setting="algorithm.detection.conf_threshold" type="number" value="0.25" step="0.01" /></label>
               <label>NMS 阈值 <input data-setting="algorithm.detection.nms_threshold" type="number" value="0.45" step="0.01" /></label>
               <label>显示中心点 <select data-setting="algorithm.detection.show_center"><option value="true" selected>开启</option><option value="false">关闭</option></select></label>
             </article>
-            <article class="algorithm-task-card">
+            <article class="algorithm-task-card implemented-setting-block">
               <h4>旋转框 OBB</h4>
               <p>适合倾斜目标、长条形零件检测。</p>
               <label>OBB 置信度 <input data-setting="algorithm.obb_detection.conf_threshold" type="number" value="0.25" step="0.01" /></label>
+              <label>OBB NMS 阈值 <input data-setting="algorithm.obb_detection.nms_threshold" type="number" value="0.45" step="0.01" /></label>
               <label>NMS 类型 <select data-setting="algorithm.obb_detection.nms_mode"><option value="horizontal">水平外接框 NMS</option><option value="rotated" selected>Rotated NMS</option></select></label>
               <label>角度显示 <select data-setting="algorithm.obb_detection.show_angle"><option value="true" selected>显示角度</option><option value="false">隐藏角度</option></select></label>
             </article>
-            <article class="algorithm-task-card">
+            <article class="algorithm-task-card implemented-setting-block">
               <h4>分割 Segmentation</h4>
               <p>适合缺陷区域、轮廓面积和形状判断。</p>
+              <label>分割置信度 <input data-setting="algorithm.segmentation.conf_threshold" type="number" value="0.25" step="0.01" /></label>
+              <label>分割 NMS 阈值 <input data-setting="algorithm.segmentation.nms_threshold" type="number" value="0.45" step="0.01" /></label>
               <label>Mask 阈值 <input data-setting="algorithm.segmentation.mask_threshold" type="number" value="0.50" step="0.01" /></label>
               <label>Mask 透明度 <input data-setting="algorithm.segmentation.mask_alpha" type="number" value="0.35" step="0.05" /></label>
               <label>显示方式 <select data-setting="algorithm.segmentation.show_mode"><option value="mask_box" selected>Mask + 外接框</option><option value="mask_only">只显示 Mask</option><option value="contour_only">只显示轮廓</option></select></label>
@@ -654,6 +657,6 @@
 
   <div id="toast" class="toast"></div>
   <div id="centerNotice" class="center-notice" role="status" aria-live="polite"><div id="centerNoticeBox" class="center-notice-box"></div></div>
-  <script src="/static/app.js?v=setting_v2_1_1_rtsp"></script>
+  <script src="/static/app.js?v=setting_v2_2_highlight"></script>
 </body>
 </html>

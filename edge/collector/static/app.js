@@ -509,7 +509,9 @@ const resultConfidence=document.getElementById('resultConfidence');
 const resultLatency=document.getElementById('resultLatency');
 const topkResult=document.getElementById('topkResult');
 const realtimeInferToggle=document.getElementById('realtimeInferToggle');
-const REALTIME_INTERVAL_MS=1000; // v6.7: 分类/检测统一使用低频单帧实时推理
+let realtimeIntervalMs=1000; // v2.2：由系统设置动态控制
+let productionDetectIntervalMs=1000;
+let productionPollIntervalMs=1000;
 let realtimeRunning=false;
 let realtimeTimer=null;
 let realtimeBusy=false;
@@ -781,6 +783,18 @@ function drawPolygonOverlay(ctx, points){
   ctx.fill();
   ctx.stroke();
 }
+function getCurrentAlgorithmSettings(){
+  return (runtimeSettingsCache && runtimeSettingsCache.algorithm) || {};
+}
+function shouldShowDetectionCenter(){
+  const det=(getCurrentAlgorithmSettings().detection)||{};
+  return det.show_center !== false;
+}
+function getMaskOverlayAlpha(){
+  const seg=(getCurrentAlgorithmSettings().segmentation)||{};
+  return clampNumber(seg.mask_alpha,0.24,0,1);
+}
+
 function drawDetectionOverlay(predictions=[]){
   const canvas=document.getElementById('detectionOverlayCanvas');
   const img=document.getElementById('resultPreviewImg');
@@ -813,7 +827,7 @@ function drawDetectionOverlay(predictions=[]){
     let hasShape=false;
     if(maskSegments.length){
       ctx.strokeStyle='#f97316';
-      ctx.fillStyle='rgba(249,115,22,.24)';
+      ctx.fillStyle=`rgba(249,115,22,${getMaskOverlayAlpha()})`;
       ctx.lineWidth=Math.max(2, Math.round(canvas.width/420));
       drawMaskSegmentsOverlay(ctx, maskSegments);
       // segmentation 只绘制 mask polygon，不再叠加 bbox 矩形框。
@@ -859,7 +873,7 @@ function drawDetectionOverlay(predictions=[]){
     ctx.fillText(label,lx+pad,ly+pad/2);
 
     const center=getPredictionCenter(pred, box);
-    if(center && Number.isFinite(center[0]) && Number.isFinite(center[1])){
+    if(shouldShowDetectionCenter() && center && Number.isFinite(center[0]) && Number.isFinite(center[1])){
       const cx=Math.max(0, Math.min(canvas.width, center[0]));
       const cy=Math.max(0, Math.min(canvas.height, center[1]));
       const r=Math.max(4, Math.round(canvas.width/180));
@@ -1070,7 +1084,7 @@ async function startRealtimeClassification(){
   setResultRunning('实时检测中...');
   showToast('实时检测已开始');
   realtimeClassifyOnce();
-  realtimeTimer=setInterval(realtimeClassifyOnce, REALTIME_INTERVAL_MS);
+  realtimeTimer=setInterval(realtimeClassifyOnce, realtimeIntervalMs);
 }
 
 function stopRealtimeClassification(show=true){
@@ -1171,7 +1185,7 @@ function drawProductionOverlay(predictions=[]){
 
     if(maskSegments.length){
       ctx.strokeStyle='#f97316';
-      ctx.fillStyle='rgba(249,115,22,.24)';
+      ctx.fillStyle=`rgba(249,115,22,${getMaskOverlayAlpha()})`;
       ctx.lineWidth=Math.max(2, Math.round(canvas.width/420));
       drawMaskSegmentsOverlay(ctx, maskSegments);
       // segmentation 只绘制 mask polygon，不再叠加 bbox 矩形框。
@@ -1205,7 +1219,7 @@ function drawProductionOverlay(predictions=[]){
     ctx.fillText(label,lx+pad,ly+pad/2);
 
     const center=getPredictionCenter(pred, box);
-    if(center && Number.isFinite(center[0]) && Number.isFinite(center[1])){
+    if(shouldShowDetectionCenter() && center && Number.isFinite(center[0]) && Number.isFinite(center[1])){
       const cx=Math.max(0, Math.min(canvas.width, center[0]));
       const cy=Math.max(0, Math.min(canvas.height, center[1]));
       const r=Math.max(4, Math.round(canvas.width/180));
@@ -1306,7 +1320,7 @@ async function startProductionMonitor(){
     await apiPost('/api/production/push/start',{
       dataset:currentDataset,
       model_name:modelName,
-      interval_ms:REALTIME_INTERVAL_MS,
+      interval_ms:productionDetectIntervalMs,
       camera_id:1
     });
 
@@ -1314,7 +1328,7 @@ async function startProductionMonitor(){
     await refreshProductionPushStatus();
 
     if(productionTimer){clearInterval(productionTimer);}
-    productionTimer=setInterval(refreshProductionPushStatus, REALTIME_INTERVAL_MS);
+    productionTimer=setInterval(refreshProductionPushStatus, productionPollIntervalMs);
   }catch(err){
     productionRunning=false;
     if(productionStatus) productionStatus.textContent='启动失败';
@@ -1418,15 +1432,44 @@ function writeSettingValue(el,value){
   el.value=String(value);
 }
 function collectSettingsFromForm(){
-  const settings=runtimeSettingsCache?JSON.parse(JSON.stringify(runtimeSettingsCache)):{version:'2.1.1'};
+  const settings=runtimeSettingsCache?JSON.parse(JSON.stringify(runtimeSettingsCache)):{version:'2.2'};
   document.querySelectorAll('[data-setting]').forEach(el=>{
     const path=el.dataset.setting;
     if(!path) return;
     setByPath(settings,path,parseSettingValue(el));
   });
-  settings.version='2.1.1';
+  settings.version='2.2';
   return settings;
 }
+function clampNumber(value, fallback, minValue, maxValue){
+  let n=Number(value);
+  if(!Number.isFinite(n)) n=fallback;
+  if(Number.isFinite(minValue)) n=Math.max(minValue,n);
+  if(Number.isFinite(maxValue)) n=Math.min(maxValue,n);
+  return n;
+}
+function applyRuntimeSettingsToClient(settings){
+  const common=(settings && settings.algorithm && settings.algorithm.common) || {};
+  realtimeIntervalMs=clampNumber(common.realtime_interval_ms,1000,100,60000);
+  const fpsLimit=clampNumber(common.production_fps_limit,5,1,30);
+  const intervalByFps=Math.round(1000 / Math.max(1,fpsLimit));
+  productionDetectIntervalMs=clampNumber(intervalByFps,intervalByFps,100,60000);
+  productionPollIntervalMs=Math.max(300, Math.min(5000, productionDetectIntervalMs));
+
+  if(realtimeRunning && realtimeTimer){
+    clearInterval(realtimeTimer);
+    realtimeTimer=setInterval(realtimeClassifyOnce,realtimeIntervalMs);
+  }
+  if(productionRunning && productionTimer){
+    clearInterval(productionTimer);
+    productionTimer=setInterval(refreshProductionPushStatus,productionPollIntervalMs);
+  }
+}
+async function applyAlgorithmSettingsAfterSave(){
+  const data=await apiPost('/api/settings/algorithm/apply',{});
+  return data;
+}
+
 function fillSettingsForm(settings){
   if(!settings) return;
   document.querySelectorAll('[data-setting]').forEach(el=>{
@@ -1434,6 +1477,7 @@ function fillSettingsForm(settings){
     writeSettingValue(el,value);
   });
   updateCameraTypePanel();
+  applyRuntimeSettingsToClient(settings);
 }
 async function loadRuntimeSettingsToForm(){
   try{
@@ -1490,13 +1534,21 @@ async function saveRuntimeSettingsFromForm(){
     const data=await apiPost('/api/settings',settings);
     runtimeSettingsCache=data.settings || settings;
     fillSettingsForm(runtimeSettingsCache);
+    let message=data.message || '设置已保存';
+    try{
+      const algoResult=await applyAlgorithmSettingsAfterSave();
+      if(algoResult && algoResult.message) message=algoResult.message;
+    }catch(algoErr){
+      message=`设置已保存，但算法应用失败：${algoErr.message || algoErr}`;
+    }
     try{
       const applyResult=await applyCameraSettingsAfterSave();
       refreshBackendCameraPreview();
-      showToast(applyResult.message || data.message || '设置已保存并应用');
+      if(applyResult && applyResult.message && !message.includes('失败')) message='设置已保存，相机与算法参数已应用';
     }catch(applyErr){
-      showToast(`设置已保存，但相机应用失败：${applyErr.message || applyErr}`);
+      message=`设置已保存，但相机应用失败：${applyErr.message || applyErr}`;
     }
+    showToast(message);
   }catch(err){
     showToast(err.message || '保存设置失败');
   }
@@ -1507,9 +1559,12 @@ async function resetRuntimeSettings(){
     runtimeSettingsCache=data.settings || {};
     fillSettingsForm(runtimeSettingsCache);
     try{
+      await applyAlgorithmSettingsAfterSave();
+    }catch(_){/* 恢复默认后的算法应用失败不影响回显 */}
+    try{
       await applyCameraSettingsAfterSave();
       refreshBackendCameraPreview();
-    }catch(_){/* 恢复默认后的应用失败不影响回显 */}
+    }catch(_){/* 恢复默认后的相机应用失败不影响回显 */}
     showToast(data.message || '已恢复默认设置');
   }catch(err){
     showToast(err.message || '恢复默认设置失败');

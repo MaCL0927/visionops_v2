@@ -32,6 +32,7 @@ from backend.services.validation_images import (
     save_realtime_image_bytes,
 )
 from backend.services.validation_infer import classify_image_with_model
+from backend.services.settings_store import get_algorithm_runtime_config
 
 
 logger = logging.getLogger("visionops.production_push")
@@ -44,6 +45,14 @@ def _now_timestamp() -> list[int]:
     return [sec, ms]
 
 
+def _default_production_interval_ms() -> int:
+    try:
+        algo = get_algorithm_runtime_config()
+        return max(100, int(algo.get("common", {}).get("production_detect_interval_ms") or PRODUCTION_DETECT_INTERVAL_MS))
+    except Exception:
+        return int(PRODUCTION_DETECT_INTERVAL_MS)
+
+
 class ProductionPushService:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -54,7 +63,7 @@ class ProductionPushService:
         self.model_name = ""
         self.dataset = DEFAULT_DATASET_NAME
         self.gateway_url = PRODUCTION_GATEWAY_PUSH_URL
-        self.interval_ms = PRODUCTION_DETECT_INTERVAL_MS
+        self.interval_ms = _default_production_interval_ms()
         self.camera_id = PRODUCTION_CAMERA_ID
 
         self.frame_id = 0
@@ -69,14 +78,14 @@ class ProductionPushService:
         model_name: str,
         dataset: str = DEFAULT_DATASET_NAME,
         gateway_url: str = PRODUCTION_GATEWAY_PUSH_URL,
-        interval_ms: int = PRODUCTION_DETECT_INTERVAL_MS,
+        interval_ms: int = None,
         camera_id: int = PRODUCTION_CAMERA_ID,
     ) -> Dict[str, Any]:
         model_name = Path(model_name or "").name
         if not model_name:
             raise ValueError("缺少 model_name")
 
-        interval_ms = max(100, int(interval_ms or PRODUCTION_DETECT_INTERVAL_MS))
+        interval_ms = max(100, int(interval_ms or _default_production_interval_ms()))
 
         # 避免两个生产检测线程同时运行。
         self.stop(join_timeout=2.0)

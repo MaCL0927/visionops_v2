@@ -18,6 +18,11 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
+from backend.services.settings_store import (
+    get_algorithm_effective_config,
+    write_runtime_algorithm_env,
+)
+
 from backend.config import (
     MODELS_DIR,
     VALIDATION_ENGINE_PATH,
@@ -37,6 +42,8 @@ _loaded_model_name: str = ""
 _loaded_model_path: str = ""
 _loaded_meta_path: str = ""
 _loaded_task: str = ""
+_loaded_algorithm_signature: str = ""
+_force_algorithm_reload: bool = False
 
 
 # ────────────────────────────────────────────────
@@ -114,9 +121,15 @@ def _read_model_meta(model_path: Path) -> Dict[str, Any]:
     if len(class_names) != num_classes:
         raise ValueError(f"class_names 数量与 num_classes 不一致: {meta_path.name}")
 
-    topk = int(data.get("topk") or model_meta.get("topk") or min(max(num_classes, 1), int(VALIDATION_TOPK)))
-    conf_threshold = float(data.get("conf_threshold") or model_meta.get("conf_threshold") or 0.25)
-    nms_threshold = float(data.get("nms_threshold") or model_meta.get("nms_threshold") or 0.45)
+    # v2.2：模型 YAML 给出默认值，runtime_overrides.yaml 中的算法设置作为现场覆盖。
+    meta_defaults = dict(data)
+    meta_defaults["task"] = task
+    runtime_algo = get_algorithm_effective_config(task=task, model_meta=meta_defaults)
+
+    topk = int(runtime_algo.get("topk") or data.get("topk") or model_meta.get("topk") or min(max(num_classes, 1), int(VALIDATION_TOPK)))
+    conf_threshold = float(runtime_algo.get("conf_threshold") if runtime_algo.get("conf_threshold") is not None else (data.get("conf_threshold") or model_meta.get("conf_threshold") or 0.25))
+    nms_threshold = float(runtime_algo.get("nms_threshold") if runtime_algo.get("nms_threshold") is not None else (data.get("nms_threshold") or model_meta.get("nms_threshold") or 0.45))
+    mask_threshold = float(runtime_algo.get("mask_threshold") if runtime_algo.get("mask_threshold") is not None else (data.get("mask_threshold") or model_meta.get("mask_threshold") or 0.5))
 
     return {
         "path": str(meta_path.resolve()),
@@ -128,6 +141,9 @@ def _read_model_meta(model_path: Path) -> Dict[str, Any]:
         "topk": topk,
         "conf_threshold": conf_threshold,
         "nms_threshold": nms_threshold,
+        "mask_threshold": mask_threshold,
+        "algorithm": runtime_algo,
+        "algorithm_signature": runtime_algo.get("signature", ""),
     }
 
 
@@ -172,13 +188,17 @@ def _normalize_abs_path(value: Any) -> str:
         return str(value)
 
 
-def _health_matches_model(health: Dict[str, Any], model_path: Path, meta_path: str, task: str) -> bool:
-    """严格判断当前端口上的 engine 是否就是目标模型。"""
+def _health_matches_model(health: Dict[str, Any], model_path: Path, meta_path: str, meta: Dict[str, Any], ignore_force: bool = False) -> bool:
+    """严格判断当前端口上的 engine 是否就是目标模型和目标算法参数。"""
+    global _force_algorithm_reload
+    if _force_algorithm_reload and not ignore_force:
+        return False
     if not isinstance(health, dict):
         return False
     if health.get("status") != "ok":
         return False
-    if str(health.get("task", "")).lower() != str(task).lower():
+    task = str(meta.get("task") or "").lower()
+    if str(health.get("task", "")).lower() != task:
         return False
 
     health_model = _normalize_abs_path(health.get("model_path"))
@@ -189,6 +209,38 @@ def _health_matches_model(health: Dict[str, Any], model_path: Path, meta_path: s
     health_meta = _normalize_abs_path(health.get("class_names_file"))
     target_meta = _normalize_abs_path(meta_path)
     if health_meta != target_meta:
+        return False
+
+    expected = meta.get("algorithm", {}) if isinstance(meta.get("algorithm"), dict) else {}
+
+    def _same_float(key: str, expected_value: Any) -> bool:
+        if key not in health or expected_value is None:
+            return True
+        try:
+            return abs(float(health.get(key)) - float(expected_value)) < 1e-6
+        except Exception:
+            return True
+
+    def _same_int(key: str, expected_value: Any) -> bool:
+        if key not in health or expected_value is None:
+            return True
+        try:
+            return int(health.get(key)) == int(expected_value)
+        except Exception:
+            return True
+
+    if not _same_float("conf_threshold", expected.get("conf_threshold")):
+        return False
+    if not _same_float("nms_threshold", expected.get("nms_threshold")):
+        return False
+    if not _same_float("mask_threshold", expected.get("mask_threshold")):
+        return False
+    if not _same_int("topk", expected.get("topk")):
+        return False
+
+    # 如果 collector 本进程已经加载过 engine，则参数签名必须一致。
+    expected_sig = str(meta.get("algorithm_signature") or "")
+    if expected_sig and _loaded_algorithm_signature and expected_sig != _loaded_algorithm_signature:
         return False
 
     return True
@@ -208,9 +260,17 @@ def _close_log_file() -> None:
     _validation_log_file = None
 
 
+def invalidate_algorithm_runtime(reason: str = "") -> None:
+    """设置界面修改算法参数后，通知下次推理不要复用旧参数。"""
+    global _loaded_algorithm_signature, _force_algorithm_reload
+    _loaded_algorithm_signature = ""
+    _force_algorithm_reload = True
+    logger.info("算法运行时参数已失效，下次推理将重新检查/加载: %s", reason)
+
+
 def _stop_validation_process() -> None:
     """停止当前 collector 进程持有的验证 engine。"""
-    global _validation_process, _loaded_model_name, _loaded_model_path, _loaded_meta_path, _loaded_task
+    global _validation_process, _loaded_model_name, _loaded_model_path, _loaded_meta_path, _loaded_task, _loaded_algorithm_signature, _force_algorithm_reload
     if _validation_process is not None and _validation_process.poll() is None:
         _validation_process.terminate()
         try:
@@ -223,6 +283,8 @@ def _stop_validation_process() -> None:
     _loaded_model_path = ""
     _loaded_meta_path = ""
     _loaded_task = ""
+    _loaded_algorithm_signature = ""
+    _force_algorithm_reload = False
     _close_log_file()
 
 
@@ -356,11 +418,17 @@ def _resolve_switch_model_script() -> Path:
     return candidates[0]
 
 
-def _switch_model_via_system_service(model_path: Path, meta_path: str) -> Dict[str, Any]:
+def _switch_model_via_system_service(model_path: Path, meta_path: str, meta: Dict[str, Any]) -> Dict[str, Any]:
     """通过统一脚本切换当前 visionops-inference 服务，避免多个 engine.py 抢占同一端口。"""
     script = _resolve_switch_model_script()
     if not script.exists():
         raise FileNotFoundError(f"未找到模型切换脚本: {script}")
+
+    # v2.2：先写 runtime_algorithm.env，switch_model.sh 会按模型 task 选择对应阈值/TopK。
+    try:
+        write_runtime_algorithm_env()
+    except Exception as exc:
+        logger.warning("写 runtime_algorithm.env 失败，继续使用脚本默认参数: %s", exc)
 
     cmd = [
         "bash",
@@ -388,7 +456,7 @@ def _switch_model_via_system_service(model_path: Path, meta_path: str) -> Dict[s
     return {"health": health, "stdout": result.stdout}
 
 def ensure_validation_engine(model_name: str) -> Dict[str, Any]:
-    global _validation_process, _validation_log_file, _loaded_model_name, _loaded_model_path, _loaded_meta_path, _loaded_task
+    global _validation_process, _validation_log_file, _loaded_model_name, _loaded_model_path, _loaded_meta_path, _loaded_task, _loaded_algorithm_signature, _force_algorithm_reload
 
     model_path = _safe_model_path(model_name)
     meta = _read_model_meta(model_path)
@@ -398,11 +466,12 @@ def ensure_validation_engine(model_name: str) -> Dict[str, Any]:
     # 1) 如果当前端口已经是目标模型，则直接复用。
     try:
         health = _json_get(_health_url(), timeout=1.0)
-        if _health_matches_model(health, model_path, meta_path, task):
+        if _health_matches_model(health, model_path, meta_path, meta):
             _loaded_model_name = model_path.name
             _loaded_model_path = str(model_path)
             _loaded_meta_path = meta_path
             _loaded_task = task
+            _loaded_algorithm_signature = str(meta.get("algorithm_signature") or "")
             return {"reused": True, "health": health, "model_path": str(model_path), "meta": meta}
         logger.info(
             "验证端口已有服务但不是目标模型，将通过 switch_model.sh 切换。current_model=%s, current_task=%s, target_model=%s, target_task=%s",
@@ -415,9 +484,9 @@ def ensure_validation_engine(model_name: str) -> Dict[str, Any]:
     # 2) 统一通过 systemd 服务切换模型，不再由 collector 直接启动第二个 engine.py。
     #    这可以避免检测/分类来回切换时多个 engine.py 抢占同一端口。
     _stop_validation_process()
-    switched = _switch_model_via_system_service(model_path, meta_path)
+    switched = _switch_model_via_system_service(model_path, meta_path, meta)
     health = switched.get("health", {})
-    if not _health_matches_model(health, model_path, meta_path, task):
+    if not _health_matches_model(health, model_path, meta_path, meta, ignore_force=True):
         raise RuntimeError(
             "切换后健康检查与目标模型不一致："
             f"health.model_path={health.get('model_path')}, "
@@ -430,6 +499,8 @@ def ensure_validation_engine(model_name: str) -> Dict[str, Any]:
     _loaded_model_path = str(model_path)
     _loaded_meta_path = meta_path
     _loaded_task = task
+    _loaded_algorithm_signature = str(meta.get("algorithm_signature") or "")
+    _force_algorithm_reload = False
     _validation_process = None
     return {"reused": False, "health": health, "model_path": str(model_path), "meta": meta}
 
@@ -541,21 +612,46 @@ def infer_image_with_model(model_name: str, image_path: Path) -> Dict[str, Any]:
             "reused": engine_info.get("reused", False),
             "model_path": engine_info.get("model_path"),
             "meta_path": meta.get("path"),
+            "algorithm_signature": meta.get("algorithm_signature"),
         },
         "model_meta": {
             "task": meta.get("task"),
             "input_size": meta.get("input_size"),
             "num_classes": meta.get("num_classes"),
             "class_names": meta.get("class_names"),
+            "algorithm": meta.get("algorithm"),
+            "algorithm_signature": meta.get("algorithm_signature"),
         },
         "raw": raw,
     }
 
     if task == "classification":
-        base["result"] = _normalize_classification_result(raw)
-        base["topk"] = raw.get("topk", [])
+        result = _normalize_classification_result(raw)
+        algo = meta.get("algorithm", {}) if isinstance(meta.get("algorithm"), dict) else {}
+        score_threshold = float(algo.get("score_threshold") or 0.0)
+        low_policy = str(algo.get("low_confidence_policy") or "review")
+        confidence = result.get("confidence")
+        if confidence is not None and float(confidence) < score_threshold:
+            result["low_confidence"] = True
+            result["score_threshold"] = score_threshold
+            if low_policy == "unknown":
+                result["class_name"] = "未知"
+            elif low_policy == "review":
+                result["class_name"] = f"{result.get('class_name') or '未识别'}（建议复核）"
+        base["result"] = result
+        topk = raw.get("topk", [])
+        try:
+            topk = topk[:int(algo.get("topk") or len(topk))]
+        except Exception:
+            pass
+        base["topk"] = topk
     elif task in {"detection", "obb_detection", "segmentation"}:
         predictions = _ensure_detection_centers(raw.get("predictions", []))
+        algo = meta.get("algorithm", {}) if isinstance(meta.get("algorithm"), dict) else {}
+        try:
+            predictions = predictions[:max(1, int(algo.get("max_results") or len(predictions)))]
+        except Exception:
+            pass
         base["predictions"] = predictions
         base["detection"] = _summarize_detection({"predictions": predictions})
         task_text = "旋转框检测" if task == "obb_detection" else ("实例分割" if task == "segmentation" else "检测")

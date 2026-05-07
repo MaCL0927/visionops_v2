@@ -708,3 +708,47 @@
 .camera-stage #backendCamera[src=""]{
   display:none!important;
 }
+
+/* v2.2-test：已实现设置项临时高亮
+   目的：用于现场验证“已接入保存/生效”的设置功能。
+   恢复原样时，只需把下面 4 个变量改回：
+   --implemented-setting-bg: #fff;
+   --implemented-setting-border: #dce6f0;
+   --implemented-setting-title-bg: transparent;
+   --implemented-field-bg: transparent;
+   或直接删除 HTML 中的 implemented-setting-block / implemented-setting-field 类名。 */
+:root{
+  --implemented-setting-bg:#ecfdf5;
+  --implemented-setting-border:#22c55e;
+  --implemented-setting-title-bg:rgba(34,197,94,.13);
+  --implemented-field-bg:rgba(34,197,94,.10);
+}
+.settings-section.implemented-setting-block,
+.camera-type-panel.implemented-setting-block,
+.algorithm-task-card.implemented-setting-block,
+.network-card.implemented-setting-block{
+  background:var(--implemented-setting-bg);
+  border-color:var(--implemented-setting-border);
+  box-shadow:0 10px 24px rgba(34,197,94,.10);
+}
+.implemented-setting-block > .settings-section-title,
+.implemented-setting-block h4{
+  background:var(--implemented-setting-title-bg);
+  border-radius:18px;
+  padding:8px 10px;
+}
+.setting-field.implemented-setting-field,
+.implemented-setting-block .setting-field,
+.algorithm-task-card.implemented-setting-block label{
+  background:var(--implemented-field-bg);
+  border:1px solid rgba(34,197,94,.24);
+  border-radius:18px;
+  padding:8px;
+}
+.implemented-setting-block input,
+.implemented-setting-block select,
+.setting-field.implemented-setting-field input,
+.setting-field.implemented-setting-field select{
+  border-color:rgba(34,197,94,.48);
+  background:#fff;
+}

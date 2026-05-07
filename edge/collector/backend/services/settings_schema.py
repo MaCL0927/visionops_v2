@@ -19,13 +19,14 @@ class UsbCameraSettings(BaseModel):
 
 
 class RtspCameraSettings(BaseModel):
-    ip: str = "192.168.2.64"
+    # 不写入默认密码，避免 Web 一打开就用错误密码反复连接相机并触发相机锁定。
+    ip: str = ""
     port: int = 554
     channel: str = "102"
     username: str = "admin"
-    password: str = "password"
+    password: str = ""
     transport: str = "tcp"
-    url: str = "rtsp://admin:password@192.168.2.64:554/Streaming/Channels/102"
+    url: str = ""
 
 
 class IndustrialCameraSettings(BaseModel):
@@ -156,6 +157,7 @@ class SegmentationSettings(BaseModel):
     mask_alpha: float = 0.35
     show_mask: bool = True
     show_box: bool = True
+    show_mode: str = "mask_box"
 
 
 class AlgorithmSettings(BaseModel):
@@ -167,7 +169,7 @@ class AlgorithmSettings(BaseModel):
 
 
 class VisionOpsRuntimeSettings(BaseModel):
-    version: str = "2.1.1"
+    version: str = "2.2"
     camera: CameraSettings = Field(default_factory=CameraSettings)
     vision_box: VisionBoxSettings = Field(default_factory=VisionBoxSettings)
     algorithm: AlgorithmSettings = Field(default_factory=AlgorithmSettings)

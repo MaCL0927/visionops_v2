@@ -4,7 +4,14 @@
 from fastapi import APIRouter, HTTPException
 
 from backend.services.settings_schema import VisionOpsRuntimeSettings, model_to_dict
-from backend.services.settings_store import get_settings_path, load_settings, reset_settings, save_settings
+from backend.services.settings_store import (
+    get_algorithm_runtime_config,
+    get_settings_path,
+    load_settings,
+    reset_settings,
+    save_settings,
+    write_runtime_algorithm_env,
+)
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -46,6 +53,40 @@ def reset_runtime_settings():
         "settings": model_to_dict(settings),
         "message": "已恢复默认设置",
     }
+
+
+@router.get("/algorithm/effective")
+def get_effective_algorithm_settings():
+    settings = load_settings()
+    algorithm = get_algorithm_runtime_config(settings)
+    return {
+        "ok": True,
+        "algorithm": algorithm,
+        "message": "algorithm settings loaded",
+    }
+
+
+@router.post("/algorithm/apply")
+def apply_algorithm_settings():
+    """v2.2：让算法运行时参数进入 runtime_algorithm.env，并通知验证服务下次按新参数重载。"""
+    try:
+        settings = load_settings()
+        env_path = write_runtime_algorithm_env(settings)
+        # 不直接重启 systemd：下一次模型验证/生产推理会由 validation_infer 检查参数签名，
+        # 必要时通过 switch_model.sh 用新 runtime_algorithm.env 重载 engine。
+        try:
+            from backend.services.validation_infer import invalidate_algorithm_runtime
+            invalidate_algorithm_runtime("algorithm settings updated")
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "message": "算法设置已应用，新的阈值/TopK/推理间隔将在下一次推理时生效",
+            "runtime_env": str(env_path),
+            "algorithm": get_algorithm_runtime_config(settings),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"应用算法设置失败: {exc}") from exc
 
 @router.post("/camera/apply")
 def apply_camera_settings():

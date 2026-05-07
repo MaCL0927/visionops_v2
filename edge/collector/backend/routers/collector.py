@@ -25,7 +25,7 @@ from backend.services.validation_infer import classify_image_with_model
 from backend.services.production_push import production_push_service
 from backend.services.gateway_push import push_result_to_gateway
 from backend.services.camera import backend_camera_enabled, camera_service, mjpeg_stream, read_one_jpeg
-from backend.services.settings_store import get_upload_runtime_config
+from backend.services.settings_store import get_upload_runtime_config, get_algorithm_runtime_config
 from backend.services.storage import (
     FOLDER_TO_SUBDIR,
     create_dataset,
@@ -141,6 +141,7 @@ def health():
             **camera_service.status(),
         },
         "upload": get_upload_runtime_config(),
+        "algorithm": get_algorithm_runtime_config(),
     }
 
 
@@ -459,7 +460,7 @@ def production_push_start(req: ProductionPushStartRequest):
             model_name=req.model_name,
             dataset=req.dataset or DEFAULT_DATASET_NAME,
             gateway_url=req.gateway_url or PRODUCTION_GATEWAY_PUSH_URL,
-            interval_ms=req.interval_ms or PRODUCTION_DETECT_INTERVAL_MS,
+            interval_ms=req.interval_ms,
             camera_id=req.camera_id or PRODUCTION_CAMERA_ID,
         )
     except Exception as e:
