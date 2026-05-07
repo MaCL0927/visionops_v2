@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Dict, List
 
 from backend.config import DATA_ROOT, DEVICE_ID, USER_ID, DEFAULT_DATASET_NAME, UPLOAD_TIMEOUT_SEC
-from backend.services.settings_store import get_upload_runtime_config
+from backend.services.settings_store import get_upload_runtime_config, get_effective_data_root
 
 SUBDIRS = ["all_images", "positive", "negative", "upload_packages"]
 FOLDER_TO_SUBDIR = {"all": "all_images", "positive": "positive", "negative": "negative"}
@@ -22,8 +22,9 @@ DATASET_NAME_PATTERN = re.compile(r"^[\w\-\u4e00-\u9fa5]{1,64}$")
 
 
 def ensure_data_root() -> Path:
-    DATA_ROOT.mkdir(parents=True, exist_ok=True)
-    return DATA_ROOT
+    root = get_effective_data_root()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def sanitize_dataset_name(name: str) -> str:
@@ -49,11 +50,12 @@ def dataset_path(dataset: str = "") -> Path:
 
 
 def ensure_dataset_dirs(dataset: str = "") -> Dict[str, str]:
+    root = ensure_data_root()
     ds = dataset_path(dataset)
     for sub in SUBDIRS:
         (ds / sub).mkdir(parents=True, exist_ok=True)
     return {
-        "data_root": str(DATA_ROOT),
+        "data_root": str(root),
         "dataset": ds.name,
         "dataset_root": str(ds),
         "all_images": str(ds / "all_images"),

@@ -4,8 +4,10 @@
 from fastapi import APIRouter, HTTPException
 
 from backend.services.settings_schema import VisionOpsRuntimeSettings, model_to_dict
+from backend.services.time_sync import get_time_sync_status, test_time_sync
 from backend.services.settings_store import (
     get_algorithm_runtime_config,
+    get_vision_box_effective_status,
     get_settings_path,
     load_settings,
     reset_settings,
@@ -87,6 +89,52 @@ def apply_algorithm_settings():
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"应用算法设置失败: {exc}") from exc
+
+
+@router.get("/vision-box/effective")
+def get_effective_vision_box_settings():
+    """v2.3.0：只读视觉盒子基础参数与磁盘告警状态。"""
+    try:
+        return get_vision_box_effective_status(load_settings())
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"读取视觉盒子参数失败: {exc}") from exc
+
+
+@router.post("/vision-box/apply")
+def apply_vision_box_settings():
+    """v2.3.0：基础参数无需重启，保存后由各业务接口动态读取。"""
+    try:
+        status = get_vision_box_effective_status(load_settings())
+        return {
+            "ok": True,
+            "message": "视觉盒子基础参数已应用：设备ID、客户ID、默认模式、模型目录、磁盘告警阈值已生效",
+            **status,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"应用视觉盒子参数失败: {exc}") from exc
+
+
+
+@router.get("/time-sync/status")
+def get_time_sync_status_api():
+    """v2.3.3：读取 chrony/timedatectl 时间同步状态；不修改系统配置。"""
+    try:
+        return get_time_sync_status()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"读取时间同步状态失败: {exc}") from exc
+
+
+@router.post("/time-sync/test")
+def test_time_sync_api():
+    """v2.3.3：测试当前配置的上位机 NTP 是否已被 chrony 识别/选中。"""
+    try:
+        result = test_time_sync()
+        if not result.get("ok"):
+            # 测试失败不抛 500，保持前端可读结果。
+            return result
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"测试时间同步失败: {exc}") from exc
 
 @router.post("/camera/apply")
 def apply_camera_settings():

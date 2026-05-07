@@ -20,6 +20,7 @@ import yaml
 
 from backend.services.settings_store import (
     get_algorithm_effective_config,
+    get_effective_models_dir,
     write_runtime_algorithm_env,
 )
 
@@ -67,7 +68,7 @@ def _safe_model_path(model_name: str) -> Path:
     if not name.endswith(".rknn"):
         raise ValueError("只能选择 .rknn 模型")
 
-    models_dir = MODELS_DIR.resolve()
+    models_dir = get_effective_models_dir().resolve()
     path = (models_dir / name).resolve()
     if models_dir not in path.parents and path != models_dir:
         raise ValueError("非法模型路径")

@@ -157,6 +157,97 @@ let selectedModel='';
 let modelItems=[];
 let pendingClassificationImageData='';
 let pendingCaptureZoom=1;
+let initialDefaultModeApplied=false;
+
+function applyInitialDefaultMode(defaultMode){
+  if(initialDefaultModeApplied) return;
+  const mode=(defaultMode || '').toString().trim().toLowerCase();
+  if(!mode) return;
+  initialDefaultModeApplied=true;
+  if(mode==='production' && !isProduction){
+    enterProductionMode();
+  }else if(mode==='factory' && isProduction){
+    enterFactoryMode();
+  }
+}
+
+function updateVisionBoxEffectiveStatus(status){
+  const el=document.getElementById('visionBoxEffectiveStatus');
+  if(!el || !status) return;
+  const vb=status.vision_box || {};
+  const disk=status.disk || {};
+  const diskText=Number.isFinite(Number(disk.used_percent)) ? `${Number(disk.used_percent).toFixed(1)}%` : '--';
+  const warn=!!disk.warning;
+  el.classList.toggle('warn', warn);
+  el.textContent=`已实现：设备ID=${vb.device_id || '--'}，客户ID=${vb.customer_id || '--'}，默认模式=${vb.default_mode || '--'}，模型目录=${vb.models_dir || '--'}，采集数据目录=${vb.data_dir || disk.path || '--'}，磁盘使用=${diskText}/${disk.warn_percent || '--'}%。${warn ? ' 已超过告警阈值' : ''}`;
+}
+
+async function refreshVisionBoxEffectiveStatus(){
+  try{
+    const data=await apiGet('/api/settings/vision-box/effective');
+    updateVisionBoxEffectiveStatus(data);
+    return data;
+  }catch(_){
+    return null;
+  }
+}
+
+function formatOffsetSeconds(value){
+  const n=Number(value);
+  if(!Number.isFinite(n)) return '--';
+  const abs=Math.abs(n);
+  if(abs < 0.001) return `${(n*1000000).toFixed(1)} us`;
+  if(abs < 1) return `${(n*1000).toFixed(2)} ms`;
+  return `${n.toFixed(3)} s`;
+}
+
+function updateTimeSyncStatus(data){
+  const el=document.getElementById('timeSyncStatus');
+  if(!el) return;
+  if(!data){
+    el.textContent='时间同步状态：未读取';
+    el.classList.remove('warn');
+    return;
+  }
+  const st=data.status || {};
+  const cfg=data.config || {};
+  const sources=data.sources || [];
+  const selected=st.selected_source || '--';
+  const configured=cfg.ntp_server || '--';
+  const synced=!!st.synced;
+  const leap=st.leap_status || '--';
+  const offset=formatOffsetSeconds(st.system_time_offset_sec);
+  const lastOffset=formatOffsetSeconds(st.last_offset_sec);
+  const sourceCount=Array.isArray(sources) ? sources.length : 0;
+  el.classList.toggle('warn', !synced);
+  el.textContent=`时间同步：${synced ? '已同步' : '未同步/未选中'}；配置源=${configured}；当前源=${selected}；Leap=${leap}；Stratum=${st.stratum ?? '--'}；系统偏差=${offset}；最近偏差=${lastOffset}；sources=${sourceCount}`;
+}
+
+async function refreshTimeSyncStatus(){
+  try{
+    const data=await apiGet('/api/settings/time-sync/status');
+    updateTimeSyncStatus(data);
+    return data;
+  }catch(err){
+    updateTimeSyncStatus(null);
+    showToast(err.message || '读取时间同步状态失败');
+    return null;
+  }
+}
+
+async function testTimeSync(){
+  try{
+    const settings=collectSettingsFromForm();
+    const saved=await apiPost('/api/settings',settings);
+    runtimeSettingsCache=saved.settings || settings;
+    fillSettingsForm(runtimeSettingsCache);
+    const data=await apiPost('/api/settings/time-sync/test',{});
+    updateTimeSyncStatus(data);
+    showToast(data.message || '时间同步测试完成');
+  }catch(err){
+    showToast(err.message || '时间同步测试失败');
+  }
+}
 
 function syncCounts(counts){
   const c=counts || {all:dataStore.all.length,positive:dataStore.positive.length,negative:dataStore.negative.length};
@@ -169,7 +260,12 @@ async function loadCollectorState(){
   currentDataset=data.dataset || 'local_dataset';
   deviceId=data.device_id || deviceId;
   userId=data.user_id || userId;
+  const visionBox=data.vision_box || {};
+  const customerId=visionBox.customer_id || '';
   document.getElementById('uploadDeviceId').value=deviceId;
+  if(customerId && document.getElementById('uploadCustomerId')) document.getElementById('uploadCustomerId').value=customerId;
+  if(data.disk) updateVisionBoxEffectiveStatus({vision_box:visionBox,disk:data.disk});
+  applyInitialDefaultMode(visionBox.default_mode);
   syncCounts(data.counts);
   if(data.camera && data.camera.backend_enabled){
     backendCameraAvailable=true;
@@ -183,7 +279,12 @@ async function refreshDatasetSummary(){
   const data=await apiGet(`/api/dataset/summary?dataset=${encodeURIComponent(currentDataset)}`);
   deviceId=data.device_id || deviceId;
   userId=data.user_id || userId;
+  const visionBox=data.vision_box || {};
+  const customerId=visionBox.customer_id || '';
   document.getElementById('uploadDeviceId').value=deviceId;
+  if(customerId && document.getElementById('uploadCustomerId')) document.getElementById('uploadCustomerId').value=customerId;
+  if(data.disk) updateVisionBoxEffectiveStatus({vision_box:visionBox,disk:data.disk});
+  applyInitialDefaultMode(visionBox.default_mode);
   syncCounts(data.counts);
   await refreshFolder(currentFolder);
 }
@@ -1355,7 +1456,7 @@ function stopProductionMonitor(){
 }
 
 async function initApp(){
-  try{await loadCollectorState();await loadModels();await loadValidationImages();showToast('本地采集目录已就绪');}catch(err){showToast(err.message)}
+  try{await loadCollectorState();await loadModels();await loadValidationImages();await refreshVisionBoxEffectiveStatus();showToast('本地采集目录已就绪');}catch(err){showToast(err.message)}
   updateCameraLifecycle();
 }
 initApp();
@@ -1379,6 +1480,7 @@ let runtimeSettingsCache=null;
 function openSettingsModal(){
   if(settingsModal) settingsModal.classList.add('active');
   loadRuntimeSettingsToForm();
+  refreshTimeSyncStatus();
 }
 function closeSettingsModal(){
   if(settingsModal) settingsModal.classList.remove('active');
@@ -1432,13 +1534,13 @@ function writeSettingValue(el,value){
   el.value=String(value);
 }
 function collectSettingsFromForm(){
-  const settings=runtimeSettingsCache?JSON.parse(JSON.stringify(runtimeSettingsCache)):{version:'2.2'};
+  const settings=runtimeSettingsCache?JSON.parse(JSON.stringify(runtimeSettingsCache)):{version:'2.3.0'};
   document.querySelectorAll('[data-setting]').forEach(el=>{
     const path=el.dataset.setting;
     if(!path) return;
     setByPath(settings,path,parseSettingValue(el));
   });
-  settings.version='2.2';
+  settings.version='2.3.0';
   return settings;
 }
 function clampNumber(value, fallback, minValue, maxValue){
@@ -1478,6 +1580,7 @@ function fillSettingsForm(settings){
   });
   updateCameraTypePanel();
   applyRuntimeSettingsToClient(settings);
+  refreshVisionBoxEffectiveStatus();
 }
 async function loadRuntimeSettingsToForm(){
   try{
@@ -1542,9 +1645,23 @@ async function saveRuntimeSettingsFromForm(){
       message=`设置已保存，但算法应用失败：${algoErr.message || algoErr}`;
     }
     try{
+      const vbResult=await apiPost('/api/settings/vision-box/apply',{});
+      updateVisionBoxEffectiveStatus(vbResult);
+      refreshTimeSyncStatus();
+      if(vbResult && vbResult.vision_box){
+        deviceId=vbResult.vision_box.device_id || deviceId;
+        const uploadDevice=document.getElementById('uploadDeviceId');
+        const uploadCustomer=document.getElementById('uploadCustomerId');
+        if(uploadDevice) uploadDevice.value=deviceId;
+        if(uploadCustomer && vbResult.vision_box.customer_id) uploadCustomer.value=vbResult.vision_box.customer_id;
+      }
+    }catch(vbErr){
+      message=`设置已保存，但视觉盒子参数应用失败：${vbErr.message || vbErr}`;
+    }
+    try{
       const applyResult=await applyCameraSettingsAfterSave();
       refreshBackendCameraPreview();
-      if(applyResult && applyResult.message && !message.includes('失败')) message='设置已保存，相机与算法参数已应用';
+      if(applyResult && applyResult.message && !message.includes('失败')) message='设置已保存，相机、算法和视觉盒子基础参数已应用';
     }catch(applyErr){
       message=`设置已保存，但相机应用失败：${applyErr.message || applyErr}`;
     }
@@ -1558,6 +1675,7 @@ async function resetRuntimeSettings(){
     const data=await apiPost('/api/settings/reset',{});
     runtimeSettingsCache=data.settings || {};
     fillSettingsForm(runtimeSettingsCache);
+    refreshTimeSyncStatus();
     try{
       await applyAlgorithmSettingsAfterSave();
     }catch(_){/* 恢复默认后的算法应用失败不影响回显 */}
@@ -1601,9 +1719,13 @@ if(settingCameraType) settingCameraType.addEventListener('change',updateCameraTy
 const saveSettingsBtn=document.getElementById('saveSettingsMock');
 const resetSettingsBtn=document.getElementById('resetSettingsMock');
 const testRtspCameraBtn=document.getElementById('testRtspCameraBtn');
+const refreshTimeSyncStatusBtn=document.getElementById('refreshTimeSyncStatusBtn');
+const testTimeSyncBtn=document.getElementById('testTimeSyncBtn');
 if(saveSettingsBtn) saveSettingsBtn.addEventListener('click',saveRuntimeSettingsFromForm);
 if(resetSettingsBtn) resetSettingsBtn.addEventListener('click',resetRuntimeSettings);
 if(testRtspCameraBtn) testRtspCameraBtn.addEventListener('click',testRtspCameraConnection);
+if(refreshTimeSyncStatusBtn) refreshTimeSyncStatusBtn.addEventListener('click',refreshTimeSyncStatus);
+if(testTimeSyncBtn) testTimeSyncBtn.addEventListener('click',testTimeSync);
 document.querySelectorAll('[data-setting^="camera.rtsp."]').forEach(el=>{
   if(el.dataset.setting !== 'camera.rtsp.url') el.addEventListener('change',syncRtspUrlFromFields);
 });

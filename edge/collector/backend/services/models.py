@@ -10,11 +10,13 @@ from typing import Any, Dict, List
 import yaml
 
 from backend.config import MODELS_DIR
+from backend.services.settings_store import get_effective_models_dir
 
 
 def ensure_models_dir() -> Path:
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    return MODELS_DIR
+    models_dir = get_effective_models_dir()
+    # v2.3.0：模型目录动态读取，但不存在/不可读时 settings_store 会回退到 MODELS_DIR。
+    return models_dir
 
 
 def _format_mtime(ts: float) -> str:

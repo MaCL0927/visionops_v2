@@ -752,3 +752,53 @@
   border-color:rgba(34,197,94,.48);
   background:#fff;
 }
+
+/* v2.3.0-light：视觉盒子基础参数生效状态提示 */
+.settings-inline-status{
+  margin-top:14px;
+  padding:12px 14px;
+  border-radius:14px;
+  border:1px solid #bfdbfe;
+  background:#eff6ff;
+  color:#1d4ed8;
+  font-weight:800;
+  font-size:14px;
+}
+.settings-inline-status.warn{
+  border-color:#f59e0b;
+  background:#fffbeb;
+  color:#92400e;
+}
+
+/* v2.3.1：端口配置只读显示，避免误以为保存后会动态切换端口 */
+.setting-field.readonly-setting-field{
+  background:#f8fafc;
+  border:1px dashed #cbd5e1;
+  border-radius:18px;
+  padding:8px;
+}
+.setting-field.readonly-setting-field input[readonly]{
+  color:#475569;
+  background:#eef2f7;
+  border-color:#cbd5e1;
+  cursor:not-allowed;
+}
+.setting-field.readonly-setting-field small{
+  color:#64748b;
+}
+
+/* v2.3.3：时间同步状态按钮压缩布局 */
+.settings-actions.compact-actions{
+  display:flex;
+  justify-content:flex-start;
+  gap:10px;
+  margin-top:10px;
+}
+.settings-actions.compact-actions .small{
+  padding:8px 12px;
+  min-height:34px;
+  font-size:13px;
+}
+.ntp-setting-block .settings-inline-status{
+  margin-top:10px;
+}

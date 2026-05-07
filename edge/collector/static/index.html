@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>VisionOps Edge Collector UI</title>
-  <link rel="stylesheet" href="/static/styles.css?v=setting_v2_2_highlight" />
+  <link rel="stylesheet" href="/static/styles.css?v=setting_v2_3_3_light" />
 </head>
 <body>
   <header class="topbar">
@@ -453,6 +453,51 @@
             </div>
           </div>
 
+          <div class="settings-section implemented-setting-block">
+            <div class="settings-section-title"><b>视觉盒子参数</b><span>设备身份、端口说明和基础运行参数</span></div>
+            <div class="settings-grid three">
+              <label class="setting-field implemented-setting-field">设备 ID<input data-setting="vision_box.device_id" value="rk3588-001" /></label>
+              <label class="setting-field implemented-setting-field">客户 ID<input data-setting="vision_box.customer_id" value="CUST-001" /></label>
+              <label class="setting-field implemented-setting-field">默认启动模式<select data-setting="vision_box.default_mode"><option value="production">生产模式</option><option value="factory" selected>工厂模式</option></select></label>
+              <label class="setting-field readonly-setting-field">Collector 端口<input type="number" value="8090" readonly aria-readonly="true" /><small>开发阶段手动 app.py 启动，暂不开放修改。</small></label>
+              <label class="setting-field readonly-setting-field">生产推理端口<input type="number" value="8082" readonly aria-readonly="true" /><small>当前与模型验证共用同一个推理服务。</small></label>
+              <label class="setting-field readonly-setting-field">模型验证端口<input type="number" value="8082" readonly aria-readonly="true" /><small>切换模型会重启该端口上的推理服务。</small></label>
+              <label class="setting-field implemented-setting-field">模型目录<input data-setting="vision_box.models_dir" value="/opt/visionops/models" /></label>
+              <label class="setting-field implemented-setting-field">采集数据目录<input data-setting="vision_box.data_dir" value="/opt/visionops/edge/collector/data" /><small>保存后下一次采集、刷新图片列表、打包上传生效；不会迁移旧数据。</small></label>
+              <label class="setting-field implemented-setting-field">磁盘告警阈值<input data-setting="vision_box.disk_warn_percent" type="number" value="80" /></label>
+            </div>
+            <div id="visionBoxEffectiveStatus" class="settings-inline-status">已实现：设备 ID、客户 ID、默认启动模式、模型目录、采集数据目录、磁盘告警阈值。端口为只读说明项。</div>
+          </div>
+
+          <div class="settings-section implemented-setting-block ntp-setting-block">
+            <div class="settings-section-title"><b>时间同步</b><span>读取 chrony 状态，检查 RK3588 是否同步到上位机 NTP</span></div>
+            <div class="settings-grid three">
+              <label class="setting-field implemented-setting-field">同步模式
+                <select data-setting="vision_box.time_sync.mode">
+                  <option value="upper_host_ntp" selected>上位机 NTP</option>
+                  <option value="public_ntp">公网 NTP</option>
+                  <option value="manual">手动设置</option>
+                  <option value="off">关闭</option>
+                </select>
+              </label>
+              <label class="setting-field implemented-setting-field">上位机 NTP 地址
+                <input data-setting="vision_box.time_sync.ntp_server" value="192.168.1.100" placeholder="例如：192.168.1.100" />
+              </label>
+              <label class="setting-field implemented-setting-field">备用 NTP
+                <input data-setting="vision_box.time_sync.fallback_ntp" value="ntp.ubuntu.com" placeholder="例如：ntp.ubuntu.com" />
+              </label>
+              <label class="setting-field readonly-setting-field">客户端
+                <input data-setting="vision_box.time_sync.client" value="chrony" readonly aria-readonly="true" />
+                <small>当前版本只读取/测试 chrony 状态，不自动改 /etc/chrony 配置。</small>
+              </label>
+            </div>
+            <div id="timeSyncStatus" class="settings-inline-status">时间同步状态：未读取</div>
+            <div class="settings-actions compact-actions">
+              <button id="refreshTimeSyncStatusBtn" class="secondary small" type="button">刷新时间同步状态</button>
+              <button id="testTimeSyncBtn" class="secondary small" type="button">测试 NTP 同步</button>
+            </div>
+          </div>
+
           <div class="settings-section upload-setting-block implemented-setting-block">
             <div class="settings-section-title"><b>服务端上传配置</b><span>采集包上传到服务端 PC，通常走外网口 eth1 / Factory LAN</span></div>
             <div class="settings-grid three">
@@ -478,31 +523,6 @@
                 <input data-setting="vision_box.upload.timeout_sec" type="number" value="120" min="5" />
               </label>
             </div>
-          </div>
-
-          <div class="settings-section">
-            <div class="settings-section-title"><b>视觉盒子参数</b><span>设备身份、服务端口、存储和维护</span></div>
-            <div class="settings-grid three">
-              <label class="setting-field">设备 ID<input data-setting="vision_box.device_id" value="rk3588-001" /></label>
-              <label class="setting-field">客户 ID<input data-setting="vision_box.customer_id" value="CUST-001" /></label>
-              <label class="setting-field">默认启动模式<select data-setting="vision_box.default_mode"><option value="production" selected>生产模式</option><option value="factory">工厂模式</option></select></label>
-              <label class="setting-field">Collector 端口<input data-setting="vision_box.collector_port" type="number" value="8090" /></label>
-              <label class="setting-field">生产推理端口<input data-setting="vision_box.production_port" type="number" value="8080" /></label>
-              <label class="setting-field">模型验证端口<input data-setting="vision_box.validation_port" type="number" value="8082" /></label>
-              <label class="setting-field">模型目录<input data-setting="vision_box.models_dir" value="/opt/visionops/models" /></label>
-              <label class="setting-field">采集数据目录<input data-setting="vision_box.data_dir" value="/opt/visionops/edge/collector/data/local_dataset" /></label>
-              <label class="setting-field">日志保留天数<input data-setting="vision_box.log_keep_days" type="number" value="7" /></label>
-              <label class="setting-field">USB 自动挂载<select data-setting="vision_box.usb_auto_mount"><option value="true" selected>开启</option><option value="false">关闭</option></select></label>
-              <label class="setting-field">磁盘告警阈值<input data-setting="vision_box.disk_warn_percent" type="number" value="80" /></label>
-              <label class="setting-field">时间同步<select data-setting="vision_box.time_sync"><option value="ntp" selected>NTP 自动同步</option><option value="manual">手动设置</option></select></label>
-            </div>
-          </div>
-
-          <div class="board-action-strip">
-            <button class="mini-btn" type="button">测试内网相机</button>
-            <button class="mini-btn" type="button">测试外网上传</button>
-            <button class="mini-btn" type="button">查看服务状态</button>
-            <button class="mini-btn" type="button">导出诊断包</button>
           </div>
         </section>
 
@@ -657,6 +677,6 @@
 
   <div id="toast" class="toast"></div>
   <div id="centerNotice" class="center-notice" role="status" aria-live="polite"><div id="centerNoticeBox" class="center-notice-box"></div></div>
-  <script src="/static/app.js?v=setting_v2_2_highlight"></script>
+  <script src="/static/app.js?v=setting_v2_3_3_light"></script>
 </body>
 </html>

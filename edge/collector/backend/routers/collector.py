@@ -25,7 +25,7 @@ from backend.services.validation_infer import classify_image_with_model
 from backend.services.production_push import production_push_service
 from backend.services.gateway_push import push_result_to_gateway
 from backend.services.camera import backend_camera_enabled, camera_service, mjpeg_stream, read_one_jpeg
-from backend.services.settings_store import get_upload_runtime_config, get_algorithm_runtime_config
+from backend.services.settings_store import get_upload_runtime_config, get_algorithm_runtime_config, get_vision_box_runtime_config, get_vision_box_effective_status
 from backend.services.storage import (
     FOLDER_TO_SUBDIR,
     create_dataset,
@@ -48,6 +48,18 @@ from backend.services.storage import (
 )
 
 router = APIRouter(prefix="/api")
+
+
+def _vision_box_cfg():
+    return get_vision_box_runtime_config()
+
+
+def _effective_device_id() -> str:
+    return _vision_box_cfg().get("device_id") or DEVICE_ID
+
+
+def _effective_customer_id() -> str:
+    return _vision_box_cfg().get("customer_id") or "CUST-001"
 
 
 class DatasetCreateRequest(BaseModel):
@@ -130,9 +142,11 @@ def health():
         "status": "ok",
         "ui_version": UI_VERSION,
         "mode": "fixed-local-capture",
-        "device_id": DEVICE_ID,
+        "device_id": _effective_device_id(),
         "user_id": USER_ID,
-        "data_root": str(DATA_ROOT),
+        "vision_box": get_vision_box_effective_status().get("vision_box", {}),
+        "disk": get_vision_box_effective_status().get("disk", {}),
+        "data_root": dirs.get("data_root", str(ensure_data_root())),
         "dataset": dirs["dataset"],
         "dirs": dirs,
         "counts": get_counts(dirs["dataset"]),
@@ -148,7 +162,7 @@ def health():
 @router.get("/datasets")
 def datasets():
     ensure_default_dataset_dirs()
-    return {"ok": True, "data_root": str(ensure_data_root()), "device_id": DEVICE_ID, "user_id": USER_ID, "items": list_datasets()}
+    return {"ok": True, "data_root": str(ensure_data_root()), "device_id": _effective_device_id(), "user_id": USER_ID, "items": list_datasets()}
 
 
 @router.post("/datasets")
@@ -174,7 +188,8 @@ def init_dataset(req: DatasetCreateRequest):
 def dataset_summary(dataset: str = DEFAULT_DATASET_NAME):
     try:
         dirs = ensure_dataset_dirs(dataset or default_dataset_name())
-        return {"ok": True, "device_id": DEVICE_ID, "user_id": USER_ID, "dirs": dirs, "counts": get_counts(dirs["dataset"])}
+        status = get_vision_box_effective_status()
+        return {"ok": True, "device_id": _effective_device_id(), "user_id": USER_ID, "vision_box": status.get("vision_box", {}), "disk": status.get("disk", {}), "dirs": dirs, "counts": get_counts(dirs["dataset"])}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -210,9 +225,9 @@ def capture(req: CaptureRequest):
         if backend_camera_enabled() and not req.image_data:
             camera_service.start()
             jpeg = camera_service.get_latest_frame_jpeg(quality=90, timeout=3.0)
-            item = save_capture_bytes(ds, jpeg, req.folder, req.device_id or DEVICE_ID, req.user_id or USER_ID, ".jpg")
+            item = save_capture_bytes(ds, jpeg, req.folder, req.device_id or _effective_device_id(), req.user_id or USER_ID, ".jpg")
         else:
-            item = save_capture(ds, req.image_data or "", req.folder, req.device_id or DEVICE_ID, req.user_id or USER_ID)
+            item = save_capture(ds, req.image_data or "", req.folder, req.device_id or _effective_device_id(), req.user_id or USER_ID)
         folder_text = {"all": "全部图片", "positive": "正样本", "negative": "负样本"}.get(req.folder, req.folder)
         return {"ok": True, "message": f"已保存到 {folder_text} 文件夹：{item['filename']}", "item": item, "counts": get_counts(ds)}
     except Exception as e:
@@ -227,7 +242,7 @@ def capture_labeled(req: LabeledCaptureRequest):
     """
     try:
         ds = req.dataset or default_dataset_name()
-        item = save_labeled_capture(ds, req.image_data or "", req.label, req.device_id or DEVICE_ID, req.user_id or USER_ID)
+        item = save_labeled_capture(ds, req.image_data or "", req.label, req.device_id or _effective_device_id(), req.user_id or USER_ID)
         label_text = "合格" if req.label == "positive" else "不合格"
         return {"ok": True, "message": f"已保存为{label_text}样本：{item['filename']}", "item": item, "counts": get_counts(ds)}
     except Exception as e:
@@ -269,7 +284,7 @@ def dataset_images_clear(req: ClearDatasetImagesRequest):
 @router.post("/upload")
 def upload(req: UploadRequest):
     try:
-        package = create_upload_package(req.dataset or default_dataset_name(), req.device_id, req.customer_id, req.contact_info or "", req.remark or "")
+        package = create_upload_package(req.dataset or default_dataset_name(), req.device_id or _effective_device_id(), req.customer_id or _effective_customer_id(), req.contact_info or "", req.remark or "")
         return {"ok": True, "message": package.get("remote_upload", {}).get("message", "已完成打包上传"), "package": package}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -376,9 +391,9 @@ def validation_capture_classify(req: ValidationCaptureClassifyRequest):
         if backend_camera_enabled() and not req.image_data:
             camera_service.start()
             jpeg = camera_service.get_latest_frame_jpeg(quality=92, timeout=3.0)
-            item = save_capture_bytes(ds, jpeg, "all", req.device_id or DEVICE_ID, req.user_id or USER_ID, ".jpg")
+            item = save_capture_bytes(ds, jpeg, "all", req.device_id or _effective_device_id(), req.user_id or USER_ID, ".jpg")
         else:
-            item = save_capture(ds, req.image_data or "", "all", req.device_id or DEVICE_ID, req.user_id or USER_ID)
+            item = save_capture(ds, req.image_data or "", "all", req.device_id or _effective_device_id(), req.user_id or USER_ID)
 
         image_path = get_validation_image_path(item["filename"], ds)
         result = classify_image_with_model(req.model_name, image_path)

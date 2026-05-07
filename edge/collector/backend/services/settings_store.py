@@ -63,6 +63,44 @@ def _migrate_upload_to_vision_box(data: Dict[str, Any]) -> Dict[str, Any]:
     return data
 
 
+def _migrate_time_sync_to_vision_box(data: Dict[str, Any]) -> Dict[str, Any]:
+    """兼容旧版 vision_box.time_sync = "ntp" / "manual" 的字符串写法。
+
+    v2.3.3 统一改为 dict：
+      vision_box.time_sync.mode / ntp_server / fallback_ntp / client
+    """
+    if not isinstance(data, dict):
+        return data
+    vision_box = data.setdefault("vision_box", {})
+    if not isinstance(vision_box, dict):
+        data["vision_box"] = vision_box = {}
+    time_sync = vision_box.get("time_sync")
+    if isinstance(time_sync, dict):
+        time_sync.setdefault("mode", "upper_host_ntp")
+        time_sync.setdefault("ntp_server", "192.168.1.100")
+        time_sync.setdefault("fallback_ntp", "ntp.ubuntu.com")
+        time_sync.setdefault("client", "chrony")
+    else:
+        mode = str(time_sync or "upper_host_ntp").strip().lower()
+        if mode in {"ntp", "auto", "upper", "upper_host"}:
+            mode = "upper_host_ntp"
+        elif mode not in {"upper_host_ntp", "public_ntp", "manual", "off"}:
+            mode = "upper_host_ntp"
+        vision_box["time_sync"] = {
+            "mode": mode,
+            "ntp_server": "192.168.1.100",
+            "fallback_ntp": "ntp.ubuntu.com",
+            "client": "chrony",
+        }
+    return data
+
+
+def _migrate_runtime_settings(data: Dict[str, Any]) -> Dict[str, Any]:
+    data = _migrate_upload_to_vision_box(data)
+    data = _migrate_time_sync_to_vision_box(data)
+    return data
+
+
 def _as_int(value: Any, default: int) -> int:
     try:
         return int(float(value))
@@ -211,6 +249,152 @@ def _clamp_float(value: Any, default: float, min_value: float = None, max_value:
         result = min(max_value, result)
     return result
 
+
+
+
+def _safe_vision_box_mode(value: Any) -> str:
+    mode = str(value or "").strip().lower()
+    return mode if mode in {"production", "factory"} else "factory"
+
+
+def _safe_models_dir(value: Any) -> Path:
+    text = str(value or "").strip()
+    if not text:
+        return MODELS_DIR.resolve()
+    try:
+        path = Path(text).expanduser().resolve()
+    except Exception:
+        return MODELS_DIR.resolve()
+    # v2.3.0 只允许绝对路径；不存在时不自动创建，避免误扫危险目录。
+    if not path.is_absolute() or not path.exists() or not path.is_dir():
+        return MODELS_DIR.resolve()
+    return path
+
+
+def _safe_data_root(value: Any) -> Path:
+    """v2.3.2：采集数据根目录。
+
+    约定：vision_box.data_dir 表示 Collector 数据根目录，例如
+    /opt/visionops/edge/collector/data，默认数据集 local_dataset 会放在该目录下。
+    为兼容早期 UI 把 data_dir 写成 .../data/local_dataset 的情况，如果路径末尾
+    等于 DEFAULT_DATASET_NAME，则自动取其父目录，避免生成 local_dataset/local_dataset。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return DATA_ROOT.resolve()
+    try:
+        path = Path(text).expanduser().resolve()
+    except Exception:
+        return DATA_ROOT.resolve()
+    if not path.is_absolute():
+        return DATA_ROOT.resolve()
+    dangerous = {Path("/").resolve(), Path("/etc").resolve(), Path("/bin").resolve(), Path("/sbin").resolve(), Path("/usr").resolve()}
+    if path in dangerous:
+        return DATA_ROOT.resolve()
+    if path.name == os.getenv("VISIONOPS_DEFAULT_DATASET", "local_dataset"):
+        path = path.parent
+    return path
+
+
+def get_effective_data_root(settings: VisionOpsRuntimeSettings = None) -> Path:
+    if settings is None:
+        settings = load_settings()
+    data = model_to_dict(settings).get("vision_box", {})
+    if not isinstance(data, dict):
+        data = {}
+    return _safe_data_root(data.get("data_dir") or DATA_ROOT)
+
+
+def get_vision_box_runtime_config(settings: VisionOpsRuntimeSettings = None) -> Dict[str, Any]:
+    """v2.3.2：视觉盒子基础参数的即时读取。
+
+    低风险参数即时生效：设备 ID、客户 ID、默认启动模式、模型目录、磁盘告警阈值、采集数据根目录。
+    端口 / systemd / 网卡仍不在这里动态切换。
+    """
+    if settings is None:
+        settings = load_settings()
+    data = model_to_dict(settings).get("vision_box", {})
+    if not isinstance(data, dict):
+        data = {}
+    device_id = str(data.get("device_id") or DEVICE_ID or "rk3588-001").strip() or "rk3588-001"
+    customer_id = str(data.get("customer_id") or os.getenv("VISIONOPS_CUSTOMER_ID", "CUST-001")).strip() or "CUST-001"
+    default_mode = _safe_vision_box_mode(data.get("default_mode", "factory"))
+    models_dir = _safe_models_dir(data.get("models_dir") or MODELS_DIR)
+    data_root = _safe_data_root(data.get("data_dir") or DATA_ROOT)
+    disk_warn_percent = _clamp_int(data.get("disk_warn_percent", 80), 80, 1, 99)
+    return {
+        "device_id": device_id,
+        "customer_id": customer_id,
+        "default_mode": default_mode,
+        "models_dir": str(models_dir),
+        "data_dir": str(data_root),
+        "disk_warn_percent": disk_warn_percent,
+    }
+
+
+def get_effective_models_dir(settings: VisionOpsRuntimeSettings = None) -> Path:
+    return Path(get_vision_box_runtime_config(settings).get("models_dir") or str(MODELS_DIR)).resolve()
+
+
+def get_time_sync_runtime_config(settings: VisionOpsRuntimeSettings = None) -> Dict[str, Any]:
+    """v2.3.3：读取视觉盒子时间同步期望配置。
+
+    当前只用于 Web 显示/测试，不写 /etc/chrony，也不重启 chrony。
+    """
+    if settings is None:
+        settings = load_settings()
+    data = model_to_dict(settings).get("vision_box", {})
+    if not isinstance(data, dict):
+        data = {}
+    ts = data.get("time_sync")
+    if not isinstance(ts, dict):
+        ts = _migrate_time_sync_to_vision_box({"vision_box": {"time_sync": ts}}).get("vision_box", {}).get("time_sync", {})
+    mode = str(ts.get("mode") or "upper_host_ntp").strip().lower()
+    if mode not in {"upper_host_ntp", "public_ntp", "manual", "off"}:
+        mode = "upper_host_ntp"
+    return {
+        "mode": mode,
+        "ntp_server": str(ts.get("ntp_server") or "192.168.1.100").strip(),
+        "fallback_ntp": str(ts.get("fallback_ntp") or "ntp.ubuntu.com").strip(),
+        "client": str(ts.get("client") or "chrony").strip().lower() or "chrony",
+    }
+
+
+def get_vision_box_effective_status(settings: VisionOpsRuntimeSettings = None) -> Dict[str, Any]:
+    cfg = get_vision_box_runtime_config(settings)
+    data_root = Path(cfg.get("data_dir") or str(DATA_ROOT)).resolve()
+    try:
+        data_root.mkdir(parents=True, exist_ok=True)
+        usage = shutil.disk_usage(data_root)
+        total = int(usage.total)
+        used = int(usage.used)
+        free = int(usage.free)
+        percent = round((used / total * 100.0) if total else 0.0, 2)
+    except Exception:
+        total = used = free = 0
+        percent = 0.0
+    warn = bool(percent >= float(cfg["disk_warn_percent"]))
+    return {
+        "ok": True,
+        "vision_box": cfg,
+        "disk": {
+            "path": str(data_root),
+            "total_bytes": total,
+            "used_bytes": used,
+            "free_bytes": free,
+            "used_percent": percent,
+            "warn_percent": cfg["disk_warn_percent"],
+            "warning": warn,
+        },
+        "notes": {
+            "collector_port": "当前版本仅保存，重启 Collector 后再考虑生效",
+            "production_port": "当前版本仅保存，不自动重启推理服务",
+            "validation_port": "当前版本不切换验证端口，避免影响正在运行的推理流程",
+            "data_dir": "v2.3.2 起保存后下一次采集/刷新列表生效，不强制迁移旧数据",
+            "usb_auto_mount": "预留到 v2.4",
+            "time_sync": "v2.3.3 起支持 chrony 状态查看与 NTP 源测试，不直接改系统配置",
+        },
+    }
 
 def _safe_task_name(task: Any) -> str:
     name = str(task or "").strip().lower()
@@ -383,6 +567,7 @@ def build_default_settings() -> VisionOpsRuntimeSettings:
     defaults["camera"]["common"]["reconnect_max_fails"] = _as_int(CAMERA_RECONNECT_MAX_FAILS, 30)
 
     defaults["vision_box"]["device_id"] = str(DEVICE_ID)
+    defaults["vision_box"]["customer_id"] = str(os.getenv("VISIONOPS_CUSTOMER_ID", "CUST-001"))
     defaults["vision_box"]["models_dir"] = str(MODELS_DIR)
     defaults["vision_box"]["data_dir"] = str(DATA_ROOT)
     defaults["vision_box"]["validation_port"] = _as_int(VALIDATION_INFER_PORT, 8082)
@@ -400,8 +585,8 @@ def build_default_settings() -> VisionOpsRuntimeSettings:
         "timeout_sec": _as_int(UPLOAD_TIMEOUT_SEC, 120),
     }
 
-    defaults = _migrate_upload_to_vision_box(normalize_rtsp_settings_dict(defaults))
-    defaults["version"] = "2.2"
+    defaults = _migrate_runtime_settings(normalize_rtsp_settings_dict(defaults))
+    defaults["version"] = "2.3.3"
     return VisionOpsRuntimeSettings(**defaults)
 
 
@@ -418,19 +603,19 @@ def load_raw_overrides() -> Dict[str, Any]:
             data = yaml.safe_load(f) or {}
     except Exception:
         return {}
-    return _migrate_upload_to_vision_box(data) if isinstance(data, dict) else {}
+    return _migrate_runtime_settings(data) if isinstance(data, dict) else {}
 
 
 def load_settings() -> VisionOpsRuntimeSettings:
-    merged = _migrate_upload_to_vision_box(_deep_merge(model_to_dict(build_default_settings()), load_raw_overrides()))
+    merged = _migrate_runtime_settings(_deep_merge(model_to_dict(build_default_settings()), load_raw_overrides()))
     return VisionOpsRuntimeSettings(**merged)
 
 
 def save_settings(settings: VisionOpsRuntimeSettings) -> VisionOpsRuntimeSettings:
     path = get_settings_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = _migrate_upload_to_vision_box(normalize_rtsp_settings_dict(model_to_dict(settings)))
-    data["version"] = "2.2"
+    data = _migrate_runtime_settings(normalize_rtsp_settings_dict(model_to_dict(settings)))
+    data["version"] = "2.3.3"
 
     fd, tmp_name = tempfile.mkstemp(prefix=".runtime_overrides.", suffix=".yaml", dir=str(path.parent))
     try:

@@ -99,19 +99,28 @@ class UploadSettings(BaseModel):
     timeout_sec: int = 120
 
 
+
+
+class TimeSyncSettings(BaseModel):
+    # v2.3.3：仅保存期望配置 + 查看/测试 chrony 状态，不直接修改系统 chrony 配置。
+    mode: str = "upper_host_ntp"
+    ntp_server: str = "192.168.1.100"
+    fallback_ntp: str = "ntp.ubuntu.com"
+    client: str = "chrony"
+
 class VisionBoxSettings(BaseModel):
     device_id: str = "rk3588-001"
     customer_id: str = "CUST-001"
-    default_mode: str = "production"
+    default_mode: str = "factory"
     collector_port: int = 8090
     production_port: int = 8080
     validation_port: int = 8082
     models_dir: str = "/opt/visionops/models"
-    data_dir: str = "/opt/visionops/edge/collector/data/local_dataset"
+    data_dir: str = "/opt/visionops/edge/collector/data"
     log_keep_days: int = 7
     usb_auto_mount: bool = True
     disk_warn_percent: int = 80
-    time_sync: str = "ntp"
+    time_sync: TimeSyncSettings = Field(default_factory=TimeSyncSettings)
     network: VisionBoxNetworkSettings = Field(default_factory=VisionBoxNetworkSettings)
     upload: UploadSettings = Field(default_factory=UploadSettings)
 
@@ -169,7 +178,7 @@ class AlgorithmSettings(BaseModel):
 
 
 class VisionOpsRuntimeSettings(BaseModel):
-    version: str = "2.2"
+    version: str = "2.3.3"
     camera: CameraSettings = Field(default_factory=CameraSettings)
     vision_box: VisionBoxSettings = Field(default_factory=VisionBoxSettings)
     algorithm: AlgorithmSettings = Field(default_factory=AlgorithmSettings)
