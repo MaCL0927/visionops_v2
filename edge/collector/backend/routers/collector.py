@@ -426,7 +426,27 @@ def validation_capture_classify(req: ValidationCaptureClassifyRequest):
 def validation_realtime_image(filename: str, dataset: str = DEFAULT_DATASET_NAME):
     try:
         path = get_realtime_image_path(filename, dataset or default_dataset_name())
-        return FileResponse(path)
+        # 不直接返回 FileResponse(path)。FileResponse 会先 stat 得到 Content-Length，
+        # 后续打开文件发送时，如果 realtime_latest.jpg 已被下一帧替换，可能出现
+        # "Response content shorter than Content-Length"。这里先一次性读入 bytes，
+        # Response 的 Content-Length 与 body 长度严格一致。结合保存端 os.replace，
+        # 可以稳定支持 500ms 甚至更短的实时刷新间隔。
+        suffix = path.suffix.lower()
+        media_type = "image/jpeg"
+        if suffix == ".png":
+            media_type = "image/png"
+        elif suffix == ".webp":
+            media_type = "image/webp"
+        content = path.read_bytes()
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Content-Length": str(len(content)),
+            },
+        )
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:

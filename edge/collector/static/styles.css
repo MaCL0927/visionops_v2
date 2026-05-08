@@ -803,7 +803,7 @@
   margin-top:10px;
 }
 
-/* v6.8：ROI Classification 双模型 bundle 在模型列表中作为一个模型显示 */
+/* v6.8：ROI Classification 双模型 bundle 在模型列表中作为一个模型显示；画面叠加：绿色 detector bbox，橙色 final ROI */
 .model-card.pipeline-model-card{
   border-color:#bfdbfe;
   background:linear-gradient(180deg,#eff6ff 0%,#ffffff 78%);
@@ -824,7 +824,7 @@
   box-shadow:0 0 0 3px rgba(37,99,235,.12);
 }
 .target-row-roi{
-  grid-template-columns:64px minmax(120px,1fr) minmax(120px,1fr);
+  grid-template-columns:64px minmax(120px,1fr) minmax(120px,1fr) minmax(160px,1.2fr);
   align-items:center;
   column-gap:10px;
   row-gap:6px;
@@ -836,6 +836,10 @@
 }
 .target-row-roi .target-index{
   color:#2563eb;
+  font-weight:900;
+}
+.target-row-roi .target-final-roi{
+  color:#c2410c;
   font-weight:900;
 }
 @media (max-width:1300px){

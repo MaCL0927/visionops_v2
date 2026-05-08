@@ -5,7 +5,7 @@ VisionOps ROI Classification Pipeline Engine
 
 第一版 roi_classification 运行时：
 - stage1: detection RKNN 定位目标整体
-- roi:    直接使用检测框整体 full_box 裁剪 ROI，可带 padding
+- roi:    支持 full_box / relative_box / class_relative_box，可按检测类别使用精细 ROI
 - stage2: classification RKNN 对 ROI 做分类
 - FastAPI 接口保持 /health /infer /metrics /stats
 
@@ -35,8 +35,21 @@ stage1:
   target_class_name: tube
 
 roi:
-  mode: full_box
-  padding_ratio: 0.05
+  # full_box: 检测框 + padding 后直接分类
+  # class_relative_box: 先取检测框 + padding，再按检测类别应用相对裁剪框
+  mode: class_relative_box
+  coordinate: relative_to_padded_detection_box
+  default:
+    enabled: false
+    mode: full_box
+    padding_ratio: 0.0
+    relative_box: {x1: 0.0, y1: 0.0, x2: 1.0, y2: 1.0}
+  by_detector_class:
+    "0:tube":
+      enabled: true
+      mode: relative_box
+      padding_ratio: 0.0
+      relative_box: {x1: 0.0, y1: 0.532364, x2: 1.0, y2: 0.793918}
 
 stage2:
   task: classification
@@ -265,6 +278,138 @@ def crop_full_box_roi(
     return roi, [float(ix1), float(iy1), float(ix2), float(iy2)]
 
 
+
+
+def normalize_relative_box(value: Any) -> Dict[str, float]:
+    """
+    将 relative_box 归一化到 [0,1]。
+
+    relative_box 的坐标系是 base ROI：
+      base ROI = detector bbox + padding
+      final ROI = base ROI 内的相对裁剪框
+    """
+    if not isinstance(value, dict):
+        value = {}
+
+    def to_float(key: str, default: float) -> float:
+        try:
+            v = float(value.get(key, default))
+        except Exception:
+            v = float(default)
+        return max(0.0, min(1.0, v))
+
+    x1 = to_float("x1", 0.0)
+    y1 = to_float("y1", 0.0)
+    x2 = to_float("x2", 1.0)
+    y2 = to_float("y2", 1.0)
+
+    if x2 < x1:
+        x1, x2 = x2, x1
+    if y2 < y1:
+        y1, y2 = y2, y1
+
+    # 防止极小框导致空 ROI；这里保守地扩大到最小 2%。
+    min_size = 0.02
+    if (x2 - x1) < min_size:
+        x2 = min(1.0, x1 + min_size)
+        x1 = max(0.0, x2 - min_size)
+    if (y2 - y1) < min_size:
+        y2 = min(1.0, y1 + min_size)
+        y1 = max(0.0, y2 - min_size)
+
+    return {
+        "x1": float(x1),
+        "y1": float(y1),
+        "x2": float(x2),
+        "y2": float(y2),
+    }
+
+
+def detector_class_key(pred: Dict[str, Any]) -> str:
+    try:
+        cid = int(pred.get("class_id"))
+    except Exception:
+        cid = -1
+    cname = str(pred.get("class_name", cid)).strip() or str(cid)
+    return "{}:{}".format(cid, cname)
+
+
+def crop_image_by_xyxy(
+    image: np.ndarray,
+    bbox: List[float],
+    min_width: int = 4,
+    min_height: int = 4,
+) -> Tuple[Optional[np.ndarray], Optional[List[float]]]:
+    h, w = image.shape[:2]
+    x1, y1, x2, y2 = clip_xyxy(bbox, w, h)
+
+    ix1, iy1, ix2, iy2 = [int(round(v)) for v in [x1, y1, x2, y2]]
+    ix1 = max(0, min(w - 1, ix1))
+    iy1 = max(0, min(h - 1, iy1))
+    ix2 = max(0, min(w, ix2))
+    iy2 = max(0, min(h, iy2))
+
+    if ix2 <= ix1 or iy2 <= iy1:
+        return None, None
+    if (ix2 - ix1) < int(min_width) or (iy2 - iy1) < int(min_height):
+        return None, None
+
+    roi = image[iy1:iy2, ix1:ix2].copy()
+    return roi, [float(ix1), float(iy1), float(ix2), float(iy2)]
+
+
+def crop_roi_with_policy(
+    image: np.ndarray,
+    bbox: List[float],
+    policy: Dict[str, Any],
+    min_width: int = 4,
+    min_height: int = 4,
+) -> Tuple[Optional[np.ndarray], Optional[List[float]], Optional[List[float]], Dict[str, float]]:
+    """
+    根据 ROI policy 裁剪最终分类 ROI。
+
+    返回：
+      roi: 实际送入分类模型的图像
+      final_bbox: 原图坐标系下最终分类 ROI
+      base_bbox: 原图坐标系下 detector bbox + padding 后的 base ROI
+      relative_box: base ROI 坐标系下的比例框
+    """
+    padding_ratio = float(policy.get("padding_ratio", 0.0))
+    base_roi, base_bbox = crop_full_box_roi(
+        image=image,
+        bbox=bbox,
+        padding_ratio=padding_ratio,
+        min_width=min_width,
+        min_height=min_height,
+    )
+    if base_roi is None or base_bbox is None:
+        return None, None, None, normalize_relative_box(policy.get("relative_box"))
+
+    mode = str(policy.get("mode") or "full_box").strip().lower()
+    rel_box = normalize_relative_box(policy.get("relative_box"))
+
+    if mode != "relative_box":
+        return base_roi, base_bbox, base_bbox, rel_box
+
+    bx1, by1, bx2, by2 = [float(x) for x in base_bbox]
+    bw = max(1.0, bx2 - bx1)
+    bh = max(1.0, by2 - by1)
+
+    final_bbox = [
+        bx1 + bw * rel_box["x1"],
+        by1 + bh * rel_box["y1"],
+        bx1 + bw * rel_box["x2"],
+        by1 + bh * rel_box["y2"],
+    ]
+    final_roi, final_bbox = crop_image_by_xyxy(
+        image=image,
+        bbox=final_bbox,
+        min_width=min_width,
+        min_height=min_height,
+    )
+    return final_roi, final_bbox, base_bbox, rel_box
+
+
 def select_detection_prediction(
     predictions: List[Dict[str, Any]],
     target_class_id: Optional[int],
@@ -363,12 +508,24 @@ class ROIPipelineConfig:
             raise ValueError("roi_classification stage2 当前仅支持 classification，当前: {}".format(self.classifier_config.task))
 
         self.roi_mode = str(self.roi.get("mode") or "full_box").strip().lower()
-        if self.roi_mode != "full_box":
-            raise ValueError("roi_classification 第一版仅支持 roi.mode=full_box，当前: {}".format(self.roi_mode))
+        if self.roi_mode not in {"full_box", "relative_box", "class_relative_box"}:
+            raise ValueError(
+                "roi_classification 支持 roi.mode=full_box / relative_box / class_relative_box，当前: {}".format(
+                    self.roi_mode
+                )
+            )
 
-        self.padding_ratio = float(self.roi.get("padding_ratio", 0.0))
-        self.min_roi_width = int(self.roi.get("min_width", 4))
-        self.min_roi_height = int(self.roi.get("min_height", 4))
+        default_roi = self.roi.get("default") if isinstance(self.roi.get("default"), dict) else {}
+        self.padding_ratio = float(first_nonempty(default_roi.get("padding_ratio"), self.roi.get("padding_ratio"), 0.0))
+        self.default_relative_box = normalize_relative_box(
+            first_nonempty(default_roi.get("relative_box"), self.roi.get("relative_box"), {})
+        )
+        self.roi_by_detector_class = (
+            self.roi.get("by_detector_class") if isinstance(self.roi.get("by_detector_class"), dict) else {}
+        )
+
+        self.min_roi_width = int(first_nonempty(self.roi.get("min_width"), default_roi.get("min_width"), 4))
+        self.min_roi_height = int(first_nonempty(self.roi.get("min_height"), default_roi.get("min_height"), 4))
         self.select_policy = str(self.stage1.get("select_policy") or "conf_area")
 
         self.target_class_name = self.stage1.get("target_class_name")
@@ -381,6 +538,90 @@ class ROIPipelineConfig:
             self.target_class_id = None
         else:
             self.target_class_id = int(target_id)
+
+    def resolve_roi_policy(self, selected_detection: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        根据当前检测类别选择 ROI 裁剪策略。
+
+        full_box:
+          detection bbox + padding 后直接分类。
+        relative_box:
+          对所有检测类别使用同一个 relative_box。
+        class_relative_box:
+          按 "class_id:class_name" 查找 by_detector_class；
+          如果没有命中，回退 default/full_box。
+        """
+        class_key = detector_class_key(selected_detection)
+
+        if self.roi_mode == "relative_box":
+            return {
+                "pipeline_roi_mode": self.roi_mode,
+                "mode": "relative_box",
+                "enabled": True,
+                "class_key": class_key,
+                "matched_class_key": "",
+                "padding_ratio": float(first_nonempty(self.roi.get("padding_ratio"), self.padding_ratio)),
+                "relative_box": normalize_relative_box(self.roi.get("relative_box")),
+                "source": "global_relative_box",
+            }
+
+        if self.roi_mode == "class_relative_box":
+            class_id = selected_detection.get("class_id")
+            class_name = str(selected_detection.get("class_name", "")).strip()
+            candidate_keys = [class_key]
+            if class_id is not None:
+                candidate_keys.append(str(class_id))
+            if class_name:
+                candidate_keys.append(class_name)
+
+            matched_key = ""
+            matched_policy: Optional[Dict[str, Any]] = None
+            for key in candidate_keys:
+                entry = self.roi_by_detector_class.get(key)
+                if isinstance(entry, dict):
+                    matched_key = key
+                    matched_policy = entry
+                    break
+
+            if matched_policy and bool(matched_policy.get("enabled", False)):
+                return {
+                    "pipeline_roi_mode": self.roi_mode,
+                    "mode": str(matched_policy.get("mode") or "relative_box").strip().lower(),
+                    "enabled": True,
+                    "class_key": class_key,
+                    "matched_class_key": matched_key,
+                    "padding_ratio": float(first_nonempty(matched_policy.get("padding_ratio"), self.padding_ratio)),
+                    "relative_box": normalize_relative_box(matched_policy.get("relative_box")),
+                    "source": "by_detector_class",
+                }
+
+            default_roi = self.roi.get("default") if isinstance(self.roi.get("default"), dict) else {}
+            default_enabled = bool(default_roi.get("enabled", False))
+            default_mode = str(default_roi.get("mode") or ("relative_box" if default_enabled else "full_box")).strip().lower()
+            if not default_enabled:
+                default_mode = "full_box"
+            return {
+                "pipeline_roi_mode": self.roi_mode,
+                "mode": default_mode,
+                "enabled": default_enabled,
+                "class_key": class_key,
+                "matched_class_key": "",
+                "padding_ratio": float(first_nonempty(default_roi.get("padding_ratio"), self.padding_ratio)),
+                "relative_box": normalize_relative_box(default_roi.get("relative_box")),
+                "source": "default",
+            }
+
+        return {
+            "pipeline_roi_mode": self.roi_mode,
+            "mode": "full_box",
+            "enabled": False,
+            "class_key": class_key,
+            "matched_class_key": "",
+            "padding_ratio": self.padding_ratio,
+            "relative_box": self.default_relative_box,
+            "source": "full_box",
+        }
+
 
     def summary(self) -> Dict[str, Any]:
         return {
@@ -405,6 +646,8 @@ class ROIPipelineConfig:
                 "padding_ratio": self.padding_ratio,
                 "min_width": self.min_roi_width,
                 "min_height": self.min_roi_height,
+                "default_relative_box": self.default_relative_box,
+                "by_detector_class_keys": sorted([str(k) for k in self.roi_by_detector_class.keys()]),
             },
             "stage2": {
                 "task": self.classifier_config.normalized_task(),
@@ -497,10 +740,11 @@ class ROICLassificationPipelineEngine:
                 }
 
             crop_t0 = time.perf_counter()
-            roi, roi_box = crop_full_box_roi(
+            roi_policy = self.cfg.resolve_roi_policy(selected)
+            roi, roi_box, base_roi_box, relative_box = crop_roi_with_policy(
                 image=image,
                 bbox=selected.get("bbox") or [0, 0, 0, 0],
-                padding_ratio=self.cfg.padding_ratio,
+                policy=roi_policy,
                 min_width=self.cfg.min_roi_width,
                 min_height=self.cfg.min_roi_height,
             )
@@ -522,9 +766,15 @@ class ROICLassificationPipelineEngine:
                     },
                     "classifier": None,
                     "roi": {
-                        "mode": self.cfg.roi_mode,
-                        "padding_ratio": self.cfg.padding_ratio,
+                        "mode": roi_policy.get("mode", self.cfg.roi_mode),
+                        "pipeline_mode": roi_policy.get("pipeline_roi_mode", self.cfg.roi_mode),
+                        "padding_ratio": roi_policy.get("padding_ratio", self.cfg.padding_ratio),
                         "bbox": roi_box,
+                        "base_bbox": base_roi_box,
+                        "relative_box": relative_box,
+                        "class_key": roi_policy.get("class_key", ""),
+                        "matched_class_key": roi_policy.get("matched_class_key", ""),
+                        "source": roi_policy.get("source", ""),
                     },
                     "timing_ms": {
                         "detector": round(det_latency, 2),
@@ -564,10 +814,16 @@ class ROICLassificationPipelineEngine:
                 "detector": selected,
                 "classifier": prediction,
                 "roi": {
-                    "mode": self.cfg.roi_mode,
+                    "mode": roi_policy.get("mode", self.cfg.roi_mode),
+                    "pipeline_mode": roi_policy.get("pipeline_roi_mode", self.cfg.roi_mode),
                     "bbox": [round(float(v), 2) for v in roi_box],
+                    "base_bbox": [round(float(v), 2) for v in base_roi_box] if base_roi_box else None,
                     "shape": [int(x) for x in roi.shape],
-                    "padding_ratio": self.cfg.padding_ratio,
+                    "padding_ratio": roi_policy.get("padding_ratio", self.cfg.padding_ratio),
+                    "relative_box": relative_box,
+                    "class_key": roi_policy.get("class_key", ""),
+                    "matched_class_key": roi_policy.get("matched_class_key", ""),
+                    "source": roi_policy.get("source", ""),
                 },
             }
 

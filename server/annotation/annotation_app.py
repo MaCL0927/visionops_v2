@@ -663,6 +663,195 @@ def crop_roi_with_padding(
     }
 
 
+
+
+def roi_cls_detector_class_key(det_class_id: Any, det_class_name: Any) -> str:
+    try:
+        cid = int(det_class_id)
+    except Exception:
+        cid = -1
+    cname = str(det_class_name or cid).strip() or str(cid)
+    return f"{cid}:{cname}"
+
+
+def default_relative_box() -> dict[str, float]:
+    return {"x1": 0.0, "y1": 0.0, "x2": 1.0, "y2": 1.0}
+
+
+def normalize_relative_box(value: Any) -> dict[str, float]:
+    if not isinstance(value, dict):
+        value = default_relative_box()
+
+    x1 = float(value.get("x1", 0.0))
+    y1 = float(value.get("y1", 0.0))
+    x2 = float(value.get("x2", 1.0))
+    y2 = float(value.get("y2", 1.0))
+
+    x1 = max(0.0, min(1.0, x1))
+    y1 = max(0.0, min(1.0, y1))
+    x2 = max(0.0, min(1.0, x2))
+    y2 = max(0.0, min(1.0, y2))
+
+    if x2 < x1:
+        x1, x2 = x2, x1
+    if y2 < y1:
+        y1, y2 = y2, y1
+
+    if (x2 - x1) < 0.02 or (y2 - y1) < 0.02:
+        raise ValueError("精细 ROI 太小，请至少保留宽高 2% 以上的区域")
+
+    return {
+        "x1": round(x1, 6),
+        "y1": round(y1, 6),
+        "x2": round(x2, 6),
+        "y2": round(y2, 6),
+    }
+
+
+def ensure_roi_policy(data: dict[str, Any]) -> dict[str, Any]:
+    padding_ratio = float(data.get("padding_ratio", ROI_CLS_DEFAULT_PADDING))
+    policy = data.get("roi_policy")
+    if not isinstance(policy, dict):
+        policy = {}
+
+    policy.setdefault("schema_version", 1)
+    policy.setdefault("mode", "class_relative_box")
+    policy.setdefault("coordinate", "relative_to_padded_detection_box")
+    policy.setdefault("default", {
+        "enabled": False,
+        "mode": "full_box",
+        "base": "det_bbox_with_padding",
+        "padding_ratio": padding_ratio,
+        "relative_box": default_relative_box(),
+    })
+    if not isinstance(policy.get("by_detector_class"), dict):
+        policy["by_detector_class"] = {}
+
+    data["roi_policy"] = policy
+    return policy
+
+
+def roi_policy_for_item(data: dict[str, Any], item: dict[str, Any]) -> dict[str, Any] | None:
+    policy = ensure_roi_policy(data)
+    key = roi_cls_detector_class_key(item.get("det_class_id"), item.get("det_class_name"))
+    entry = policy.get("by_detector_class", {}).get(key)
+    if isinstance(entry, dict) and entry.get("enabled"):
+        return entry
+    return None
+
+
+def compute_final_roi_bbox_from_item(data: dict[str, Any], item: dict[str, Any]) -> tuple[list[int], str, dict[str, float]]:
+    """
+    返回最终用于分类训练/推理的 ROI bbox。
+
+    基础 bbox 是 item["roi_bbox"]，也就是检测框 + padding 后的 base ROI。
+    如果当前检测类别配置了精细 ROI，则在 base ROI 内按 relative_box 再裁一次。
+    """
+    base = item.get("roi_bbox") or item.get("base_roi_bbox")
+    if not isinstance(base, list) or len(base) != 4:
+        raise ValueError(f"候选项缺少有效 roi_bbox: {item.get('id')}")
+
+    bx1, by1, bx2, by2 = [float(v) for v in base]
+    bw = max(1.0, bx2 - bx1)
+    bh = max(1.0, by2 - by1)
+
+    entry = roi_policy_for_item(data, item)
+    if entry:
+        rel_box = normalize_relative_box(entry.get("relative_box"))
+        mode = "relative_box"
+    else:
+        rel_box = default_relative_box()
+        mode = "full_box"
+
+    fx1 = bx1 + bw * rel_box["x1"]
+    fy1 = by1 + bh * rel_box["y1"]
+    fx2 = bx1 + bw * rel_box["x2"]
+    fy2 = by1 + bh * rel_box["y2"]
+
+    final = [int(round(fx1)), int(round(fy1)), int(round(fx2)), int(round(fy2))]
+    if final[2] <= final[0] or final[3] <= final[1]:
+        raise ValueError(f"最终 ROI 无效: {final}")
+
+    return final, mode, rel_box
+
+
+def crop_item_final_roi_to_path(data: dict[str, Any], item: dict[str, Any], dst_path: Path) -> dict[str, Any]:
+    """
+    从原图重新裁剪当前 item 的最终 ROI，并保存到分类训练目录。
+
+    注意：不要直接复制 candidates/crop_xxx.jpg，因为该图只是 base ROI；
+    一旦启用精细 ROI，训练图必须重新从 source_image 按 final_roi_bbox 裁剪。
+    """
+    if Image is None:
+        raise RuntimeError("Pillow 未安装，无法裁剪 ROI。请安装 pillow。")
+
+    source_rel = str(item.get("source_image") or "")
+    if not source_rel:
+        raise ValueError(f"候选项缺少 source_image: {item.get('id')}")
+
+    source_path = PROJECT_ROOT / source_rel if not Path(source_rel).is_absolute() else Path(source_rel)
+    if not source_path.exists():
+        raise FileNotFoundError(f"原图不存在: {source_path}")
+
+    final_bbox, mode, rel_box = compute_final_roi_bbox_from_item(data, item)
+
+    with Image.open(source_path) as im:
+        im = im.convert("RGB")
+        w, h = im.size
+        x1, y1, x2, y2 = final_bbox
+        x1 = max(0, min(w - 1, x1))
+        y1 = max(0, min(h - 1, y1))
+        x2 = max(0, min(w, x2))
+        y2 = max(0, min(h, y2))
+        if x2 <= x1 or y2 <= y1:
+            raise ValueError(f"最终 ROI 超出图像范围或无效: {[x1, y1, x2, y2]}")
+        crop = im.crop((x1, y1, x2, y2))
+        dst_path.parent.mkdir(parents=True, exist_ok=True)
+        crop.save(dst_path, quality=95)
+
+    item["base_roi_bbox"] = item.get("roi_bbox")
+    item["final_roi_bbox"] = [x1, y1, x2, y2]
+    item["final_roi_size"] = [x2 - x1, y2 - y1]
+    item["roi_mode"] = mode
+    item["relative_box"] = rel_box
+
+    return {
+        "final_roi_bbox": item["final_roi_bbox"],
+        "final_roi_size": item["final_roi_size"],
+        "roi_mode": mode,
+        "relative_box": rel_box,
+    }
+
+
+def rebuild_labeled_samples_for_detector_class(
+    data: dict[str, Any],
+    det_class_id: Any,
+    det_class_name: Any,
+) -> int:
+    """
+    当前检测类别的精细 ROI policy 更新后，把该检测类别下已经 labeled 的分类样本重新裁剪并覆盖。
+    """
+    target_key = roi_cls_detector_class_key(det_class_id, det_class_name)
+    rebuilt = 0
+
+    for item in data.get("items", []):
+        if item.get("status") != "labeled":
+            continue
+        item_key = roi_cls_detector_class_key(item.get("det_class_id"), item.get("det_class_name"))
+        if item_key != target_key:
+            continue
+
+        exported = str(item.get("exported_path") or "").strip()
+        if not exported:
+            continue
+
+        dst_path = PROJECT_ROOT / exported if not Path(exported).is_absolute() else Path(exported)
+        crop_item_final_roi_to_path(data, item, dst_path)
+        rebuilt += 1
+
+    return rebuilt
+
+
 def _roi_cls_build_worker(log_file, update, batch_dir: Path, payload: dict[str, Any]) -> dict[str, Any]:
     try:
         from ultralytics import YOLO
@@ -789,6 +978,19 @@ def _roi_cls_build_worker(log_file, update, batch_dir: Path, payload: dict[str, 
         "padding_ratio": padding_ratio,
         "select_policy": select_policy,
         "raw_classification_dir": rel(roi_cls_raw_dir()),
+        "roi_policy": {
+            "schema_version": 1,
+            "mode": "class_relative_box",
+            "coordinate": "relative_to_padded_detection_box",
+            "default": {
+                "enabled": False,
+                "mode": "full_box",
+                "base": "det_bbox_with_padding",
+                "padding_ratio": padding_ratio,
+                "relative_box": default_relative_box(),
+            },
+            "by_detector_class": {},
+        },
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "total_images": len(images),
@@ -913,18 +1115,90 @@ def roi_cls_label_candidate(payload: dict[str, Any]) -> dict[str, Any]:
             except Exception:
                 pass
 
-        shutil.copy2(crop_path, dst_path)
+        # 根据当前 ROI policy 重新从原图裁剪最终训练图。
+        # 未启用精细 ROI 时，这等价于复制 base ROI；启用后会保存精细 ROI。
+        crop_meta = crop_item_final_roi_to_path(data, item, dst_path)
 
         item["status"] = "labeled"
         item["assigned_label"] = label
         item["exported_path"] = rel(dst_path)
         item["labeled_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        item.update(crop_meta)
         save_roi_cls_manifest(data)
         return {
             "message": f"已保存为分类样本: {label}",
             "item": item,
             "classes": list_roi_cls_classes(),
             "manifest": data,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+
+
+@router.post("/api/annotator/roi-cls/roi-policy")
+def roi_cls_save_roi_policy(payload: dict[str, Any]) -> dict[str, Any]:
+    """
+    保存某个检测类别的一套精细 ROI 规则。
+
+    规则是相对于 base ROI 的比例框：
+      base ROI = detection bbox + padding
+      final ROI = base ROI 内的 relative_box
+
+    同一个检测类别只保留一套规则；重复确认会覆盖该类别已有规则。
+    保存后会把该检测类别下已经 labeled 的分类训练样本重新裁剪并覆盖。
+    """
+    try:
+        session_id = str(payload.get("session_id") or "")
+        item_id = str(payload.get("item_id") or "")
+        enabled = bool(payload.get("enabled", True))
+        if not session_id or not item_id:
+            raise ValueError("session_id 和 item_id 不能为空")
+
+        data = load_roi_cls_manifest(session_id)
+        items = data.get("items", [])
+        item = next((x for x in items if x.get("id") == item_id), None)
+        if item is None:
+            raise FileNotFoundError(f"未找到候选项: {item_id}")
+
+        det_class_id = item.get("det_class_id")
+        det_class_name = item.get("det_class_name")
+        key = roi_cls_detector_class_key(det_class_id, det_class_name)
+        rel_box = normalize_relative_box(payload.get("relative_box"))
+
+        policy = ensure_roi_policy(data)
+        by_class = policy.setdefault("by_detector_class", {})
+        entry = {
+            "enabled": enabled,
+            "mode": "relative_box" if enabled else "full_box",
+            "base": "det_bbox_with_padding",
+            "padding_ratio": float(data.get("padding_ratio", ROI_CLS_DEFAULT_PADDING)),
+            "relative_box": rel_box if enabled else default_relative_box(),
+            "det_class_id": int(det_class_id),
+            "det_class_name": str(det_class_name or det_class_id),
+            "class_key": key,
+            "coordinate": "relative_to_padded_detection_box",
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        by_class[key] = entry
+        policy["updated_at"] = entry["updated_at"]
+        data["roi_policy"] = policy
+
+        rebuilt_count = rebuild_labeled_samples_for_detector_class(data, det_class_id, det_class_name)
+        save_roi_cls_manifest(data)
+
+        return {
+            "message": (
+                f"已保存检测类别 {key} 的精细 ROI 规则，并重新裁剪已分类样本 {rebuilt_count} 张"
+                if enabled else
+                f"已关闭检测类别 {key} 的精细 ROI，并重新裁剪已分类样本 {rebuilt_count} 张"
+            ),
+            "class_key": key,
+            "policy": entry,
+            "rebuilt_count": rebuilt_count,
+            "manifest": data,
+            "classes": list_roi_cls_classes(),
         }
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -1345,12 +1619,37 @@ ANNOTATOR_HTML = r'''
     .roi-modal .muted, .roi-modal .hint, .roi-modal .quick-msg, .roi-modal .roi-small { font-size:15px; }
     .roi-modal button, .roi-modal select, .roi-modal input { font-size:16px; padding:11px 13px; }
     .roi-preview { width:100%; max-height:360px; object-fit:contain; background:#f8fafc; border:1px solid #e5e7eb; border-radius:12px; margin:8px 0; }
-    .roi-crop { width:100%; max-height:260px; object-fit:contain; background:#111827; border-radius:12px; margin:8px 0; }
+    .roi-crop { max-width:100%; max-height:360px; width:auto; height:auto; object-fit:contain; background:#111827; border-radius:12px; margin:0; display:block; }
+    .roi-crop-wrap { display:inline-block; position:relative; max-width:100%; background:#111827; border-radius:12px; margin:8px 0; overflow:hidden; vertical-align:top; }
+    .fine-roi-panel { margin:0; padding:12px 14px; border:1px solid #e5e7eb; border-radius:12px; background:#f8fafc; min-height:100%; }
+    .fine-roi-toolbar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:0 0 6px; }
+    .fine-roi-toolbar label { display:inline-flex; align-items:center; gap:6px; font-size:15px; font-weight:800; color:#111827; }
+    .fine-roi-toolbar input[type="checkbox"] { width:auto; }
+    .fine-roi-msg { color:#64748b; font-size:14px; line-height:1.45; }
+    .roi-review-top { display:grid; grid-template-columns:minmax(0,1.08fr) minmax(360px,.92fr); gap:18px; align-items:start; margin:6px 0 12px; }
+    .roi-info-card { border:1px solid #e5e7eb; border-radius:12px; background:#fff; padding:12px 14px; }
+    .roi-info-head { display:flex; flex-wrap:wrap; gap:10px 14px; align-items:center; margin-bottom:8px; font-size:15px; color:#111827; }
+    .roi-info-head strong { font-size:17px; }
+    .roi-info-chip { display:inline-flex; align-items:center; padding:4px 10px; border-radius:999px; background:#eef2ff; color:#3730a3; font-weight:700; font-size:13px; }
+    .roi-info-lines { display:grid; gap:5px; }
+    .roi-info-line { font-size:14px; color:#475569; line-height:1.45; }
+    .roi-info-line b { color:#111827; }
+    .roi-info-file { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .fine-roi-box { display:none; position:absolute; border:3px solid #f59e0b; background:rgba(245,158,11,.16); box-shadow:0 0 0 9999px rgba(15,23,42,.16); cursor:move; z-index:5; }
+    .fine-roi-handle { position:absolute; width:14px; height:14px; background:#f59e0b; border:2px solid #fff; border-radius:999px; z-index:6; }
+    .fine-roi-handle.nw { left:-8px; top:-8px; cursor:nwse-resize; }
+    .fine-roi-handle.ne { right:-8px; top:-8px; cursor:nesw-resize; }
+    .fine-roi-handle.sw { left:-8px; bottom:-8px; cursor:nesw-resize; }
+    .fine-roi-handle.se { right:-8px; bottom:-8px; cursor:nwse-resize; }
     .roi-class-buttons { display:flex; flex-wrap:wrap; gap:10px; margin:10px 0; }
     .roi-class-buttons button { background:#eef2ff; color:#3730a3; border:1px solid #c7d2fe; padding:10px 12px; }
     .roi-small { font-size:15px; color:#475569; line-height:1.6; white-space:pre-wrap; }
     .roi-nav { display:flex; gap:10px; margin:10px 0; }
     .roi-modal-grid { display:grid; grid-template-columns:minmax(420px, 1.05fr) minmax(320px, .95fr); gap:18px; align-items:start; }
+    .roi-image-col { display:flex; flex-direction:column; align-items:flex-start; }
+    .roi-image-col.crop-col { align-items:center; }
+    .roi-image-col .muted { width:100%; }
+    .roi-crop-stage { width:100%; display:flex; justify-content:center; align-items:flex-start; }
     .roi-field-label { margin:12px 0 6px; font-size:15px; font-weight:800; color:#111827; }
     .roi-param-note { margin:6px 0 0; color:#64748b; font-size:13px; line-height:1.45; }
     .roi-class-card { background:#f8fafc; border:1px solid #e5e7eb; border-radius:14px; padding:14px; margin-bottom:14px; }
@@ -1377,11 +1676,11 @@ ANNOTATOR_HTML = r'''
       max-height:none; min-height:0; overflow:auto;
     }
     .modal.roi-modal .roi-preview { max-height:360px; }
-    .modal.roi-modal .roi-crop { max-height:260px; }
+    .modal.roi-modal .roi-crop { max-height:360px; }
     @media (max-width: 1180px) {
       .modal.roi-modal { width:98vw; height:96vh; }
       .modal.roi-modal .roi-modal-body { grid-template-columns:360px minmax(0,1fr); }
-      .roi-modal-grid { grid-template-columns:1fr; }
+      .roi-review-top, .roi-modal-grid { grid-template-columns:1fr; }
     }
     @media (max-width: 880px) {
       .modal.roi-modal .roi-modal-body { grid-template-columns:1fr; overflow:auto; }
@@ -1562,15 +1861,34 @@ ANNOTATOR_HTML = r'''
           </div>
 
           <div class="section-title">4. 候选 ROI 审核</div>
-          <div id="roiCandidateInfo" class="roi-small">暂无候选。</div>
+          <div class="roi-review-top">
+            <div id="roiCandidateInfo" class="roi-info-card">暂无候选。</div>
+            <div class="fine-roi-panel">
+              <div class="fine-roi-toolbar">
+                <label><input id="fineRoiEnable" type="checkbox" onchange="onFineRoiToggle()" /> 启用精细 ROI</label>
+                <button id="fineRoiConfirmBtn" class="gray" onclick="confirmFineRoiPolicy()" style="display:none">确认精细 ROI</button>
+              </div>
+              <div id="fineRoiMsg" class="fine-roi-msg">默认不启用精细 ROI，直接使用检测框 + padding 的完整 ROI。</div>
+            </div>
+          </div>
           <div class="roi-modal-grid">
-            <div>
+            <div class="roi-image-col">
               <div class="muted">原图预览：绿色为检测框，红色为实际裁剪 ROI</div>
               <img id="roiPreviewImg" class="roi-preview" style="display:none" />
             </div>
-            <div>
+            <div class="roi-image-col crop-col">
               <div class="muted">裁剪后的分类 ROI（已限制显示高度，实际训练图仍为原始裁剪尺寸）</div>
-              <img id="roiCropImg" class="roi-crop" style="display:none" />
+              <div class="roi-crop-stage">
+              <div id="roiCropWrap" class="roi-crop-wrap" style="display:none">
+                <img id="roiCropImg" class="roi-crop" />
+                <div id="fineRoiBox" class="fine-roi-box">
+                  <div class="fine-roi-handle nw" data-handle="nw"></div>
+                  <div class="fine-roi-handle ne" data-handle="ne"></div>
+                  <div class="fine-roi-handle sw" data-handle="sw"></div>
+                  <div class="fine-roi-handle se" data-handle="se"></div>
+                </div>
+              </div>
+              </div>
             </div>
           </div>
           <div class="roi-nav">
@@ -1609,6 +1927,14 @@ let roiInfo = null;
 let roiSession = null;
 let roiCandidates = [];
 let roiCurrentIndex = 0;
+let fineRoiState = {
+  enabled: false,
+  box: {x1:0, y1:0, x2:1, y2:1},
+  dragging: false,
+  dragMode: '',
+  startMouse: null,
+  startBox: null
+};
 let labelSource = 'none';
 let dirty = false;
 
@@ -2049,27 +2375,234 @@ async function loadRoiSession(sessionId, showMsg=true) {
   renderRoiCandidate();
 }
 
+function roiDetectorClassKey(item) {
+  if (!item) return '';
+  const cid = Number.isFinite(Number(item.det_class_id)) ? Number(item.det_class_id) : -1;
+  const cname = String(item.det_class_name || cid).trim() || String(cid);
+  return `${cid}:${cname}`;
+}
+
+function getRoiPolicyForItem(item) {
+  if (!roiSession || !item) return null;
+  const policy = roiSession.roi_policy || {};
+  const byClass = policy.by_detector_class || {};
+  const entry = byClass[roiDetectorClassKey(item)];
+  if (entry && entry.enabled) return entry;
+  return null;
+}
+
+function currentFineRoiBoxText() {
+  const b = fineRoiState.box || {x1:0,y1:0,x2:1,y2:1};
+  return `x1=${b.x1.toFixed(3)}, y1=${b.y1.toFixed(3)}, x2=${b.x2.toFixed(3)}, y2=${b.y2.toFixed(3)}`;
+}
+
+function setFineRoiMessage(text) {
+  const el = document.getElementById('fineRoiMsg');
+  if (el) el.textContent = text || '';
+}
+
+function updateFineRoiOverlay() {
+  const boxEl = document.getElementById('fineRoiBox');
+  const wrap = document.getElementById('roiCropWrap');
+  const imgEl = document.getElementById('roiCropImg');
+  const confirmBtn = document.getElementById('fineRoiConfirmBtn');
+  if (!boxEl || !wrap || !imgEl) return;
+
+  if (!fineRoiState.enabled || !imgEl.complete || !imgEl.naturalWidth) {
+    boxEl.style.display = 'none';
+    if (confirmBtn) confirmBtn.style.display = 'none';
+    return;
+  }
+
+  const w = imgEl.clientWidth;
+  const h = imgEl.clientHeight;
+  if (!w || !h) return;
+
+  const b = fineRoiState.box || {x1:0,y1:0,x2:1,y2:1};
+  boxEl.style.display = 'block';
+  boxEl.style.left = (b.x1 * w) + 'px';
+  boxEl.style.top = (b.y1 * h) + 'px';
+  boxEl.style.width = Math.max(10, (b.x2 - b.x1) * w) + 'px';
+  boxEl.style.height = Math.max(10, (b.y2 - b.y1) * h) + 'px';
+  if (confirmBtn) confirmBtn.style.display = 'inline-block';
+  setFineRoiMessage('已启用精细 ROI。拖动橙色框或四角调整后，点击“确认精细 ROI”。当前比例：' + currentFineRoiBoxText());
+}
+
+function initFineRoiForCurrentItem() {
+  const checkbox = document.getElementById('fineRoiEnable');
+  const item = roiCandidates[roiCurrentIndex];
+  const policy = getRoiPolicyForItem(item);
+
+  if (policy && policy.relative_box) {
+    fineRoiState.enabled = true;
+    fineRoiState.box = {
+      x1: Number(policy.relative_box.x1 ?? 0),
+      y1: Number(policy.relative_box.y1 ?? 0),
+      x2: Number(policy.relative_box.x2 ?? 1),
+      y2: Number(policy.relative_box.y2 ?? 1)
+    };
+    if (checkbox) checkbox.checked = true;
+    setFineRoiMessage(`当前检测类别 ${roiDetectorClassKey(item)} 已保存精细 ROI，可拖动后再次确认覆盖。比例：${currentFineRoiBoxText()}`);
+  } else {
+    fineRoiState.enabled = false;
+    fineRoiState.box = {x1:0, y1:0, x2:1, y2:1};
+    if (checkbox) checkbox.checked = false;
+    setFineRoiMessage('默认不启用精细 ROI，直接使用检测框 + padding 的完整 ROI。');
+  }
+  updateFineRoiOverlay();
+}
+
+function onFineRoiToggle() {
+  const checkbox = document.getElementById('fineRoiEnable');
+  fineRoiState.enabled = !!(checkbox && checkbox.checked);
+  if (fineRoiState.enabled) {
+    // 默认完整覆盖当前 base ROI，相当于“不裁减”；用户可拖动四角变成更精细区域。
+    if (!fineRoiState.box) fineRoiState.box = {x1:0, y1:0, x2:1, y2:1};
+  }
+  updateFineRoiOverlay();
+  if (!fineRoiState.enabled) {
+    setFineRoiMessage('默认不启用精细 ROI，直接使用检测框 + padding 的完整 ROI。');
+  }
+}
+
+function getFineRoiMouseRel(evt) {
+  const imgEl = document.getElementById('roiCropImg');
+  const rect = imgEl.getBoundingClientRect();
+  return {
+    x: clamp((evt.clientX - rect.left) / Math.max(1, rect.width), 0, 1),
+    y: clamp((evt.clientY - rect.top) / Math.max(1, rect.height), 0, 1)
+  };
+}
+
+function normalizeFineRoiBox(b) {
+  let x1 = clamp(Number(b.x1), 0, 1), y1 = clamp(Number(b.y1), 0, 1);
+  let x2 = clamp(Number(b.x2), 0, 1), y2 = clamp(Number(b.y2), 0, 1);
+  if (x2 < x1) [x1, x2] = [x2, x1];
+  if (y2 < y1) [y1, y2] = [y2, y1];
+  const minSize = 0.02;
+  if (x2 - x1 < minSize) x2 = Math.min(1, x1 + minSize);
+  if (y2 - y1 < minSize) y2 = Math.min(1, y1 + minSize);
+  return {x1, y1, x2, y2};
+}
+
+function beginFineRoiDrag(evt) {
+  if (!fineRoiState.enabled) return;
+  evt.preventDefault();
+  evt.stopPropagation();
+  const handle = evt.target && evt.target.dataset ? evt.target.dataset.handle : '';
+  fineRoiState.dragging = true;
+  fineRoiState.dragMode = handle || 'move';
+  fineRoiState.startMouse = getFineRoiMouseRel(evt);
+  fineRoiState.startBox = {...fineRoiState.box};
+}
+
+function updateFineRoiDrag(evt) {
+  if (!fineRoiState.dragging) return;
+  evt.preventDefault();
+  const p = getFineRoiMouseRel(evt);
+  const s = fineRoiState.startMouse;
+  const b0 = fineRoiState.startBox;
+  const dx = p.x - s.x;
+  const dy = p.y - s.y;
+  let b = {...b0};
+
+  if (fineRoiState.dragMode === 'move') {
+    const width = b0.x2 - b0.x1;
+    const height = b0.y2 - b0.y1;
+    let nx1 = clamp(b0.x1 + dx, 0, 1 - width);
+    let ny1 = clamp(b0.y1 + dy, 0, 1 - height);
+    b = {x1:nx1, y1:ny1, x2:nx1 + width, y2:ny1 + height};
+  } else {
+    if (fineRoiState.dragMode.includes('n')) b.y1 = p.y;
+    if (fineRoiState.dragMode.includes('s')) b.y2 = p.y;
+    if (fineRoiState.dragMode.includes('w')) b.x1 = p.x;
+    if (fineRoiState.dragMode.includes('e')) b.x2 = p.x;
+  }
+
+  fineRoiState.box = normalizeFineRoiBox(b);
+  updateFineRoiOverlay();
+}
+
+function endFineRoiDrag() {
+  if (!fineRoiState.dragging) return;
+  fineRoiState.dragging = false;
+  fineRoiState.dragMode = '';
+  fineRoiState.startMouse = null;
+  fineRoiState.startBox = null;
+}
+
+async function confirmFineRoiPolicy() {
+  if (!roiSession || !roiCandidates.length) { alert('暂无 ROI 候选'); return; }
+  const item = roiCandidates[roiCurrentIndex];
+  const checkbox = document.getElementById('fineRoiEnable');
+  if (!checkbox || !checkbox.checked) { alert('请先勾选“启用精细 ROI”'); return; }
+
+  const classKey = roiDetectorClassKey(item);
+  const ok = confirm(`确认为检测类别 ${classKey} 保存这一套精细 ROI？\n\n同一个检测类别只会保留一套精细 ROI。确认后会重新裁剪该检测类别下已经分类的训练样本。`);
+  if (!ok) return;
+
+  const res = await fetch('/api/annotator/roi-cls/roi-policy', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      session_id: roiSession.session_id,
+      item_id: item.id,
+      enabled: true,
+      relative_box: fineRoiState.box
+    })
+  });
+  const data = await res.json();
+  if (!res.ok) { alert(data.detail || '保存精细 ROI 失败'); return; }
+
+  roiSession = data.manifest;
+  roiCandidates = Array.isArray(roiSession.items) ? roiSession.items : [];
+  roiInfo.classes = data.classes || roiInfo.classes || [];
+  renderRoiClassButtons();
+  renderRoiCandidate();
+  setRoiProgress(0, data.message);
+}
+
 function renderRoiCandidate() {
   const info = document.getElementById('roiCandidateInfo');
   const preview = document.getElementById('roiPreviewImg');
   const crop = document.getElementById('roiCropImg');
-  if (!info || !preview || !crop) return;
+  const cropWrap = document.getElementById('roiCropWrap');
+  if (!info || !preview || !crop || !cropWrap) return;
   if (!roiCandidates.length) {
     info.textContent = '暂无候选。请先点击“生成 ROI 候选”。';
     preview.style.display = 'none';
-    crop.style.display = 'none';
+    cropWrap.style.display = 'none';
     return;
   }
   roiCurrentIndex = Math.max(0, Math.min(roiCurrentIndex, roiCandidates.length - 1));
   const item = roiCandidates[roiCurrentIndex];
   const labeled = roiCandidates.filter(x => x.status === 'labeled').length;
   const skipped = roiCandidates.filter(x => x.status === 'skipped').length;
-  info.textContent = `${roiCurrentIndex + 1} / ${roiCandidates.length}\n已分类: ${labeled}，跳过: ${skipped}\n状态: ${item.status || 'pending'} ${item.assigned_label ? '→ ' + item.assigned_label : ''}\n来源: ${item.source_filename || '-'}\n检测: ${item.det_class_name || item.det_class_id} conf=${Number(item.det_conf || 0).toFixed(3)}\nROI尺寸: ${(item.roi_size || []).join(' x ')}`;
+  const statusText = `${item.status || 'pending'}${item.assigned_label ? ' → ' + item.assigned_label : ''}`;
+  const detText = `${item.det_class_name || item.det_class_id} · conf ${Number(item.det_conf || 0).toFixed(3)}`;
+  const baseSize = (item.roi_size || []).join(' × ') || '-';
+  const finalSize = (item.final_roi_size || []).join(' × ') || baseSize;
+  const fileText = item.source_filename || '-';
+
+  info.innerHTML = `
+    <div class="roi-info-head">
+      <strong>${roiCurrentIndex + 1} / ${roiCandidates.length}</strong>
+      <span class="roi-info-chip">已分类 ${labeled}</span>
+      <span class="roi-info-chip">跳过 ${skipped}</span>
+      <span class="roi-info-chip">状态 ${statusText}</span>
+    </div>
+    <div class="roi-info-lines">
+      <div class="roi-info-line"><b>检测：</b>${detText}</div>
+      <div class="roi-info-line"><b>ROI：</b>基础 ${baseSize}　|　训练 ${finalSize}</div>
+      <div class="roi-info-line roi-info-file"><b>来源：</b>${fileText}</div>
+    </div>`;
+
   const sid = roiSession.session_id;
   preview.src = `/api/annotator/roi-cls/file/${encodeURIComponent(sid)}/previews/${encodeURIComponent(item.id + '.jpg')}?t=${Date.now()}`;
+  crop.onload = () => { initFineRoiForCurrentItem(); };
   crop.src = `/api/annotator/roi-cls/file/${encodeURIComponent(sid)}/candidates/${encodeURIComponent(item.id + '.jpg')}?t=${Date.now()}`;
   preview.style.display = 'block';
-  crop.style.display = 'block';
+  cropWrap.style.display = 'inline-block';
 }
 
 function nextUnfinishedRoiIndex(start) {
@@ -2119,6 +2652,19 @@ async function skipRoiCandidate() {
   renderRoiCandidate();
 }
 
+
+
+function setupFineRoiEvents() {
+  const box = document.getElementById('fineRoiBox');
+  if (box && !box.dataset.bound) {
+    box.dataset.bound = '1';
+    box.addEventListener('mousedown', beginFineRoiDrag);
+  }
+  window.addEventListener('mousemove', updateFineRoiDrag);
+  window.addEventListener('mouseup', endFineRoiDrag);
+  window.addEventListener('resize', updateFineRoiOverlay);
+}
+setupFineRoiEvents();
 
 let reviewJobTimer = null;
 

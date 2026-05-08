@@ -44,6 +44,7 @@ TOPK_OVERRIDE=""
 CONF_THRESHOLD_OVERRIDE=""
 NMS_THRESHOLD_OVERRIDE=""
 ROI_CLASSIFICATION="false"
+ROI_SESSION_MANIFEST="data/roi_classification_sessions/current/manifest.json"
 
 # 临时部署目标覆盖参数：用于从控制台把同一个模型部署到其他设备。
 # 部署目录第一版固定为 /opt/visionops，不对页面开放，避免 systemd 模板和运行目录不一致。
@@ -101,6 +102,10 @@ usage() {
                               models/metrics_detection/eval_metrics.json
                               models/metrics_classification/eval_metrics.json
                               data/model_context/manifest.json
+  --roi-session-manifest <path>
+                              ROI 分类数据制作 session manifest，默认：
+                              data/roi_classification_sessions/current/manifest.json。
+                              若存在，将读取其中 roi_policy 写入边缘端 pipeline.yaml。
   --target-device-id <id>     临时指定部署目标设备 ID，例如 rk3588-002
   --target-host <host>        临时指定部署目标设备 IP/Host，例如 192.168.1.202
   --target-user <user>        临时指定 SSH 用户，默认 ubuntu
@@ -128,6 +133,7 @@ while [[ $# -gt 0 ]]; do
     --conf-threshold) CONF_THRESHOLD_OVERRIDE="${2:-}"; shift 2 ;;
     --nms-threshold) NMS_THRESHOLD_OVERRIDE="${2:-}"; shift 2 ;;
     --roi-classification) ROI_CLASSIFICATION="true"; shift ;;
+    --roi-session-manifest) ROI_SESSION_MANIFEST="${2:-}"; shift 2 ;;
     --target-device-id) TARGET_DEVICE_ID_OVERRIDE="${2:-}"; shift 2 ;;
     --target-host) TARGET_HOST_OVERRIDE="${2:-}"; shift 2 ;;
     --target-user) TARGET_USER_OVERRIDE="${2:-ubuntu}"; shift 2 ;;
@@ -734,6 +740,26 @@ remote_run() { local user="$1" host="$2" port="$3" cmd="$4"; ssh ${SSH_OPTS} -p 
 remote_sudo_cmd() { local user="$1" host="$2" port="$3"; shift 3; ssh ${SSH_OPTS} -p "$port" "${user}@${host}" sudo -n "$@"; }
 do_health_check() { remote_run "$1" "$2" "$3" "curl -sf '$4'"; }
 
+sync_edge_code_to_remote() {
+  local user="$1" host="$2" port="$3"
+  log_info "同步整个 edge/ 目录..."
+
+  # 推理服务通常以 root 运行，Python 会在 /opt/visionops/edge 下生成 root-owned __pycache__/*.pyc。
+  # 如果直接 rsync --delete，ubuntu 用户无法删除这些缓存文件，会导致 --code / --code-only 部署失败。
+  # 这里先用 sudo 清理 pycache，再 rsync 时排除缓存目录，避免部署被运行时缓存文件阻塞。
+  remote_run "$user" "$host" "$port" "sudo -n find '${REMOTE_EDGE_DIR}' -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true"
+  remote_run "$user" "$host" "$port" "sudo -n find '${REMOTE_EDGE_DIR}' -type f -name '*.pyc' -delete 2>/dev/null || true"
+
+  rsync -az --delete \
+    --exclude='__pycache__/' \
+    --exclude='*.pyc' \
+    -e "ssh ${SSH_OPTS} -p ${port}" \
+    "${LOCAL_EDGE_DIR}/" "${user}@${host}:${REMOTE_EDGE_DIR}/"
+
+  log_ok "edge/ 代码同步完成"
+}
+
+
 resolve_health_url() {
   local configured_url="$1"
   local env_file="$2"
@@ -892,9 +918,9 @@ EOF_SERVICE
 }
 
 build_roi_bundle_context() {
-  local det_model="$1" cls_model="$2" det_metrics="$3" cls_metrics="$4" manifest_file="$5" version_override="$6" target_device_override="$7" conf_override="$8" nms_override="$9" topk_override="${10}"
+  local det_model="$1" cls_model="$2" det_metrics="$3" cls_metrics="$4" manifest_file="$5" roi_session_manifest="$6" version_override="$7" target_device_override="$8" conf_override="$9" nms_override="${10}" topk_override="${11}"
 
-  python3 - <<'PY' "$det_model" "$cls_model" "$det_metrics" "$cls_metrics" "$manifest_file" "$version_override" "$target_device_override" "$conf_override" "$nms_override" "$topk_override"
+  python3 - <<'PY' "$det_model" "$cls_model" "$det_metrics" "$cls_metrics" "$manifest_file" "$roi_session_manifest" "$version_override" "$target_device_override" "$conf_override" "$nms_override" "$topk_override"
 import hashlib
 import json
 import os
@@ -908,11 +934,12 @@ cls_model = Path(sys.argv[2])
 det_metrics = Path(sys.argv[3])
 cls_metrics = Path(sys.argv[4])
 manifest_file = Path(sys.argv[5])
-version_override = sys.argv[6].strip()
-target_device_override = sys.argv[7].strip()
-conf_override = sys.argv[8].strip()
-nms_override = sys.argv[9].strip()
-topk_override = sys.argv[10].strip()
+roi_session_manifest = Path(sys.argv[6]) if sys.argv[6].strip() else None
+version_override = sys.argv[7].strip()
+target_device_override = sys.argv[8].strip()
+conf_override = sys.argv[9].strip()
+nms_override = sys.argv[10].strip()
+topk_override = sys.argv[11].strip()
 
 def fail(msg):
     print(json.dumps({"ok": False, "error": msg}, ensure_ascii=False))
@@ -936,6 +963,103 @@ def first_nonempty(*vals):
         if v is not None and str(v).strip():
             return v
     return ""
+
+
+def load_json_optional(path):
+    if path is None or not path.exists() or not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        fail(f"读取 ROI session manifest 失败: {path}, err={exc}")
+
+def normalize_rel_box(v):
+    if not isinstance(v, dict):
+        v = {}
+    def f(key, default):
+        try:
+            x = float(v.get(key, default))
+        except Exception:
+            x = float(default)
+        return max(0.0, min(1.0, x))
+    x1, y1, x2, y2 = f("x1", 0.0), f("y1", 0.0), f("x2", 1.0), f("y2", 1.0)
+    if x2 < x1:
+        x1, x2 = x2, x1
+    if y2 < y1:
+        y1, y2 = y2, y1
+    return {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
+
+def build_roi_runtime_policy(roi_session):
+    """
+    将 data/roi_classification_sessions/current/manifest.json 中的 roi_policy
+    转成边缘端 pipeline.yaml 的 roi 字段。
+
+    没有 roi_policy 时，回退到 full_box + padding_ratio。
+    """
+    session_padding = first_nonempty(roi_session.get("padding_ratio"), os.environ.get("VISIONOPS_ROI_CLS_PADDING"), 0.05)
+    try:
+        session_padding = float(session_padding)
+    except Exception:
+        session_padding = 0.05
+
+    src_policy = roi_session.get("roi_policy") if isinstance(roi_session.get("roi_policy"), dict) else {}
+    by_class_src = src_policy.get("by_detector_class") if isinstance(src_policy.get("by_detector_class"), dict) else {}
+
+    default_src = src_policy.get("default") if isinstance(src_policy.get("default"), dict) else {}
+    default_padding = default_src.get("padding_ratio", session_padding)
+    try:
+        default_padding = float(default_padding)
+    except Exception:
+        default_padding = session_padding
+
+    by_class = {}
+    for key, entry in by_class_src.items():
+        if not isinstance(entry, dict):
+            continue
+        rel = normalize_rel_box(entry.get("relative_box"))
+        enabled = bool(entry.get("enabled", False))
+        padding = entry.get("padding_ratio", default_padding)
+        try:
+            padding = float(padding)
+        except Exception:
+            padding = default_padding
+        by_class[str(key)] = {
+            "enabled": enabled,
+            "mode": str(entry.get("mode") or ("relative_box" if enabled else "full_box")),
+            "base": str(entry.get("base") or "det_bbox_with_padding"),
+            "padding_ratio": padding,
+            "relative_box": rel,
+            "det_class_id": entry.get("det_class_id"),
+            "det_class_name": entry.get("det_class_name"),
+            "class_key": str(entry.get("class_key") or key),
+            "coordinate": str(entry.get("coordinate") or "relative_to_padded_detection_box"),
+            "updated_at": entry.get("updated_at", ""),
+        }
+
+    if by_class:
+        return {
+            "schema_version": int(src_policy.get("schema_version") or 1),
+            "mode": str(src_policy.get("mode") or "class_relative_box"),
+            "coordinate": str(src_policy.get("coordinate") or "relative_to_padded_detection_box"),
+            "default": {
+                "enabled": bool(default_src.get("enabled", False)),
+                "mode": str(default_src.get("mode") or "full_box"),
+                "base": str(default_src.get("base") or "det_bbox_with_padding"),
+                "padding_ratio": default_padding,
+                "relative_box": normalize_rel_box(default_src.get("relative_box")),
+            },
+            "by_detector_class": by_class,
+            "source_manifest": str(roi_session_manifest) if roi_session_manifest else "",
+            "updated_at": src_policy.get("updated_at", roi_session.get("updated_at", "")),
+        }
+
+    return {
+        "mode": "full_box",
+        "padding_ratio": session_padding,
+        "source_manifest": str(roi_session_manifest) if roi_session_manifest and roi_session_manifest.exists() else "",
+    }
+
 
 def sanitize(value):
     value = re.sub(r"[^A-Za-z0-9_-]+", "-", str(value)).strip("-")
@@ -971,6 +1095,7 @@ for path, label in [
 det_eval = load_json(det_metrics)
 cls_eval = load_json(cls_metrics)
 manifest = load_json(manifest_file)
+roi_session = load_json_optional(roi_session_manifest)
 
 det_names = det_eval.get("class_names") or det_eval.get("names")
 cls_names = cls_eval.get("class_names") or cls_eval.get("names")
@@ -999,11 +1124,14 @@ timestamp = find_timestamp(manifest)
 version_name = version_override or f"{sanitize(device_id)}_{sanitize(customer_id)}_roi_cls_{timestamp}"
 version_name = sanitize(version_name)
 
-det_conf = float(conf_override or det_eval.get("conf_threshold") or 0.25)
+det_conf = float(conf_override or roi_session.get("conf_threshold") or det_eval.get("conf_threshold") or 0.25)
 det_nms = float(nms_override or det_eval.get("nms_threshold") or 0.45)
 cls_topk = int(topk_override or min(5, cls_num))
 cls_topk = max(1, min(cls_topk, cls_num))
-roi_padding = float(first_nonempty(os.environ.get("VISIONOPS_ROI_CLS_PADDING"), 0.05))
+roi_runtime_policy = build_roi_runtime_policy(roi_session)
+roi_select_policy = str(roi_session.get("select_policy") or "conf_area")
+roi_target_class_id = roi_session.get("target_class_id")
+roi_target_class_name = roi_session.get("target_class_name")
 
 det_md5 = md5(det_model)
 cls_md5 = md5(cls_model)
@@ -1026,6 +1154,9 @@ ctx = {
         "input_size": [640, 640],
         "conf_threshold": det_conf,
         "nms_threshold": det_nms,
+        "select_policy": roi_select_policy,
+        "target_class_id": roi_target_class_id,
+        "target_class_name": roi_target_class_name,
         "metrics": det_eval,
     },
     "classifier": {
@@ -1041,16 +1172,21 @@ ctx = {
         "topk": cls_topk,
         "metrics": cls_eval,
     },
-    "roi": {
-        "mode": "full_box",
-        "padding_ratio": roi_padding,
-    },
+    "roi": roi_runtime_policy,
     "dataset": {
         "manifest_path": str(manifest_file),
         "device_id": str(device_id),
         "source_device_id": str(source_device_id or ""),
         "customer_id": str(customer_id),
         "dataset_id": manifest.get("dataset_id") or manifest.get("package_id") or manifest.get("batch_id") or "",
+        "roi_session_manifest": str(roi_session_manifest) if roi_session_manifest and roi_session_manifest.exists() else "",
+        "roi_session_summary": {
+            "session_id": roi_session.get("session_id", ""),
+            "batch_id": roi_session.get("batch_id", ""),
+            "padding_ratio": roi_session.get("padding_ratio", None),
+            "select_policy": roi_session.get("select_policy", ""),
+            "roi_policy_updated_at": (roi_session.get("roi_policy") or {}).get("updated_at", "") if isinstance(roi_session.get("roi_policy"), dict) else "",
+        },
         "raw_manifest": manifest,
     },
     "deploy": {
@@ -1135,9 +1271,9 @@ pipeline = {
         "class_names": det["class_names"],
         "conf_threshold": det["conf_threshold"],
         "nms_threshold": det["nms_threshold"],
-        "select_policy": "conf_area",
-        "target_class_id": 0 if det["num_classes"] == 1 else None,
-        "target_class_name": det["class_names"][0] if det["num_classes"] == 1 else "",
+        "select_policy": det.get("select_policy", "conf_area"),
+        "target_class_id": det.get("target_class_id", 0 if det["num_classes"] == 1 else None),
+        "target_class_name": det.get("target_class_name", det["class_names"][0] if det["num_classes"] == 1 else ""),
     },
     "roi": ctx["roi"],
     "stage2": {
@@ -1185,12 +1321,17 @@ deploy_roi_classification_bundle() {
   require_file "$cls_metrics"
   require_file "$DATASET_MANIFEST"
   require_file "$CONFIG_FILE"
+  if [[ -n "$ROI_SESSION_MANIFEST" && -f "$ROI_SESSION_MANIFEST" ]]; then
+    log_info "ROI session: ${ROI_SESSION_MANIFEST}"
+  else
+    log_warn "未找到 ROI session manifest: ${ROI_SESSION_MANIFEST}，pipeline.yaml 将回退到 full_box ROI"
+  fi
   [[ -f "$LOCAL_EDGE_ENV" ]] || log_warn "edge.env 不存在，将使用默认端口和默认推理参数: ${LOCAL_EDGE_ENV}"
   [[ "$SYNC_EDGE_CODE" == "true" ]] && require_dir "$LOCAL_EDGE_DIR"
 
   local context_file context_json
   context_file="$(mktemp /tmp/visionops_roi_context_XXXXXX.json)"
-  context_json="$(build_roi_bundle_context "$det_model" "$cls_model" "$det_metrics" "$cls_metrics" "$DATASET_MANIFEST" "$MODEL_VERSION_OVERRIDE" "$TARGET_DEVICE_ID_OVERRIDE" "$CONF_THRESHOLD_OVERRIDE" "$NMS_THRESHOLD_OVERRIDE" "$TOPK_OVERRIDE")"
+  context_json="$(build_roi_bundle_context "$det_model" "$cls_model" "$det_metrics" "$cls_metrics" "$DATASET_MANIFEST" "$ROI_SESSION_MANIFEST" "$MODEL_VERSION_OVERRIDE" "$TARGET_DEVICE_ID_OVERRIDE" "$CONF_THRESHOLD_OVERRIDE" "$NMS_THRESHOLD_OVERRIDE" "$TOPK_OVERRIDE")"
   echo "$context_json" > "$context_file"
 
   local ok err
@@ -1234,6 +1375,9 @@ PY
   log_info "检测指标: ${det_metrics}"
   log_info "分类指标: ${cls_metrics}"
   log_info "数据集信息: ${DATASET_MANIFEST}"
+  if [[ -n "$ROI_SESSION_MANIFEST" && -f "$ROI_SESSION_MANIFEST" ]]; then
+    log_info "ROI 策略: ${ROI_SESSION_MANIFEST}"
+  fi
   log_info "目标设备 ID: ${device_id}"
   log_info "客户 ID: ${customer_id}"
   log_info "bundle 名称: ${version_name}"
@@ -1332,21 +1476,7 @@ PY
   fi
 
   if [[ "$SYNC_EDGE_CODE" == "true" ]]; then
-    log_info "同步整个 edge/ 目录..."
-
-    # 推理服务通常以 root 运行，Python 会在 /opt/visionops/edge 下生成 root-owned __pycache__/*.pyc。
-    # 如果直接 rsync --delete，ubuntu 用户无法删除这些缓存文件，会导致 --code 部署失败。
-    # 这里先用 sudo 清理 pycache，再 rsync 时排除缓存目录，避免部署被运行时缓存文件阻塞。
-    remote_run "$user" "$host" "$port" "sudo -n find '${REMOTE_EDGE_DIR}' -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true"
-    remote_run "$user" "$host" "$port" "sudo -n find '${REMOTE_EDGE_DIR}' -type f -name '*.pyc' -delete 2>/dev/null || true"
-
-    rsync -az --delete \
-      --exclude='__pycache__/' \
-      --exclude='*.pyc' \
-      -e "ssh ${SSH_OPTS} -p ${port}" \
-      "${LOCAL_EDGE_DIR}/" "${user}@${host}:${REMOTE_EDGE_DIR}/"
-
-    log_ok "edge/ 代码同步完成"
+    sync_edge_code_to_remote "$user" "$host" "$port"
   fi
 
   remote_sudo_cmd "$user" "$host" "$port" install -m 644 "${remote_tmp_edge_env}" "${REMOTE_ROOT_ENV}"
@@ -1423,8 +1553,7 @@ main() {
     IFS='|' read -r code_host code_port code_user code_deploy_path code_service code_health <<< "$code_parsed"
     log_info "仅同步 edge/ 代码到 ${code_user}@${code_host}:${code_port}${REMOTE_EDGE_DIR}"
     remote_run "$code_user" "$code_host" "$code_port" "mkdir -p '${REMOTE_EDGE_DIR}'" || true
-    rsync -az --delete -e "ssh ${SSH_OPTS} -p ${code_port}" "${LOCAL_EDGE_DIR}/" "${code_user}@${code_host}:${REMOTE_EDGE_DIR}/"
-    log_ok "edge/ 代码同步完成"
+    sync_edge_code_to_remote "$code_user" "$code_host" "$code_port"
     exit 0
   fi
 
@@ -1601,21 +1730,7 @@ PY
   log_ok "模型 MD5 校验通过"
 
   if [[ "$SYNC_EDGE_CODE" == "true" ]]; then
-    log_info "同步整个 edge/ 目录..."
-
-    # 推理服务通常以 root 运行，Python 会在 /opt/visionops/edge 下生成 root-owned __pycache__/*.pyc。
-    # 如果直接 rsync --delete，ubuntu 用户无法删除这些缓存文件，会导致 --code 部署失败。
-    # 这里先用 sudo 清理 pycache，再 rsync 时排除缓存目录，避免部署被运行时缓存文件阻塞。
-    remote_run "$user" "$host" "$port" "sudo -n find '${REMOTE_EDGE_DIR}' -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true"
-    remote_run "$user" "$host" "$port" "sudo -n find '${REMOTE_EDGE_DIR}' -type f -name '*.pyc' -delete 2>/dev/null || true"
-
-    rsync -az --delete \
-      --exclude='__pycache__/' \
-      --exclude='*.pyc' \
-      -e "ssh ${SSH_OPTS} -p ${port}" \
-      "${LOCAL_EDGE_DIR}/" "${user}@${host}:${REMOTE_EDGE_DIR}/"
-
-    log_ok "edge/ 代码同步完成"
+    sync_edge_code_to_remote "$user" "$host" "$port"
   fi
 
   remote_sudo_cmd "$user" "$host" "$port" mkdir -p "${REMOTE_EDGE_DIR}/deploy"

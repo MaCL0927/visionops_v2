@@ -762,16 +762,44 @@ async function loadValidationImages(){
 
 function renderPreviewImage(url, alt='测试图片', detections=[]){
   if(!selectedImagePreview) return;
-  selectedImagePreview.innerHTML=`
-    <div class="preview-canvas-wrap">
-      <img id="resultPreviewImg" src="${url}" alt="${escapeHtml(alt)}">
-      <canvas id="detectionOverlayCanvas" aria-hidden="true"></canvas>
-    </div>
-  `;
-  const img=document.getElementById('resultPreviewImg');
+
+  let wrap=selectedImagePreview.querySelector('.preview-canvas-wrap');
+  let img=document.getElementById('resultPreviewImg');
+  let canvas=document.getElementById('detectionOverlayCanvas');
+
+  // 实时检测时不要每帧 innerHTML 重建 img/canvas。
+  // 否则旧图片会先被删除，新图片加载完成前会露出黑色背景，导致画面黑一下。
+  if(!wrap || !img || !canvas){
+    selectedImagePreview.innerHTML=`
+      <div class="preview-canvas-wrap">
+        <img id="resultPreviewImg" alt="${escapeHtml(alt)}">
+        <canvas id="detectionOverlayCanvas" aria-hidden="true"></canvas>
+      </div>
+    `;
+    wrap=selectedImagePreview.querySelector('.preview-canvas-wrap');
+    img=document.getElementById('resultPreviewImg');
+    canvas=document.getElementById('detectionOverlayCanvas');
+  }
   if(!img) return;
-  img.addEventListener('load',()=>drawDetectionOverlay(detections));
-  if(img.complete && img.naturalWidth>0){
+
+  const token=`${Date.now()}_${Math.random()}`;
+  img.dataset.pendingFrameToken=token;
+
+  const next=new Image();
+  next.onload=()=>{
+    if(img.dataset.pendingFrameToken!==token) return;
+    img.alt=alt;
+    img.src=url;
+    requestAnimationFrame(()=>drawDetectionOverlay(detections));
+  };
+  next.onerror=()=>{
+    if(img.dataset.pendingFrameToken!==token) return;
+    requestAnimationFrame(()=>drawDetectionOverlay(detections));
+  };
+  next.src=url;
+
+  // 如果当前显示图已经是目标图，直接重画 overlay，避免等待浏览器事件。
+  if(img.src && img.src===next.src && img.complete && img.naturalWidth>0){
     requestAnimationFrame(()=>drawDetectionOverlay(detections));
   }
 }
@@ -1310,16 +1338,42 @@ function clearProductionOverlay(){
 function renderProductionPreview(url, detections=[]){
   if(!productionPreview) return;
   productionLastPredictions=Array.isArray(detections) ? detections : [];
-  productionPreview.innerHTML=`
-    <div class="preview-canvas-wrap production-canvas-wrap">
-      <img id="productionPreviewImg" src="${url}" alt="生产模式实时画面">
-      <canvas id="productionOverlayCanvas" aria-hidden="true"></canvas>
-    </div>
-  `;
-  const img=document.getElementById('productionPreviewImg');
+
+  let wrap=productionPreview.querySelector('.preview-canvas-wrap');
+  let img=document.getElementById('productionPreviewImg');
+  let canvas=document.getElementById('productionOverlayCanvas');
+
+  // 生产模式同样保持稳定 DOM：旧图持续显示，等新图预加载完成后再切换。
+  if(!wrap || !img || !canvas){
+    productionPreview.innerHTML=`
+      <div class="preview-canvas-wrap production-canvas-wrap">
+        <img id="productionPreviewImg" alt="生产模式实时画面">
+        <canvas id="productionOverlayCanvas" aria-hidden="true"></canvas>
+      </div>
+    `;
+    wrap=productionPreview.querySelector('.preview-canvas-wrap');
+    img=document.getElementById('productionPreviewImg');
+    canvas=document.getElementById('productionOverlayCanvas');
+  }
   if(!img) return;
-  img.addEventListener('load',()=>drawProductionOverlay(productionLastPredictions));
-  if(img.complete && img.naturalWidth>0){
+
+  const token=`${Date.now()}_${Math.random()}`;
+  img.dataset.pendingFrameToken=token;
+
+  const next=new Image();
+  next.onload=()=>{
+    if(img.dataset.pendingFrameToken!==token) return;
+    img.alt='生产模式实时画面';
+    img.src=url;
+    requestAnimationFrame(()=>drawProductionOverlay(productionLastPredictions));
+  };
+  next.onerror=()=>{
+    if(img.dataset.pendingFrameToken!==token) return;
+    requestAnimationFrame(()=>drawProductionOverlay(productionLastPredictions));
+  };
+  next.src=url;
+
+  if(img.src && img.src===next.src && img.complete && img.naturalWidth>0){
     requestAnimationFrame(()=>drawProductionOverlay(productionLastPredictions));
   }
 }
