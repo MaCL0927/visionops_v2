@@ -157,6 +157,7 @@ let selectedModel='';
 let modelItems=[];
 let pendingClassificationImageData='';
 let pendingCaptureZoom=1;
+let captureBusy=false;
 let initialDefaultModeApplied=false;
 
 function applyInitialDefaultMode(defaultMode){
@@ -388,6 +389,46 @@ function clearPendingClassificationCapture(showCamera=true){
     else if(simulatedCamera) simulatedCamera.classList.add('active');
   }
 }
+function setCaptureBusy(busy){
+  captureBusy=!!busy;
+  const btn=document.getElementById('captureAllBtn');
+  if(btn){
+    btn.disabled=captureBusy;
+    btn.classList.toggle('loading', captureBusy);
+    if(!btn.dataset.originalText) btn.dataset.originalText=btn.textContent || '取图';
+    btn.textContent=captureBusy ? '取图中...' : btn.dataset.originalText;
+  }
+}
+
+function makePreviewCard(item, folder){
+  const card=document.createElement('div');
+  card.className='preview-card';
+  card.dataset.filename=item.filename || item.name || item.id || '';
+  card.innerHTML=`<div class="preview-thumb-wrap"><img class="preview-img" src="${item.url}?t=${Date.now()}" alt="${item.filename}"><button class="delete-chip" title="删除图片">×</button></div><div class="preview-meta"><b title="${item.filename}">${item.filename}</b><span>${folderLabel(folder)} · ${item.mtime}</span></div>`;
+  card.querySelector('.preview-img').addEventListener('click',()=>openImageViewer(item));
+  card.querySelector('.delete-chip').addEventListener('click',(e)=>{e.stopPropagation();deletePreviewImage(item)});
+  return card;
+}
+
+function prependCapturedItem(folder, item){
+  if(!item) return false;
+  if(!dataStore[folder]) dataStore[folder]=[];
+  dataStore[folder]=[item, ...dataStore[folder].filter((x)=>x.filename!==item.filename && x.id!==item.id)].slice(0,120);
+
+  if(currentFolder!==folder || !previewGrid) return true;
+
+  const empty=previewGrid.querySelector('.empty-preview');
+  if(empty) previewGrid.innerHTML='';
+
+  const card=makePreviewCard(item, folder);
+  previewGrid.prepend(card);
+
+  while(previewGrid.children.length>120){
+    previewGrid.removeChild(previewGrid.lastElementChild);
+  }
+  return true;
+}
+
 function blobToDataUrl(blob){
   return new Promise((resolve,reject)=>{
     const reader=new FileReader();
@@ -418,31 +459,45 @@ function showPendingClassificationCapture(imageData){
   if(cameraStatusText) cameraStatusText.textContent='图片已暂存到弹窗中，请在弹窗里放大查看并选择合格/不合格，或取消放弃';
 }
 async function captureToFolder(folder){
-  try{
-    const payload={dataset:currentDataset,folder,device_id:deviceId,user_id:userId};
-    // v4.7：RTSP/后端摄像头模式下，后端直接保存 latest_frame；
-    // 笔记本浏览器摄像头/模拟画面模式下，仍由前端 canvas 截图上传。
-    if(!useBackendCamera){
-      payload.image_data=captureFrameAsJpeg();
-    }
-    const data=await apiPost('/api/capture',payload);
-    syncCounts(data.counts);
+  const payload={dataset:currentDataset,folder,device_id:deviceId,user_id:userId};
+  // v4.7：RTSP/后端摄像头模式下，后端直接保存 latest_frame；
+  // 笔记本浏览器摄像头/模拟画面模式下，仍由前端 canvas 截图上传。
+  if(!useBackendCamera){
+    payload.image_data=captureFrameAsJpeg();
+  }
+  const data=await apiPost('/api/capture',payload);
+  syncCounts(data.counts);
+
+  // 取图后不要每次 refreshFolder() 重载整个列表。
+  // 否则会触发 /api/dataset/images + 大量缩略图 GET，图多时会明显卡顿。
+  if(data.item){
+    prependCapturedItem(folder, data.item);
+  }else{
     await refreshFolder(currentFolder);
-    showToast(data.message);
-  }catch(err){showToast(err.message)}
+  }
+  showToast(data.message);
 }
 async function handleCaptureButton(){
-  const mode=(captureTaskMode && captureTaskMode.value) || 'classification';
-  clearPendingClassificationCapture(false);
-  if(mode==='detection'){
-    await captureToFolder('all');
+  if(captureBusy){
+    showToast('正在取图，请稍候');
     return;
   }
+  setCaptureBusy(true);
   try{
+    const mode=(captureTaskMode && captureTaskMode.value) || 'classification';
+    clearPendingClassificationCapture(false);
+    if(mode==='detection'){
+      await captureToFolder('all');
+      return;
+    }
     const imageData=await captureCurrentFrameDataUrl();
     showPendingClassificationCapture(imageData);
     showToast('图片已暂存，请选择合格或不合格');
-  }catch(err){showToast(err.message || '取图失败')}
+  }catch(err){
+    showToast(err.message || '取图失败');
+  }finally{
+    setCaptureBusy(false);
+  }
 }
 async function savePendingClassificationCapture(label){
   if(!pendingClassificationImageData){showToast('没有暂存图片，请先取图');return;}
@@ -450,7 +505,14 @@ async function savePendingClassificationCapture(label){
     const data=await apiPost('/api/capture/labeled',{dataset:currentDataset,image_data:pendingClassificationImageData,label,device_id:deviceId,user_id:userId});
     syncCounts(data.counts);
     clearPendingClassificationCapture(true);
-    await refreshFolder(label);
+    if(data.item){
+      prependCapturedItem(label, data.item);
+      if(currentFolder!==label) currentFolder=label;
+      folderCards.forEach(b=>b.classList.toggle('active',b.dataset.folderCard===label));
+      renderFolder(label, dataStore[label] || [data.item]);
+    }else{
+      await refreshFolder(label);
+    }
     showToast(data.message);
   }catch(err){showToast(err.message || '保存失败')}
 }
@@ -487,11 +549,7 @@ function renderFolder(folder,items){
   previewGrid.innerHTML='';
   if(!items || items.length===0){previewGrid.innerHTML=`<div class="empty-preview">${folderLabel(folder)} 文件夹暂无图片</div>`;return;}
   items.slice(0,120).forEach((item)=>{
-    const card=document.createElement('div'); card.className='preview-card';
-    card.innerHTML=`<div class="preview-thumb-wrap"><img class="preview-img" src="${item.url}?t=${Date.now()}" alt="${item.filename}"><button class="delete-chip" title="删除图片">×</button></div><div class="preview-meta"><b title="${item.filename}">${item.filename}</b><span>${folderLabel(folder)} · ${item.mtime}</span></div>`;
-    card.querySelector('.preview-img').addEventListener('click',()=>openImageViewer(item));
-    card.querySelector('.delete-chip').addEventListener('click',(e)=>{e.stopPropagation();deletePreviewImage(item)});
-    previewGrid.appendChild(card);
+    previewGrid.appendChild(makePreviewCard(item, folder));
   });
 }
 folderCards.forEach(btn=>btn.addEventListener('click',()=>refreshFolder(btn.dataset.folderCard)));
@@ -762,44 +820,16 @@ async function loadValidationImages(){
 
 function renderPreviewImage(url, alt='测试图片', detections=[]){
   if(!selectedImagePreview) return;
-
-  let wrap=selectedImagePreview.querySelector('.preview-canvas-wrap');
-  let img=document.getElementById('resultPreviewImg');
-  let canvas=document.getElementById('detectionOverlayCanvas');
-
-  // 实时检测时不要每帧 innerHTML 重建 img/canvas。
-  // 否则旧图片会先被删除，新图片加载完成前会露出黑色背景，导致画面黑一下。
-  if(!wrap || !img || !canvas){
-    selectedImagePreview.innerHTML=`
-      <div class="preview-canvas-wrap">
-        <img id="resultPreviewImg" alt="${escapeHtml(alt)}">
-        <canvas id="detectionOverlayCanvas" aria-hidden="true"></canvas>
-      </div>
-    `;
-    wrap=selectedImagePreview.querySelector('.preview-canvas-wrap');
-    img=document.getElementById('resultPreviewImg');
-    canvas=document.getElementById('detectionOverlayCanvas');
-  }
+  selectedImagePreview.innerHTML=`
+    <div class="preview-canvas-wrap">
+      <img id="resultPreviewImg" src="${url}" alt="${escapeHtml(alt)}">
+      <canvas id="detectionOverlayCanvas" aria-hidden="true"></canvas>
+    </div>
+  `;
+  const img=document.getElementById('resultPreviewImg');
   if(!img) return;
-
-  const token=`${Date.now()}_${Math.random()}`;
-  img.dataset.pendingFrameToken=token;
-
-  const next=new Image();
-  next.onload=()=>{
-    if(img.dataset.pendingFrameToken!==token) return;
-    img.alt=alt;
-    img.src=url;
-    requestAnimationFrame(()=>drawDetectionOverlay(detections));
-  };
-  next.onerror=()=>{
-    if(img.dataset.pendingFrameToken!==token) return;
-    requestAnimationFrame(()=>drawDetectionOverlay(detections));
-  };
-  next.src=url;
-
-  // 如果当前显示图已经是目标图，直接重画 overlay，避免等待浏览器事件。
-  if(img.src && img.src===next.src && img.complete && img.naturalWidth>0){
+  img.addEventListener('load',()=>drawDetectionOverlay(detections));
+  if(img.complete && img.naturalWidth>0){
     requestAnimationFrame(()=>drawDetectionOverlay(detections));
   }
 }
@@ -929,11 +959,28 @@ function getMaskOverlayAlpha(){
   return clampNumber(seg.mask_alpha,0.24,0,1);
 }
 
+function getRoiObjectFromPrediction(pred){
+  return pred && pred.roi && typeof pred.roi==='object' ? pred.roi : null;
+}
 function getRoiBoxFromPrediction(pred){
-  const roi=pred && pred.roi && typeof pred.roi==='object' ? pred.roi : null;
+  const roi=getRoiObjectFromPrediction(pred);
   if(!roi || !Array.isArray(roi.bbox) || roi.bbox.length<4) return null;
   const box=roi.bbox.map(Number);
   return box.some((x)=>!Number.isFinite(x)) ? null : box;
+}
+function formatRoiMode(roi){
+  if(!roi || typeof roi!=='object') return '--';
+  const mode=roi.mode || '--';
+  const pipeline=roi.pipeline_mode || '';
+  return pipeline && pipeline!==mode ? `${pipeline} / ${mode}` : mode;
+}
+function formatRelativeBox(rel){
+  if(!rel || typeof rel!=='object') return '--';
+  const keys=['x1','y1','x2','y2'];
+  return keys.map((k)=>{
+    const v=Number(rel[k]);
+    return `${k}=${Number.isFinite(v) ? v.toFixed(3) : '--'}`;
+  }).join(', ');
 }
 function drawRoiBoxOverlay(ctx, roiBox, canvasWidth, canvasHeight){
   if(!roiBox || roiBox.length<4) return;
@@ -945,12 +992,14 @@ function drawRoiBoxOverlay(ctx, roiBox, canvasWidth, canvasHeight){
   const h=Math.max(0, y2-y1);
   if(w<2 || h<2) return;
   ctx.save();
-  ctx.setLineDash([10,6]);
-  ctx.lineWidth=Math.max(2, Math.round(canvasWidth/420));
-  ctx.strokeStyle='#2563eb';
-  ctx.strokeRect(x1,y1,w,h);
   ctx.setLineDash([]);
-  const label='ROI';
+  ctx.lineWidth=Math.max(3, Math.round(canvasWidth/360));
+  ctx.strokeStyle='#f97316';
+  ctx.fillStyle='rgba(249,115,22,.10)';
+  ctx.fillRect(x1,y1,w,h);
+  ctx.strokeRect(x1,y1,w,h);
+
+  const label='Final ROI';
   const pad=Math.max(5, Math.round(canvasWidth/220));
   const oldFont=ctx.font;
   ctx.font=`${Math.max(14, Math.round(canvasWidth/58))}px sans-serif`;
@@ -958,11 +1007,11 @@ function drawRoiBoxOverlay(ctx, roiBox, canvasWidth, canvasHeight){
   const labelH=Math.max(20, Math.round(canvasWidth/48));
   const lx=Math.max(0, Math.min(canvasWidth-(textW+pad*2), x1));
   const ly=Math.min(canvasHeight-labelH, y2+2);
-  ctx.fillStyle='rgba(37,99,235,.92)';
-  ctx.fillRect(lx,ly,textW+pad*2,labelH);
-  ctx.fillStyle='#fff';
-  ctx.fillText(label,lx+pad,ly+pad/2);
-  ctx.font=oldFont;
+  //ctx.fillStyle='rgba(249,115,22,.94)';
+  //ctx.fillRect(lx,ly,textW+pad*2,labelH);
+  //ctx.fillStyle='#fff';
+  //ctx.fillText(label,lx+pad,ly+pad/2);
+  //ctx.font=oldFont;
   ctx.restore();
 }
 
@@ -1028,7 +1077,7 @@ function drawDetectionOverlay(predictions=[]){
     }
     if(!hasShape) return;
 
-    // ROI 分类双模型：绿色框是 detector bbox，蓝色虚线框是实际送入分类模型的 ROI。
+    // ROI 分类双模型：绿色框是 detector bbox，橙色实线框是最终送入分类模型的 final ROI。
     const roiBox=getRoiBoxFromPrediction(pred);
     if(roiBox) drawRoiBoxOverlay(ctx, roiBox, canvas.width, canvas.height);
 
@@ -1111,19 +1160,24 @@ function renderClassificationResult(data, options={}){
           topkResult.innerHTML='<b>ROI 分类明细</b>'+predictions.map((p,idx)=>{
             const bbox=Array.isArray(p.bbox) ? p.bbox : [];
             const center=getPredictionCenter(p);
-            const roiBox=getRoiBoxFromPrediction(p);
+            const roi=p.roi || (idx===0 ? data.roi : null) || {};
+            const roiBox=getRoiBoxFromPrediction({...p, roi});
             const det=p.detector || {};
             const clsPred=p.classifier || {};
             const detConf=Number(det.confidence);
             const clsConf=Number(clsPred.confidence ?? p.confidence);
             const detText=`${escapeHtml(det.class_name || '目标')} ${Number.isFinite(detConf) ? (detConf*100).toFixed(1)+'%' : '--'}`;
             const clsText=`${escapeHtml(p.class_name || clsPred.class_name || '未识别')} ${Number.isFinite(clsConf) ? (clsConf*100).toFixed(1)+'%' : '--'}`;
+            const roiMode=formatRoiMode(roi);
+            const relText=formatRelativeBox(roi.relative_box);
             return `<div class="target-row target-row-roi">
               <span class="target-index">目标${idx+1}</span>
               <span class="target-class">分类：${clsText}</span>
               <span>检测：${detText}</span>
               <span>检测框：${escapeHtml(formatBBox(bbox))}</span>
-              <span>ROI：${escapeHtml(formatBBox(roiBox))}</span>
+              <span class="target-final-roi">Final ROI：${escapeHtml(formatBBox(roiBox))}</span>
+              <span>ROI模式：${escapeHtml(roiMode)}</span>
+              <span>ROI比例：${escapeHtml(relText)}</span>
               <span>中心点：${escapeHtml(formatPoint(center))}</span>
               <span>更新时间：${escapeHtml(updatedAt)}</span>
             </div>`;
@@ -1338,42 +1392,16 @@ function clearProductionOverlay(){
 function renderProductionPreview(url, detections=[]){
   if(!productionPreview) return;
   productionLastPredictions=Array.isArray(detections) ? detections : [];
-
-  let wrap=productionPreview.querySelector('.preview-canvas-wrap');
-  let img=document.getElementById('productionPreviewImg');
-  let canvas=document.getElementById('productionOverlayCanvas');
-
-  // 生产模式同样保持稳定 DOM：旧图持续显示，等新图预加载完成后再切换。
-  if(!wrap || !img || !canvas){
-    productionPreview.innerHTML=`
-      <div class="preview-canvas-wrap production-canvas-wrap">
-        <img id="productionPreviewImg" alt="生产模式实时画面">
-        <canvas id="productionOverlayCanvas" aria-hidden="true"></canvas>
-      </div>
-    `;
-    wrap=productionPreview.querySelector('.preview-canvas-wrap');
-    img=document.getElementById('productionPreviewImg');
-    canvas=document.getElementById('productionOverlayCanvas');
-  }
+  productionPreview.innerHTML=`
+    <div class="preview-canvas-wrap production-canvas-wrap">
+      <img id="productionPreviewImg" src="${url}" alt="生产模式实时画面">
+      <canvas id="productionOverlayCanvas" aria-hidden="true"></canvas>
+    </div>
+  `;
+  const img=document.getElementById('productionPreviewImg');
   if(!img) return;
-
-  const token=`${Date.now()}_${Math.random()}`;
-  img.dataset.pendingFrameToken=token;
-
-  const next=new Image();
-  next.onload=()=>{
-    if(img.dataset.pendingFrameToken!==token) return;
-    img.alt='生产模式实时画面';
-    img.src=url;
-    requestAnimationFrame(()=>drawProductionOverlay(productionLastPredictions));
-  };
-  next.onerror=()=>{
-    if(img.dataset.pendingFrameToken!==token) return;
-    requestAnimationFrame(()=>drawProductionOverlay(productionLastPredictions));
-  };
-  next.src=url;
-
-  if(img.src && img.src===next.src && img.complete && img.naturalWidth>0){
+  img.addEventListener('load',()=>drawProductionOverlay(productionLastPredictions));
+  if(img.complete && img.naturalWidth>0){
     requestAnimationFrame(()=>drawProductionOverlay(productionLastPredictions));
   }
 }
@@ -1529,7 +1557,10 @@ async function refreshProductionPushStatus(){
       const taskText=taskDisplayName(task);
       if(task==='roi_classification'){
         const r=latest.result || {};
-        if(productionResultSummary) productionResultSummary.textContent=`${taskText}：${r.class_name || '未识别'} ${r.confidence_percent || ''}`;
+        const firstPred=preds[0] || {};
+        const roi=firstPred.roi || latest.roi || {};
+        const roiMode=formatRoiMode(roi);
+        if(productionResultSummary) productionResultSummary.textContent=`${taskText}：${r.class_name || '未识别'} ${r.confidence_percent || ''} · ROI ${roiMode}`;
       }else{
         if(productionResultSummary) productionResultSummary.textContent=`${taskText}到 ${preds.length} 个目标`;
       }
