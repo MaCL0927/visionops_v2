@@ -138,6 +138,26 @@ VALIDATION_ENGINE_PATH = os.getenv(
 
 # v6.4+ 低频实时检测配置。前端默认每 1 秒请求一次单帧推理。
 VALIDATION_REALTIME_INTERVAL_MS = _as_int(_override("algorithm.common.realtime_interval_ms", os.getenv("VISIONOPS_VALIDATION_REALTIME_INTERVAL_MS", "1000")), 1000)
+# v0.5.0 C++ inference service proxy.
+# Collector 只代理 C++ 服务；不要在 Python 中参与实时 RTSP 解码和逐帧推理。
+CPP_INFERENCE_ENABLED = _as_bool(
+    os.getenv("VISIONOPS_CPP_INFERENCE_ENABLED", "1"),
+    True,
+)
+CPP_INFERENCE_URL = str(
+    os.getenv(
+        "VISIONOPS_CPP_SERVICE_URL",
+        os.getenv("VISIONOPS_CPP_INFERENCE_URL", "http://127.0.0.1:18080"),
+    )
+).rstrip("/")
+CPP_INFERENCE_TIMEOUT_SEC = _as_float(
+    os.getenv("VISIONOPS_CPP_TIMEOUT_SEC", "5"),
+    5.0,
+)
+CPP_INFERENCE_IMAGE_TIMEOUT_SEC = _as_float(
+    os.getenv("VISIONOPS_CPP_IMAGE_TIMEOUT_SEC", "15"),
+    15.0,
+)
 
 
 # 生产模式连续检测 + Gateway 推送配置

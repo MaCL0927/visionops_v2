@@ -100,6 +100,7 @@ topTabs.forEach(btn=>btn.addEventListener('click',()=>{
   pages.forEach(p=>p.classList.remove('active'));
   document.getElementById(btn.dataset.page).classList.add('active');
   updateCameraLifecycle();
+  if(btn.dataset.page==='validatePage') refreshCppInferenceStatus(false);
 }));
 
 const calibrationTips={positionCheck:'先完成摄像头位置校验，摄像头画面与半透明标准图对齐即可。',lightCheck:'再完成光照校验，观察左侧标准图与右侧实时画面的亮度和阴影是否接近。'};
@@ -677,6 +678,43 @@ let realtimeRunning=false;
 let realtimeTimer=null;
 let realtimeBusy=false;
 
+const cppStatusCard=document.getElementById('cppInferenceStatusCard');
+const cppServiceBadge=document.getElementById('cppServiceBadge');
+const refreshCppStatusBtn=document.getElementById('refreshCppStatus');
+const startCppStreamBtn=document.getElementById('startCppStream');
+const stopCppStreamBtn=document.getElementById('stopCppStream');
+const openCppPreviewModalBtn=document.getElementById('openCppPreviewModal');
+const cppPreviewModal=document.getElementById('cppPreviewModal');
+const closeCppPreviewModalBtn=document.getElementById('closeCppPreviewModal');
+const closeCppPreviewModalBottomBtn=document.getElementById('closeCppPreviewModalBottom');
+const refreshCppPreviewFrameBtn=document.getElementById('refreshCppPreviewFrame');
+const toggleCppPreviewAutoBtn=document.getElementById('toggleCppPreviewAuto');
+const cppPreviewCanvas=document.getElementById('cppPreviewCanvas');
+const cppPreviewEmpty=document.getElementById('cppPreviewEmpty');
+const cppPreviewStatus=document.getElementById('cppPreviewStatus');
+const cppPreviewCount=document.getElementById('cppPreviewCount');
+const cppPreviewImageSize=document.getElementById('cppPreviewImageSize');
+const cppPreviewUpdatedAt=document.getElementById('cppPreviewUpdatedAt');
+const cppPreviewPredictions=document.getElementById('cppPreviewPredictions');
+const cppRunningText=document.getElementById('cppRunningText');
+const cppTaskText=document.getElementById('cppTaskText');
+const cppModelText=document.getElementById('cppModelText');
+const cppBackendText=document.getElementById('cppBackendText');
+const cppFpsText=document.getElementById('cppFpsText');
+const cppLatencyText=document.getElementById('cppLatencyText');
+const cppCaptureText=document.getElementById('cppCaptureText');
+const cppPreprocessText=document.getElementById('cppPreprocessText');
+const cppRknnText=document.getElementById('cppRknnText');
+const cppPostprocessText=document.getElementById('cppPostprocessText');
+const cppLastErrorText=document.getElementById('cppLastErrorText');
+let cppStatusTimer=null;
+let cppStatusBusy=false;
+let cppActionBusy=false;
+let cppPreviewTimer=null;
+let cppPreviewBusy=false;
+let cppPreviewAuto=true;
+let cppPreviewLastObjectUrl='';
+
 // 生产模式实时监控：复用模型验证实时检测接口，但独立渲染到生产模式大画面。
 const productionPreview=document.getElementById('productionPreview');
 const productionModelName=document.getElementById('productionModelName');
@@ -688,6 +726,353 @@ let productionRunning=false;
 let productionTimer=null;
 let productionBusy=false;
 let productionLastPredictions=[];
+
+function sleepMs(ms){return new Promise(resolve=>setTimeout(resolve, ms));}
+function formatMetricNumber(value, digits=1){
+  const n=Number(value);
+  if(!Number.isFinite(n)) return '--';
+  return n.toFixed(digits);
+}
+function formatMetricMs(value){
+  const n=Number(value);
+  if(!Number.isFinite(n)) return '--';
+  return `${n.toFixed(1)} ms`;
+}
+function shortPathName(path){
+  const s=String(path || '').trim();
+  if(!s) return '--';
+  const parts=s.split('/').filter(Boolean);
+  return parts.length ? parts[parts.length-1] : s;
+}
+function setCppStatusBadge(state, text){
+  if(!cppServiceBadge) return;
+  cppServiceBadge.className=`cpp-service-badge ${state || 'unknown'}`;
+  cppServiceBadge.textContent=text || '--';
+}
+function setCppStreamActionBusy(busy){
+  cppActionBusy=!!busy;
+  [startCppStreamBtn, stopCppStreamBtn, refreshCppStatusBtn, openCppPreviewModalBtn].forEach(btn=>{
+    if(btn) btn.disabled=cppActionBusy;
+  });
+  if(startCppStreamBtn) startCppStreamBtn.textContent=busy ? '处理中...' : '启动 C++ 检测';
+}
+function updateCppStreamButtons(running){
+  if(startCppStreamBtn){
+    startCppStreamBtn.disabled=cppActionBusy || !!running;
+    startCppStreamBtn.classList.toggle('active', !!running);
+  }
+  if(stopCppStreamBtn){
+    stopCppStreamBtn.disabled=cppActionBusy || !running;
+  }
+  if(openCppPreviewModalBtn){
+    openCppPreviewModalBtn.disabled=cppActionBusy;
+  }
+}
+function isValidatePageActive(){
+  const validatePage=document.getElementById('validatePage');
+  return !!(validatePage && validatePage.classList.contains('active') && factoryMode && factoryMode.classList.contains('active'));
+}
+function renderCppStatusUnavailable(message){
+  if(cppStatusCard) cppStatusCard.classList.add('error');
+  setCppStatusBadge('error','连接失败');
+  if(cppRunningText) cppRunningText.textContent='不可用';
+  if(cppTaskText) cppTaskText.textContent='--';
+  if(cppModelText) cppModelText.textContent='--';
+  if(cppBackendText) cppBackendText.textContent='--';
+  if(cppFpsText) cppFpsText.textContent='--';
+  if(cppLatencyText) cppLatencyText.textContent='--';
+  if(cppCaptureText) cppCaptureText.textContent='--';
+  if(cppPreprocessText) cppPreprocessText.textContent='--';
+  if(cppRknnText) cppRknnText.textContent='--';
+  if(cppPostprocessText) cppPostprocessText.textContent='--';
+  if(cppLastErrorText) cppLastErrorText.textContent=message || '无法连接 C++ 推理服务';
+  updateCppStreamButtons(false);
+}
+function renderCppStatus({health={}, status={}, latest={}}={}){
+  if(!cppStatusCard) return;
+  cppStatusCard.classList.remove('collapsed','error');
+  const healthOk=health && health.status==='ok';
+  const running=!!status.running;
+  setCppStatusBadge(healthOk ? 'ok' : 'warning', healthOk ? '服务正常' : '状态异常');
+  if(cppRunningText) cppRunningText.textContent=running ? '取流中' : '未取流';
+  updateCppStreamButtons(running);
+  const task=health.task || latest.task || '--';
+  const input=Array.isArray(health.input_size) ? `${health.input_size[0]}×${health.input_size[1]}` : '';
+  const classes=health.num_classes ? `${health.num_classes}类` : '';
+  if(cppTaskText) cppTaskText.textContent=[taskDisplayName(task), input, classes].filter(Boolean).join(' · ') || '--';
+  if(cppModelText){
+    const model=health.model || health.model_path || latest.model || '--';
+    cppModelText.textContent=shortPathName(model);
+    cppModelText.title=model;
+  }
+  const backend=status.preprocess_backend_active || health.preprocess_backend_active || latest.preprocess_backend_active || latest.timing?.preprocess_backend || '--';
+  const rgaMode=status.rga_mode_active || health.rga_mode_active || latest.rga_mode_active || '';
+  if(cppBackendText) cppBackendText.textContent=[backend, rgaMode].filter(Boolean).join(' / ');
+  if(cppFpsText){
+    const cameraFps=formatMetricNumber(status.camera_fps,1);
+    const detectFps=formatMetricNumber(status.detect_fps,1);
+    cppFpsText.textContent=`${cameraFps} / ${detectFps}`;
+  }
+  const timing=latest.timing || {};
+  const streamDetail=timing.stream_detail || {};
+  const diagnostics=status.diagnostics || {};
+  if(cppLatencyText) cppLatencyText.textContent=formatMetricMs(latest.latency_ms ?? status.latest_latency_ms);
+  if(cppCaptureText) cppCaptureText.textContent=formatMetricMs(streamDetail.capture_read_ms ?? diagnostics.last_capture_read_ms);
+  if(cppPreprocessText) cppPreprocessText.textContent=formatMetricMs(timing.preprocess_ms);
+  if(cppRknnText) cppRknnText.textContent=formatMetricMs(timing.rknn && timing.rknn.total_ms);
+  if(cppPostprocessText) cppPostprocessText.textContent=formatMetricMs(timing.postprocess_ms);
+  const rawMessage=String(latest.message || '').trim();
+  let statusInfo=status.last_error || '';
+  if(!statusInfo){
+    if(!running) statusInfo='实时流未启动；点击“启动 C++ 检测”开始取流推理';
+    else if(rawMessage && /not produced result|starting|no result/i.test(rawMessage)) statusInfo='取流已启动，正在等待首帧推理结果';
+    else if(rawMessage) statusInfo=rawMessage;
+    else statusInfo='无';
+  }
+  if(cppLastErrorText) cppLastErrorText.textContent=statusInfo;
+}
+async function refreshCppInferenceStatus(showMessage=false){
+  if(!cppStatusCard || cppStatusBusy) return;
+  cppStatusBusy=true;
+  try{
+    const [healthRes,statusRes,latestRes]=await Promise.allSettled([
+      apiGet('/api/cpp/health'),
+      apiGet('/api/cpp/stream/status'),
+      apiGet('/api/cpp/stream/latest_result')
+    ]);
+    const health=healthRes.status==='fulfilled' ? healthRes.value : {};
+    const status=statusRes.status==='fulfilled' ? statusRes.value : {};
+    const latest=latestRes.status==='fulfilled' ? latestRes.value : {};
+    if(healthRes.status==='rejected' && statusRes.status==='rejected'){
+      throw new Error(healthRes.reason?.message || statusRes.reason?.message || 'C++ 服务不可用');
+    }
+    renderCppStatus({health,status,latest});
+    if(showMessage) showToast('C++ 状态已刷新');
+  }catch(err){
+    renderCppStatusUnavailable(err.message || String(err));
+    if(showMessage) showToast(err.message || 'C++ 状态刷新失败');
+  }finally{
+    cppStatusBusy=false;
+  }
+}
+async function startCppStream(){
+  if(!cppStatusCard || cppActionBusy) return;
+  setCppStreamActionBusy(true);
+  try{
+    await apiPost('/api/cpp/stream/start');
+    showToast('C++ 实时检测已启动');
+    await sleepMs(900);
+    await refreshCppInferenceStatus(false);
+  }catch(err){
+    renderCppStatusUnavailable(err.message || String(err));
+    showToast(err.message || '启动 C++ 检测失败');
+  }finally{
+    setCppStreamActionBusy(false);
+  }
+}
+async function stopCppStream(){
+  if(!cppStatusCard || cppActionBusy) return;
+  setCppStreamActionBusy(true);
+  try{
+    await apiPost('/api/cpp/stream/stop');
+    showToast('C++ 实时检测已停止');
+    await sleepMs(300);
+    await refreshCppInferenceStatus(false);
+  }catch(err){
+    renderCppStatusUnavailable(err.message || String(err));
+    showToast(err.message || '停止 C++ 检测失败');
+  }finally{
+    setCppStreamActionBusy(false);
+  }
+}
+function startCppStatusPolling(){
+  if(!cppStatusCard || cppStatusTimer) return;
+  refreshCppInferenceStatus(false);
+  cppStatusTimer=setInterval(()=>{
+    if(isValidatePageActive()) refreshCppInferenceStatus(false);
+  },3000);
+}
+
+function setCppPreviewStatus(message, isError=false){
+  if(!cppPreviewStatus) return;
+  cppPreviewStatus.textContent=message || '--';
+  cppPreviewStatus.classList.toggle('error', !!isError);
+}
+function clearCppPreviewCanvas(message='暂无预览图像'){
+  if(cppPreviewCanvas){
+    const ctx=cppPreviewCanvas.getContext('2d');
+    cppPreviewCanvas.width=960;
+    cppPreviewCanvas.height=540;
+    ctx.clearRect(0,0,cppPreviewCanvas.width,cppPreviewCanvas.height);
+  }
+  if(cppPreviewEmpty){
+    cppPreviewEmpty.textContent=message;
+    cppPreviewEmpty.classList.add('active');
+  }
+}
+function renderCppPreviewSide(latest={}, imageInfo={}){
+  const preds=Array.isArray(latest.predictions) ? latest.predictions : [];
+  if(cppPreviewCount) cppPreviewCount.textContent=String(preds.length || latest.count || 0);
+  if(cppPreviewImageSize){
+    const w=latest.image_width || imageInfo.width;
+    const h=latest.image_height || imageInfo.height;
+    cppPreviewImageSize.textContent=(w && h) ? `${w}×${h}` : '--';
+  }
+  if(cppPreviewUpdatedAt) cppPreviewUpdatedAt.textContent=new Date().toLocaleTimeString();
+  if(cppPreviewPredictions){
+    if(!preds.length){
+      cppPreviewPredictions.textContent='暂无检测目标';
+    }else{
+      cppPreviewPredictions.innerHTML=preds.slice(0,8).map((p,idx)=>{
+        const name=p.class_name || p.class_id || 'target';
+        const conf=Number(p.confidence);
+        const confText=Number.isFinite(conf) ? `${(conf*100).toFixed(1)}%` : '--';
+        return `<div class="cpp-preview-pred"><b>${idx+1}. ${escapeHtml(String(name))}</b><span>${confText}</span></div>`;
+      }).join('');
+    }
+  }
+}
+function drawCppPreviewFrame(img, latest={}){
+  if(!cppPreviewCanvas) return;
+  const naturalW=img.naturalWidth || img.width;
+  const naturalH=img.naturalHeight || img.height;
+  if(!naturalW || !naturalH) return;
+  const maxW=1280;
+  const scale=Math.min(1, maxW / naturalW);
+  const canvasW=Math.max(1, Math.round(naturalW * scale));
+  const canvasH=Math.max(1, Math.round(naturalH * scale));
+  cppPreviewCanvas.width=canvasW;
+  cppPreviewCanvas.height=canvasH;
+  const ctx=cppPreviewCanvas.getContext('2d');
+  ctx.clearRect(0,0,canvasW,canvasH);
+  ctx.drawImage(img,0,0,canvasW,canvasH);
+  const srcW=Number(latest.image_width) || naturalW;
+  const srcH=Number(latest.image_height) || naturalH;
+  const sx=canvasW / Math.max(1,srcW);
+  const sy=canvasH / Math.max(1,srcH);
+  const preds=Array.isArray(latest.predictions) ? latest.predictions : [];
+  ctx.lineWidth=Math.max(2, Math.round(canvasW / 480));
+  ctx.font=`${Math.max(14, Math.round(canvasW/70))}px sans-serif`;
+  preds.forEach((p,idx)=>{
+    const box=Array.isArray(p.bbox) ? p.bbox.map(Number) : null;
+    if(!box || box.length<4 || box.some(v=>!Number.isFinite(v))) return;
+    const x1=box[0]*sx;
+    const y1=box[1]*sy;
+    const x2=box[2]*sx;
+    const y2=box[3]*sy;
+    const w=Math.max(1,x2-x1);
+    const h=Math.max(1,y2-y1);
+    ctx.strokeStyle='#22c55e';
+    ctx.fillStyle='rgba(34,197,94,.14)';
+    ctx.strokeRect(x1,y1,w,h);
+    ctx.fillRect(x1,y1,w,h);
+    const conf=Number(p.confidence);
+    const label=`${p.class_name || p.class_id || 'target'} ${Number.isFinite(conf) ? (conf*100).toFixed(1)+'%' : ''}`.trim();
+    const textW=ctx.measureText(label).width;
+    const labelH=Math.max(22, Math.round(canvasW/55));
+    const ly=Math.max(0,y1-labelH-2);
+    ctx.fillStyle='rgba(15,23,42,.88)';
+    ctx.fillRect(x1,ly,Math.min(textW+14,canvasW-x1),labelH);
+    ctx.fillStyle='#fff';
+    ctx.fillText(label,x1+7,ly+labelH-7);
+    const center=getPredictionCenter(p, box);
+    if(center){
+      ctx.beginPath();
+      ctx.arc(center[0]*sx, center[1]*sy, Math.max(3,ctx.lineWidth+1), 0, Math.PI*2);
+      ctx.fillStyle='#ef4444';
+      ctx.fill();
+    }
+  });
+  if(cppPreviewEmpty) cppPreviewEmpty.classList.remove('active');
+  renderCppPreviewSide(latest,{width:naturalW,height:naturalH});
+}
+async function loadCppSnapshotImage(){
+  const resp=await fetch(`/api/cpp/stream/snapshot.jpg?t=${Date.now()}`, {cache:'no-store'});
+  if(!resp.ok){
+    let detail='快照请求失败';
+    try{detail=(await resp.json()).message || (await resp.text()) || detail;}catch(_){/* ignore */}
+    throw new Error(detail);
+  }
+  const contentType=resp.headers.get('content-type') || '';
+  if(!contentType.includes('image')){
+    let message='当前没有可用快照';
+    try{const data=await resp.json(); message=data.message || data.detail || message;}catch(_){/* ignore */}
+    throw new Error(message);
+  }
+  const blob=await resp.blob();
+  const url=URL.createObjectURL(blob);
+  return await new Promise((resolve,reject)=>{
+    const img=new Image();
+    img.onload=()=>resolve({img,url});
+    img.onerror=()=>{URL.revokeObjectURL(url); reject(new Error('快照图像解码失败'));};
+    img.src=url;
+  });
+}
+async function refreshCppPreviewFrame(showToastOnSuccess=false){
+  if(!cppPreviewModal || !cppPreviewModal.classList.contains('active') || cppPreviewBusy) return;
+  cppPreviewBusy=true;
+  if(refreshCppPreviewFrameBtn) refreshCppPreviewFrameBtn.disabled=true;
+  try{
+    setCppPreviewStatus('正在刷新低频预览...');
+    const [status, latest]=await Promise.all([
+      apiGet('/api/cpp/stream/status').catch(()=>({})),
+      apiGet('/api/cpp/stream/latest_result').catch(()=>({}))
+    ]);
+    if(!status.running){
+      clearCppPreviewCanvas('实时流未启动；请先点击“启动 C++ 检测”。');
+      renderCppPreviewSide(latest,{});
+      setCppPreviewStatus('实时流未启动', true);
+      return;
+    }
+    const {img,url}=await loadCppSnapshotImage();
+    if(cppPreviewLastObjectUrl) URL.revokeObjectURL(cppPreviewLastObjectUrl);
+    cppPreviewLastObjectUrl=url;
+    drawCppPreviewFrame(img,latest || {});
+    const count=Array.isArray(latest.predictions) ? latest.predictions.length : (latest.count || 0);
+    setCppPreviewStatus(`已刷新：${count} 个目标，${new Date().toLocaleTimeString()}`);
+    if(showToastOnSuccess) showToast('C++ 预览已刷新');
+  }catch(err){
+    clearCppPreviewCanvas(err.message || '预览刷新失败');
+    setCppPreviewStatus(err.message || '预览刷新失败', true);
+  }finally{
+    cppPreviewBusy=false;
+    if(refreshCppPreviewFrameBtn) refreshCppPreviewFrameBtn.disabled=false;
+  }
+}
+function startCppPreviewAutoLoop(){
+  if(cppPreviewTimer) clearInterval(cppPreviewTimer);
+  cppPreviewTimer=setInterval(()=>{
+    if(cppPreviewModal && cppPreviewModal.classList.contains('active') && cppPreviewAuto){
+      refreshCppPreviewFrame(false);
+    }
+  },1000);
+}
+function stopCppPreviewAutoLoop(){
+  if(cppPreviewTimer){
+    clearInterval(cppPreviewTimer);
+    cppPreviewTimer=null;
+  }
+}
+function updateCppPreviewAutoButton(){
+  if(!toggleCppPreviewAutoBtn) return;
+  toggleCppPreviewAutoBtn.textContent=cppPreviewAuto ? '暂停低频预览' : '恢复低频预览';
+  toggleCppPreviewAutoBtn.classList.toggle('active', cppPreviewAuto);
+}
+function openCppPreviewModal(){
+  if(!cppPreviewModal) return;
+  cppPreviewModal.classList.add('active');
+  cppPreviewAuto=true;
+  updateCppPreviewAutoButton();
+  setCppPreviewStatus('正在打开预览...');
+  refreshCppPreviewFrame(false);
+  startCppPreviewAutoLoop();
+}
+function closeCppPreviewModal(){
+  if(!cppPreviewModal) return;
+  cppPreviewModal.classList.remove('active');
+  stopCppPreviewAutoLoop();
+  setCppPreviewStatus('预览已关闭');
+}
 
 function updateSelectedModelUI(){
   if(!selectedModelNameEl) return;
@@ -1302,6 +1687,15 @@ document.getElementById('refreshValidationImages').addEventListener('click',asyn
 document.getElementById('runSingleImageInfer').addEventListener('click',runSingleImageClassification);
 document.getElementById('captureAndInfer').addEventListener('click',captureAndRunClassification);
 if(realtimeInferToggle){realtimeInferToggle.addEventListener('click',toggleRealtimeInferUI);}
+if(startCppStreamBtn){startCppStreamBtn.addEventListener('click',startCppStream);}
+if(stopCppStreamBtn){stopCppStreamBtn.addEventListener('click',stopCppStream);}
+if(refreshCppStatusBtn){refreshCppStatusBtn.addEventListener('click',()=>refreshCppInferenceStatus(true));}
+if(openCppPreviewModalBtn){openCppPreviewModalBtn.addEventListener('click',openCppPreviewModal);}
+if(closeCppPreviewModalBtn){closeCppPreviewModalBtn.addEventListener('click',closeCppPreviewModal);}
+if(closeCppPreviewModalBottomBtn){closeCppPreviewModalBottomBtn.addEventListener('click',closeCppPreviewModal);}
+if(refreshCppPreviewFrameBtn){refreshCppPreviewFrameBtn.addEventListener('click',()=>refreshCppPreviewFrame(true));}
+if(toggleCppPreviewAutoBtn){toggleCppPreviewAutoBtn.addEventListener('click',()=>{cppPreviewAuto=!cppPreviewAuto;updateCppPreviewAutoButton();if(cppPreviewAuto) refreshCppPreviewFrame(false);});}
+if(cppPreviewModal){cppPreviewModal.addEventListener('click',(e)=>{if(e.target===cppPreviewModal) closeCppPreviewModal();});}
 
 
 function setRealtimeButtonState(running){
@@ -1638,6 +2032,7 @@ function stopProductionMonitor(){
 async function initApp(){
   try{await loadCollectorState();await loadModels();await loadValidationImages();await refreshVisionBoxEffectiveStatus();showToast('本地采集目录已就绪');}catch(err){showToast(err.message)}
   updateCameraLifecycle();
+  startCppStatusPolling();
 }
 initApp();
 

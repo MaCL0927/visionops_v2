@@ -38,7 +38,7 @@ extern "C" {
 static void configure_opencv_ffmpeg_quiet_logging(bool quiet) {
     if (!quiet) return;
 
-    // v0.4.3: force quiet OpenCV/FFmpeg logging.
+    // v0.5.5: force quiet OpenCV/FFmpeg logging.
     // Some boards may already export OPENCV_FFMPEG_DEBUG=1 or
     // OPENCV_FFMPEG_LOGLEVEL=56, which produces very verbose trace logs such as
     // "tcp_read_packet". Override them here so manual shell environment does not
@@ -78,25 +78,25 @@ struct Args {
     int detect_fps = 10;          // v0.3: target inference FPS.
     int snapshot_fps = 1;         // v0.3: how often to refresh cached snapshot/annotated caches.
     int snapshot_jpeg_quality = 80;
-    // v0.4.3: decouple visual cache generation from realtime inference.
+    // v0.5.5: decouple visual cache generation from realtime inference.
     // Disable these to measure RTSP + inference CPU without frame clone / overlay overhead.
     bool enable_snapshot = true;
     bool enable_annotated = true;
     bool stream_auto_start = false;
 
-    // v0.4.3: RTSP robustness / log control. Keep TCP by default for main stream.
+    // v0.5.5: RTSP robustness / log control. Keep TCP by default for main stream.
     std::string rtsp_transport = "tcp";   // tcp | udp
     int rtsp_timeout_ms = 5000;            // maps to FFmpeg stimeout, microseconds internally
     bool quiet_ffmpeg_log = true;          // reduce FFmpeg/OpenCV decode warning noise
 
-    // v0.4.3: selectable stream backend.
+    // v0.5.5: selectable stream backend.
     // opencv: low-risk OpenCV/FFmpeg path, kept as the default fallback.
     // gst-mpp: OpenCV + GStreamer pipeline using Rockchip mppvideodec.
     std::string stream_backend = "opencv"; // opencv | gst-mpp
     std::string stream_codec = "h264";     // h264 | h265
     int gst_latency_ms = 100;              // rtspsrc latency for gst-mpp backend
 
-    // v0.4.3: preprocessing backend switch with RGA experiment modes.
+    // v0.5.5: preprocessing backend switch with RGA experiment modes.
     // preprocess_backend: cpu | rga | auto
     // rga_mode:
     //   off          -> force CPU preprocessing for fair baseline comparison
@@ -1255,7 +1255,7 @@ static std::string detections_to_json(
     os << "{";
     os << "\"status\":\"ok\",";
     os << "\"backend\":\"cpp-rknn\",";
-    os << "\"version\":\"v0.4.3\",";
+    os << "\"version\":\"v0.5.5\",";
     os << "\"output_mode\":\"" << json_escape(args.output_mode) << "\",";
     os << "\"preprocess_backend_requested\":\"" << json_escape(args.preprocess_status.requested_backend) << "\",";
     os << "\"preprocess_backend_active\":\"" << json_escape(args.preprocess_status.active_backend) << "\",";
@@ -1431,7 +1431,7 @@ static std::string stats_json() {
     os << std::fixed << std::setprecision(3);
     os << "{";
     os << "\"backend\":\"cpp-rknn\",";
-    os << "\"version\":\"v0.4.3\",";
+    os << "\"version\":\"v0.5.5\",";
     os << "\"total_inferences\":" << total << ",";
     os << "\"errors\":" << errors << ",";
     os << "\"successes\":" << (total >= errors ? total - errors : 0) << ",";
@@ -1500,6 +1500,21 @@ static std::string header_value(const std::string& headers, const std::string& k
     return "";
 }
 
+static std::string query_param_value(const std::string& query, const std::string& key, const std::string& default_value = "") {
+    size_t pos = 0;
+    while (pos <= query.size()) {
+        size_t amp = query.find('&', pos);
+        std::string part = query.substr(pos, amp == std::string::npos ? std::string::npos : amp - pos);
+        size_t eq = part.find('=');
+        std::string k = eq == std::string::npos ? part : part.substr(0, eq);
+        std::string v = eq == std::string::npos ? "" : part.substr(eq + 1);
+        if (k == key) return v;
+        if (amp == std::string::npos) break;
+        pos = amp + 1;
+    }
+    return default_value;
+}
+
 static std::vector<unsigned char> extract_image_body(const std::string& content_type, const std::string& body) {
     if (contains(content_type, "multipart/form-data")) {
         auto bpos = content_type.find("boundary=");
@@ -1546,7 +1561,7 @@ public:
         stop();
     }
 
-    bool start(std::string* message = nullptr) {
+    bool start(std::string* message = nullptr, bool enable_inference = true) {
         if (args_.camera_source.empty()) {
             if (message) *message = "camera_source is empty; start with --camera-source <rtsp_url>";
             return false;
@@ -1554,46 +1569,67 @@ public:
 
         bool expected = false;
         if (!running_.compare_exchange_strong(expected, true)) {
-            if (message) *message = "stream already running";
+            // v0.5.5: stream may already be running in preview mode. In that case
+            // /stream/start?mode=detect should simply enable inference without
+            // reopening RTSP.
+            set_inference_enabled(enable_inference);
+            if (message) {
+                *message = enable_inference
+                    ? "stream already running; inference enabled"
+                    : "stream already running; inference disabled, preview mode active";
+            }
             return true;
         }
 
-        {
-            std::lock_guard<std::mutex> lock(state_mu_);
-            last_error_.clear();
-            latest_result_json_ = "{\"status\":\"starting\",\"message\":\"stream worker is starting\"}";
-            latest_snapshot_frame_.release();
-            latest_annotated_frame_.release();
-            latest_annotated_time_ms_ = 0.0;
-            camera_frames_ = 0;
-            detect_frames_ = 0;
-            camera_fps_measured_ = 0.0;
-            detect_fps_measured_ = 0.0;
-            latest_latency_ms_ = 0.0;
-            latest_result_time_ms_ = 0.0;
-            latest_snapshot_time_ms_ = 0.0;
-            last_capture_read_ms_ = 0.0;
-            last_snapshot_clone_ms_ = 0.0;
-            last_annotated_draw_ms_ = 0.0;
-            last_stream_loop_ms_ = 0.0;
-            last_snapshot_encode_ms_ = 0.0;
-            last_annotated_encode_ms_ = 0.0;
-            last_snapshot_request_clone_ms_ = 0.0;
-            last_annotated_request_clone_ms_ = 0.0;
-            snapshot_encode_requests_ = 0;
-            annotated_encode_requests_ = 0;
-        }
+        reset_state_for_start(enable_inference);
 
-        worker_ = std::thread(&StreamWorker::loop, this);
-        if (message) *message = "stream started";
+        capture_thread_ = std::thread(&StreamWorker::capture_loop, this);
+        infer_thread_ = std::thread(&StreamWorker::infer_loop, this);
+
+        if (message) {
+            *message = enable_inference
+                ? "stream started in detect mode"
+                : "stream started in preview mode";
+        }
+        return true;
+    }
+
+    bool start_preview(std::string* message = nullptr) {
+        return start(message, false);
+    }
+
+    bool start_detect(std::string* message = nullptr) {
+        return start(message, true);
+    }
+
+    bool enable_inference(std::string* message = nullptr) {
+        if (!running_.load()) {
+            if (message) *message = "stream is not running; call /stream/start?mode=detect or /stream/start first";
+            return false;
+        }
+        set_inference_enabled(true);
+        if (message) *message = "inference enabled";
+        return true;
+    }
+
+    bool disable_inference(std::string* message = nullptr) {
+        if (!running_.load()) {
+            if (message) *message = "stream is not running; inference already disabled";
+            return true;
+        }
+        set_inference_enabled(false);
+        if (message) *message = "inference disabled; stream stays running in preview mode";
         return true;
     }
 
     void stop() {
-        if (running_.exchange(false)) {
-            if (worker_.joinable()) worker_.join();
-        } else {
-            if (worker_.joinable()) worker_.join();
+        running_.store(false);
+        if (capture_thread_.joinable()) capture_thread_.join();
+        if (infer_thread_.joinable()) infer_thread_.join();
+        {
+            std::lock_guard<std::mutex> lock(state_mu_);
+            capture_thread_alive_ = false;
+            infer_thread_alive_ = false;
         }
     }
 
@@ -1604,8 +1640,13 @@ public:
         os << "{";
         os << "\"status\":\"ok\",";
         os << "\"backend\":\"cpp-rknn\",";
-        os << "\"version\":\"v0.4.3\",";
+        os << "\"version\":\"v0.5.5\",";
         os << "\"running\":" << (running_.load() ? "true" : "false") << ",";
+        os << "\"inference_enabled\":" << (inference_enabled_.load() ? "true" : "false") << ",";
+        os << "\"stream_mode\":\"" << (running_.load() ? (inference_enabled_.load() ? "detect" : "preview") : "stopped") << "\",";
+        os << "\"low_latency_mode\":true,";
+        os << "\"capture_thread_alive\":" << (capture_thread_alive_ ? "true" : "false") << ",";
+        os << "\"infer_thread_alive\":" << (infer_thread_alive_ ? "true" : "false") << ",";
         os << "\"camera_source_set\":" << (!args_.camera_source.empty() ? "true" : "false") << ",";
         os << "\"stream_backend\":\"" << json_escape(args_.stream_backend) << "\",";
         os << "\"stream_codec\":\"" << json_escape(args_.stream_codec) << "\",";
@@ -1627,7 +1668,6 @@ public:
         os << "\"camera_read_fps_target\":" << args_.camera_read_fps << ",";
         os << "\"detect_fps_target\":" << args_.detect_fps << ",";
         os << "\"snapshot_fps_target\":" << args_.snapshot_fps << ",";
-        // legacy fields kept for compatibility with v0.2 scripts
         os << "\"stream_fps_target\":" << args_.detect_fps << ",";
         os << "\"camera_fps\":" << camera_fps_measured_ << ",";
         os << "\"stream_fps\":" << camera_fps_measured_ << ",";
@@ -1636,16 +1676,26 @@ public:
         os << "\"stream_frames\":" << camera_frames_ << ",";
         os << "\"detect_frames\":" << detect_frames_ << ",";
         os << "\"latest_latency_ms\":" << latest_latency_ms_ << ",";
+        os << "\"latest_frame_age_ms\":" << latest_frame_age_ms_locked() << ",";
         os << "\"latest_result_age_ms\":" << latest_result_age_ms_locked() << ",";
         os << "\"latest_snapshot_age_ms\":" << latest_snapshot_age_ms_locked() << ",";
         os << "\"latest_annotated_age_ms\":" << latest_annotated_age_ms_locked() << ",";
-        os << "\"snapshot_available\":" << (!latest_snapshot_frame_.empty() ? "true" : "false") << ",";
+        os << "\"snapshot_available\":" << (!latest_capture_frame_.empty() ? "true" : "false") << ",";
         os << "\"annotated_available\":" << (!latest_annotated_frame_.empty() ? "true" : "false") << ",";
+        os << "\"frame_seq\":" << latest_capture_seq_ << ",";
+        os << "\"last_inferred_frame_seq\":" << last_inferred_frame_seq_ << ",";
+        os << "\"dropped_overwrite_frames\":" << dropped_overwrite_frames_ << ",";
+        os << "\"skipped_duplicate_frames\":" << skipped_duplicate_frames_ << ",";
+        os << "\"read_failures\":" << read_failures_ << ",";
+        os << "\"consecutive_read_failures\":" << consecutive_read_failures_ << ",";
+        os << "\"reconnect_count\":" << reconnect_count_ << ",";
         os << "\"diagnostics\":{";
         os << "\"last_capture_read_ms\":" << last_capture_read_ms_ << ",";
         os << "\"last_snapshot_clone_ms\":" << last_snapshot_clone_ms_ << ",";
         os << "\"last_annotated_draw_ms\":" << last_annotated_draw_ms_ << ",";
         os << "\"last_stream_loop_ms\":" << last_stream_loop_ms_ << ",";
+        os << "\"last_infer_loop_ms\":" << last_infer_loop_ms_ << ",";
+        os << "\"latest_frame_age_ms\":" << latest_frame_age_ms_locked() << ",";
         os << "\"last_snapshot_request_clone_ms\":" << last_snapshot_request_clone_ms_ << ",";
         os << "\"last_annotated_request_clone_ms\":" << last_annotated_request_clone_ms_ << ",";
         os << "\"last_snapshot_encode_ms\":" << last_snapshot_encode_ms_ << ",";
@@ -1653,6 +1703,7 @@ public:
         os << "\"snapshot_encode_requests\":" << snapshot_encode_requests_ << ",";
         os << "\"annotated_encode_requests\":" << annotated_encode_requests_;
         os << "},";
+        os << "\"last_capture_error\":\"" << json_escape(last_capture_error_) << "\",";
         os << "\"last_error\":\"" << json_escape(last_error_) << "\"";
         os << "}";
         return os.str();
@@ -1660,8 +1711,25 @@ public:
 
     std::string latest_result_json() {
         std::lock_guard<std::mutex> lock(state_mu_);
+        if (running_.load() && !inference_enabled_.load()) {
+            std::ostringstream os;
+            os << std::fixed << std::setprecision(3);
+            os << "{\"status\":\"inference_disabled\",\"message\":\"stream is running in preview mode; inference is disabled\",";
+            os << "\"latest_frame_available\":" << (!latest_capture_frame_.empty() ? "true" : "false") << ",";
+            os << "\"latest_frame_age_ms\":" << latest_frame_age_ms_locked() << ",";
+            os << "\"capture_thread_alive\":" << (capture_thread_alive_ ? "true" : "false") << ",";
+            os << "\"infer_thread_alive\":" << (infer_thread_alive_ ? "true" : "false") << "}";
+            return os.str();
+        }
         if (latest_result_json_.empty()) {
-            return "{\"status\":\"no_result\",\"message\":\"stream has not produced result yet\"}";
+            std::ostringstream os;
+            os << std::fixed << std::setprecision(3);
+            os << "{\"status\":\"no_result\",\"message\":\"stream has not produced result yet\","
+               << "\"latest_frame_available\":" << (!latest_capture_frame_.empty() ? "true" : "false") << ","
+               << "\"latest_frame_age_ms\":" << latest_frame_age_ms_locked() << ","
+               << "\"capture_thread_alive\":" << (capture_thread_alive_ ? "true" : "false") << ","
+               << "\"infer_thread_alive\":" << (infer_thread_alive_ ? "true" : "false") << "}";
+            return os.str();
         }
         return latest_result_json_;
     }
@@ -1674,7 +1742,7 @@ public:
         double clone0 = now_ms();
         {
             std::lock_guard<std::mutex> lock(state_mu_);
-            if (!latest_snapshot_frame_.empty()) frame = latest_snapshot_frame_.clone();
+            if (!latest_capture_frame_.empty()) frame = latest_capture_frame_.clone();
         }
         double clone_ms = now_ms() - clone0;
         if (frame.empty()) return jpg;
@@ -1719,14 +1787,80 @@ public:
     }
 
 private:
+    void reset_state_for_start(bool enable_inference) {
+        std::lock_guard<std::mutex> lock(state_mu_);
+        inference_enabled_.store(enable_inference);
+        capture_thread_alive_ = false;
+        infer_thread_alive_ = false;
+        last_error_.clear();
+        last_capture_error_.clear();
+        latest_result_json_ = enable_inference
+            ? "{\"status\":\"starting\",\"message\":\"low latency stream worker is starting in detect mode\"}"
+            : "{\"status\":\"inference_disabled\",\"message\":\"stream is starting in preview mode; inference is disabled\"}";
+        latest_capture_frame_.release();
+        latest_snapshot_frame_.release();
+        latest_annotated_frame_.release();
+        latest_capture_time_ms_ = 0.0;
+        latest_result_time_ms_ = 0.0;
+        latest_snapshot_time_ms_ = 0.0;
+        latest_annotated_time_ms_ = 0.0;
+        latest_capture_seq_ = 0;
+        last_inferred_frame_seq_ = 0;
+        camera_frames_ = 0;
+        detect_frames_ = 0;
+        dropped_overwrite_frames_ = 0;
+        skipped_duplicate_frames_ = 0;
+        read_failures_ = 0;
+        consecutive_read_failures_ = 0;
+        reconnect_count_ = 0;
+        camera_fps_measured_ = 0.0;
+        detect_fps_measured_ = 0.0;
+        latest_latency_ms_ = 0.0;
+        last_capture_read_ms_ = 0.0;
+        last_snapshot_clone_ms_ = 0.0;
+        last_annotated_draw_ms_ = 0.0;
+        last_stream_loop_ms_ = 0.0;
+        last_infer_loop_ms_ = 0.0;
+        last_snapshot_encode_ms_ = 0.0;
+        last_annotated_encode_ms_ = 0.0;
+        last_snapshot_request_clone_ms_ = 0.0;
+        last_annotated_request_clone_ms_ = 0.0;
+        snapshot_encode_requests_ = 0;
+        annotated_encode_requests_ = 0;
+    }
+
+    void set_inference_enabled(bool enabled) {
+        inference_enabled_.store(enabled);
+        std::lock_guard<std::mutex> lock(state_mu_);
+        if (enabled) {
+            latest_result_json_ = "{\"status\":\"starting\",\"message\":\"inference enabled; waiting for next frame\"}";
+            latest_result_time_ms_ = 0.0;
+            // Force infer_loop to consume the next available frame after enabling.
+            last_inferred_frame_seq_ = 0;
+        } else {
+            latest_result_json_ = "{\"status\":\"inference_disabled\",\"message\":\"stream is running in preview mode; inference is disabled\"}";
+            latest_result_time_ms_ = 0.0;
+            latest_latency_ms_ = 0.0;
+            detect_fps_measured_ = 0.0;
+            latest_annotated_frame_.release();
+            latest_annotated_time_ms_ = 0.0;
+        }
+    }
+
+    double latest_frame_age_ms_locked() const {
+        if (latest_capture_time_ms_ <= 0.0) return -1.0;
+        return now_ms() - latest_capture_time_ms_;
+    }
+
     double latest_result_age_ms_locked() const {
         if (latest_result_time_ms_ <= 0.0) return -1.0;
         return now_ms() - latest_result_time_ms_;
     }
 
     double latest_snapshot_age_ms_locked() const {
-        if (latest_snapshot_time_ms_ <= 0.0) return -1.0;
-        return now_ms() - latest_snapshot_time_ms_;
+        // v0.5.5: snapshot.jpg is served from the latest captured frame, so this
+        // age reflects the freshest capture frame rather than the inference loop.
+        return latest_frame_age_ms_locked();
     }
 
     double latest_annotated_age_ms_locked() const {
@@ -1739,188 +1873,291 @@ private:
         last_error_ = err;
     }
 
-    static void sleep_remaining_ms(double remaining_ms) {
-        if (remaining_ms <= 0.0) return;
-        int ms = (int)std::min(remaining_ms, 50.0);
-        if (ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+    void clear_error_if_matches_capture_success() {
+        std::lock_guard<std::mutex> lock(state_mu_);
+        last_capture_error_.clear();
+        if (last_error_ == "OpenCV failed to read frame" ||
+            last_error_.find("failed to open") != std::string::npos ||
+            last_error_.find("reconnecting") != std::string::npos) {
+            last_error_.clear();
+        }
     }
 
-    void loop() {
+    std::unique_ptr<visionops::IStreamBackend> open_stream_backend(std::string* error_message) const {
+        visionops::StreamOpenOptions stream_options;
+        stream_options.backend = args_.stream_backend;
+        stream_options.camera_source = args_.camera_source;
+        stream_options.stream_codec = args_.stream_codec;
+        stream_options.rtsp_transport = args_.rtsp_transport;
+        stream_options.rtsp_timeout_ms = args_.rtsp_timeout_ms;
+        stream_options.gst_latency_ms = args_.gst_latency_ms;
+        stream_options.quiet_ffmpeg_log = args_.quiet_ffmpeg_log;
+
+        auto backend = visionops::create_stream_backend(stream_options);
+        std::string open_error;
+        if (!backend->open(&open_error)) {
+            if (error_message) *error_message = open_error.empty() ? "failed to open stream backend" : open_error;
+            return nullptr;
+        }
+        return backend;
+    }
+
+    void capture_loop() {
+        {
+            std::lock_guard<std::mutex> lock(state_mu_);
+            capture_thread_alive_ = true;
+        }
+
         std::unique_ptr<visionops::IStreamBackend> stream_backend;
-        try {
-            std::cout << "[STREAM] opening camera: " << args_.camera_source << "\n";
-            std::cout << "[STREAM] stream_backend=" << args_.stream_backend
-                      << " stream_codec=" << args_.stream_codec
-                      << " rtsp_transport=" << args_.rtsp_transport << "\n";
+        double fps_window_t0 = now_ms();
+        uint64_t camera_frames_window = 0;
 
-            visionops::StreamOpenOptions stream_options;
-            stream_options.backend = args_.stream_backend;
-            stream_options.camera_source = args_.camera_source;
-            stream_options.stream_codec = args_.stream_codec;
-            stream_options.rtsp_transport = args_.rtsp_transport;
-            stream_options.rtsp_timeout_ms = args_.rtsp_timeout_ms;
-            stream_options.gst_latency_ms = args_.gst_latency_ms;
-            stream_options.quiet_ffmpeg_log = args_.quiet_ffmpeg_log;
+        auto reconnect = [&]() -> bool {
+            if (stream_backend) stream_backend->close();
+            stream_backend.reset();
+            {
+                std::lock_guard<std::mutex> lock(state_mu_);
+                reconnect_count_++;
+                last_capture_error_ = "reconnecting camera";
+                last_error_ = "reconnecting camera";
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(800));
 
-            stream_backend = visionops::create_stream_backend(stream_options);
             std::string open_error;
-            if (!stream_backend->open(&open_error)) {
-                set_error(open_error.empty() ? "failed to open stream backend" : open_error);
-                running_.store(false);
-                return;
+            stream_backend = open_stream_backend(&open_error);
+            if (!stream_backend) {
+                std::lock_guard<std::mutex> lock(state_mu_);
+                last_capture_error_ = open_error.empty() ? "failed to open stream backend" : open_error;
+                last_error_ = last_capture_error_;
+                return false;
             }
 
-            const double read_interval_ms = args_.camera_read_fps > 0 ? 1000.0 / (double)args_.camera_read_fps : 0.0;
-            const double detect_interval_ms = args_.detect_fps > 0 ? 1000.0 / (double)args_.detect_fps : 100.0;
-            const double snapshot_interval_ms = args_.snapshot_fps > 0 ? 1000.0 / (double)args_.snapshot_fps : 1000.0;
-
-            double last_read_ms = 0.0;
-            double last_detect_ms = 0.0;
-            double last_snapshot_ms = 0.0;
-            double last_annotated_ms = 0.0;
-            double fps_window_t0 = now_ms();
-            uint64_t camera_frames_window = 0;
-            uint64_t detect_frames_window = 0;
-
-            while (running_.load()) {
-                double loop_t0 = now_ms();
-                double before_read = now_ms();
-                if (read_interval_ms > 0.0 && last_read_ms > 0.0) {
-                    double since_last_read = before_read - last_read_ms;
-                    if (since_last_read < read_interval_ms) {
-                        sleep_remaining_ms(read_interval_ms - since_last_read);
-                        continue;
-                    }
-                }
-
-                cv::Mat frame;
-                std::string read_error;
-                double read_t0 = now_ms();
-                bool read_ok = stream_backend->read(frame, &read_error);
-                double read_t1 = now_ms();
-                double capture_read_ms = read_t1 - read_t0;
-                {
-                    std::lock_guard<std::mutex> lock(state_mu_);
-                    last_capture_read_ms_ = capture_read_ms;
-                }
-                if (!read_ok || frame.empty()) {
-                    set_error(read_error.empty() ? "failed to read frame from camera" : read_error);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                    continue;
-                }
-                double frame_time_ms = now_ms();
-                last_read_ms = frame_time_ms;
-
-                {
-                    std::lock_guard<std::mutex> lock(state_mu_);
-                    camera_frames_++;
-                    camera_frames_window++;
-                }
-
-                // v0.4.3: snapshot cache can be disabled to isolate RTSP/decode/inference CPU.
-                double snapshot_clone_ms = 0.0;
-                if (args_.enable_snapshot && frame_time_ms - last_snapshot_ms >= snapshot_interval_ms) {
-                    double snap0 = now_ms();
-                    cv::Mat snapshot = frame.clone();
-                    snapshot_clone_ms = now_ms() - snap0;
-                    {
-                        std::lock_guard<std::mutex> lock(state_mu_);
-                        latest_snapshot_frame_ = std::move(snapshot);
-                        latest_snapshot_time_ms_ = frame_time_ms;
-                        last_snapshot_clone_ms_ = snapshot_clone_ms;
-                    }
-                    last_snapshot_ms = frame_time_ms;
-                }
-
-                if (frame_time_ms - last_detect_ms < detect_interval_ms) {
-                    double loop_ms = now_ms() - loop_t0;
-                    {
-                        std::lock_guard<std::mutex> lock(state_mu_);
-                        last_stream_loop_ms_ = loop_ms;
-                    }
-                    continue;
-                }
-                last_detect_ms = frame_time_ms;
-
-                InferTiming timing;
-                timing.stream_detail.capture_read_ms = capture_read_ms;
-                timing.stream_detail.snapshot_clone_ms = snapshot_clone_ms;
-                double total0 = now_ms();
-
-                double s0 = now_ms();
-                PreprocessMeta meta;
-                std::string actual_preprocess_backend;
-                std::string preprocess_fallback_reason;
-                cv::Mat rgb = preprocess_rgb_uint8(frame, args_, meta, actual_preprocess_backend, &preprocess_fallback_reason, &timing.preprocess_detail);
-                double s1 = now_ms();
-                timing.preprocess_ms = s1 - s0;
-                timing.preprocess_backend = actual_preprocess_backend;
-                timing.preprocess_detail.total_ms = timing.preprocess_ms;
-                if (!preprocess_fallback_reason.empty()) {
-                    set_error("preprocess fallback: " + preprocess_fallback_reason);
-                }
-
-                auto outputs = runner_.infer(rgb, &timing.rknn);
-
-                s0 = now_ms();
-                auto dets = postprocess_detection(outputs, args_, class_names_, meta);
-                s1 = now_ms();
-                timing.postprocess_ms = s1 - s0;
-                timing.total_ms = now_ms() - total0;
-
-                // v0.4.3: visual debug image is refreshed at snapshot_fps, not every
-                // inference, so the validation endpoint does not distort the FPS baseline.
-                cv::Mat annotated;
-                double annotated_draw_ms = 0.0;
-                bool should_update_annotated = args_.enable_annotated && (frame_time_ms - last_annotated_ms >= snapshot_interval_ms);
-                if (should_update_annotated) {
-                    double draw0 = now_ms();
-                    annotated = draw_detections_on_frame(frame, dets);
-                    annotated_draw_ms = now_ms() - draw0;
-                    last_annotated_ms = frame_time_ms;
-                }
-
-                timing.stream_detail.annotated_draw_ms = annotated_draw_ms;
-                timing.stream_detail.loop_total_ms = now_ms() - loop_t0;
-                timing.stream_detail.state_update_ms = 0.0;
-                std::string result = detections_to_json(args_, dets, timing.total_ms, outputs, &timing, &meta);
-                double state0 = now_ms();
-                {
-                    std::lock_guard<std::mutex> lock(state_mu_);
-                    latest_result_json_ = result;
-                    if (should_update_annotated && !annotated.empty()) {
-                        latest_annotated_frame_ = std::move(annotated);
-                        latest_annotated_time_ms_ = now_ms();
-                    }
-                    latest_result_time_ms_ = now_ms();
-                    latest_latency_ms_ = timing.total_ms;
-                    detect_frames_++;
-                    detect_frames_window++;
-                    last_annotated_draw_ms_ = annotated_draw_ms;
-                    last_stream_loop_ms_ = timing.stream_detail.loop_total_ms;
+            {
+                std::lock_guard<std::mutex> lock(state_mu_);
+                consecutive_read_failures_ = 0;
+                last_capture_error_.clear();
+                if (last_error_ == "reconnecting camera" || last_error_.find("failed to open") != std::string::npos) {
                     last_error_.clear();
                 }
-                timing.stream_detail.state_update_ms = now_ms() - state0;
+            }
+            return true;
+        };
 
-                double fps_now = now_ms();
-                if (fps_now - fps_window_t0 >= 1000.0) {
-                    double sec = (fps_now - fps_window_t0) / 1000.0;
+        std::cout << "[STREAM] low-latency capture thread opening camera: " << args_.camera_source << "\n";
+        std::cout << "[STREAM] stream_backend=" << args_.stream_backend
+                  << " stream_codec=" << args_.stream_codec
+                  << " rtsp_transport=" << args_.rtsp_transport << "\n";
+
+        reconnect();
+
+        while (running_.load()) {
+            if (!stream_backend) {
+                reconnect();
+                continue;
+            }
+
+            cv::Mat frame;
+            std::string read_error;
+            double read_t0 = now_ms();
+            bool read_ok = stream_backend->read(frame, &read_error);
+            double read_t1 = now_ms();
+            double capture_read_ms = read_t1 - read_t0;
+
+            {
+                std::lock_guard<std::mutex> lock(state_mu_);
+                last_capture_read_ms_ = capture_read_ms;
+            }
+
+            if (!read_ok || frame.empty()) {
+                bool should_reconnect = false;
+                {
                     std::lock_guard<std::mutex> lock(state_mu_);
-                    camera_fps_measured_ = camera_frames_window / sec;
-                    detect_fps_measured_ = detect_frames_window / sec;
-                    camera_frames_window = 0;
-                    detect_frames_window = 0;
-                    fps_window_t0 = fps_now;
+                    read_failures_++;
+                    consecutive_read_failures_++;
+                    last_capture_error_ = read_error.empty() ? "OpenCV failed to read frame" : read_error;
+                    last_error_ = last_capture_error_;
+                    should_reconnect = consecutive_read_failures_ >= 3;
+                }
+                if (should_reconnect) {
+                    reconnect();
+                } else {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                }
+                continue;
+            }
+
+            const double frame_time_ms = now_ms();
+            {
+                std::lock_guard<std::mutex> lock(state_mu_);
+                if (!latest_capture_frame_.empty() && latest_capture_seq_ > last_inferred_frame_seq_) {
+                    dropped_overwrite_frames_++;
+                }
+                latest_capture_frame_ = frame;
+                latest_capture_time_ms_ = frame_time_ms;
+                latest_capture_seq_++;
+                camera_frames_++;
+                camera_frames_window++;
+                consecutive_read_failures_ = 0;
+                last_capture_error_.clear();
+                if (last_error_ == "OpenCV failed to read frame" || last_error_ == "reconnecting camera") {
+                    last_error_.clear();
                 }
             }
 
-            if (stream_backend) stream_backend->close();
-            std::cout << "[STREAM] stopped\n";
-        } catch (const std::exception& e) {
-            if (stream_backend) stream_backend->close();
-            set_error(e.what());
-            running_.store(false);
+            double fps_now = now_ms();
+            if (fps_now - fps_window_t0 >= 1000.0) {
+                double sec = (fps_now - fps_window_t0) / 1000.0;
+                std::lock_guard<std::mutex> lock(state_mu_);
+                camera_fps_measured_ = camera_frames_window / sec;
+                camera_frames_window = 0;
+                fps_window_t0 = fps_now;
+            }
+
+            // Keep draining the decoder buffer. This is intentionally not throttled
+            // by detect_fps; inference has its own loop and old frames are dropped.
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
+
+        if (stream_backend) stream_backend->close();
+        {
+            std::lock_guard<std::mutex> lock(state_mu_);
+            capture_thread_alive_ = false;
+        }
+        std::cout << "[STREAM] capture thread stopped\n";
+    }
+
+    void infer_loop() {
+        {
+            std::lock_guard<std::mutex> lock(state_mu_);
+            infer_thread_alive_ = true;
+        }
+
+        const double detect_interval_ms = args_.detect_fps > 0 ? 1000.0 / (double)args_.detect_fps : 100.0;
+        const double snapshot_interval_ms = args_.snapshot_fps > 0 ? 1000.0 / (double)args_.snapshot_fps : 1000.0;
+        double last_detect_ms = 0.0;
+        double last_annotated_ms = 0.0;
+        double fps_window_t0 = now_ms();
+        uint64_t detect_frames_window = 0;
+
+        while (running_.load()) {
+            if (!inference_enabled_.load()) {
+                {
+                    std::lock_guard<std::mutex> lock(state_mu_);
+                    detect_fps_measured_ = 0.0;
+                    last_infer_loop_ms_ = 0.0;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                continue;
+            }
+
+            double now = now_ms();
+            if (last_detect_ms > 0.0 && now - last_detect_ms < detect_interval_ms) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                continue;
+            }
+
+            double loop_t0 = now_ms();
+            cv::Mat frame;
+            uint64_t seq = 0;
+            double frame_time_ms = 0.0;
+            double capture_read_ms = 0.0;
+
+            {
+                std::lock_guard<std::mutex> lock(state_mu_);
+                if (latest_capture_frame_.empty()) {
+                    // Capture thread has not produced a frame yet.
+                } else if (latest_capture_seq_ == last_inferred_frame_seq_) {
+                    skipped_duplicate_frames_++;
+                } else {
+                    frame = latest_capture_frame_.clone();
+                    seq = latest_capture_seq_;
+                    frame_time_ms = latest_capture_time_ms_;
+                    capture_read_ms = last_capture_read_ms_;
+                    last_inferred_frame_seq_ = seq;
+                }
+            }
+
+            if (frame.empty()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
+
+            last_detect_ms = now_ms();
+
+            InferTiming timing;
+            timing.stream_detail.capture_read_ms = capture_read_ms;
+            double total0 = now_ms();
+
+            double s0 = now_ms();
+            PreprocessMeta meta;
+            std::string actual_preprocess_backend;
+            std::string preprocess_fallback_reason;
+            cv::Mat rgb = preprocess_rgb_uint8(frame, args_, meta, actual_preprocess_backend, &preprocess_fallback_reason, &timing.preprocess_detail);
+            double s1 = now_ms();
+            timing.preprocess_ms = s1 - s0;
+            timing.preprocess_backend = actual_preprocess_backend;
+            timing.preprocess_detail.total_ms = timing.preprocess_ms;
+            if (!preprocess_fallback_reason.empty()) {
+                set_error("preprocess fallback: " + preprocess_fallback_reason);
+            }
+
+            auto outputs = runner_.infer(rgb, &timing.rknn);
+
+            s0 = now_ms();
+            auto dets = postprocess_detection(outputs, args_, class_names_, meta);
+            s1 = now_ms();
+            timing.postprocess_ms = s1 - s0;
+            timing.total_ms = now_ms() - total0;
+
+            cv::Mat annotated;
+            double annotated_draw_ms = 0.0;
+            bool should_update_annotated = args_.enable_annotated && (last_detect_ms - last_annotated_ms >= snapshot_interval_ms);
+            if (should_update_annotated) {
+                double draw0 = now_ms();
+                annotated = draw_detections_on_frame(frame, dets);
+                annotated_draw_ms = now_ms() - draw0;
+                last_annotated_ms = last_detect_ms;
+            }
+
+            timing.stream_detail.snapshot_clone_ms = 0.0;
+            timing.stream_detail.annotated_draw_ms = annotated_draw_ms;
+            timing.stream_detail.loop_total_ms = now_ms() - loop_t0;
+            timing.stream_detail.state_update_ms = 0.0;
+            std::string result = detections_to_json(args_, dets, timing.total_ms, outputs, &timing, &meta);
+
+            double state0 = now_ms();
+            {
+                std::lock_guard<std::mutex> lock(state_mu_);
+                latest_result_json_ = result;
+                if (should_update_annotated && !annotated.empty()) {
+                    latest_annotated_frame_ = std::move(annotated);
+                    latest_annotated_time_ms_ = now_ms();
+                }
+                latest_result_time_ms_ = now_ms();
+                latest_latency_ms_ = timing.total_ms;
+                detect_frames_++;
+                detect_frames_window++;
+                last_annotated_draw_ms_ = annotated_draw_ms;
+                last_stream_loop_ms_ = timing.stream_detail.loop_total_ms;
+                last_infer_loop_ms_ = timing.stream_detail.loop_total_ms;
+            }
+            timing.stream_detail.state_update_ms = now_ms() - state0;
+
+            double fps_now = now_ms();
+            if (fps_now - fps_window_t0 >= 1000.0) {
+                double sec = (fps_now - fps_window_t0) / 1000.0;
+                std::lock_guard<std::mutex> lock(state_mu_);
+                detect_fps_measured_ = detect_frames_window / sec;
+                detect_frames_window = 0;
+                fps_window_t0 = fps_now;
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(state_mu_);
+            infer_thread_alive_ = false;
+        }
+        std::cout << "[STREAM] infer thread stopped\n";
     }
 
     RknnRunner& runner_;
@@ -1928,13 +2165,22 @@ private:
     std::vector<std::string> class_names_;
 
     std::atomic<bool> running_{false};
-    std::thread worker_;
+    std::atomic<bool> inference_enabled_{true};
+    std::thread capture_thread_;
+    std::thread infer_thread_;
     std::mutex state_mu_;
 
-    cv::Mat latest_snapshot_frame_;
+    bool capture_thread_alive_ = false;
+    bool infer_thread_alive_ = false;
+
+    cv::Mat latest_capture_frame_;
+    cv::Mat latest_snapshot_frame_;   // kept for compatibility; snapshot.jpg now serves latest_capture_frame_.
     cv::Mat latest_annotated_frame_;
     std::string latest_result_json_;
     std::string last_error_;
+    std::string last_capture_error_;
+
+    double latest_capture_time_ms_ = 0.0;
     double latest_result_time_ms_ = 0.0;
     double latest_snapshot_time_ms_ = 0.0;
     double latest_annotated_time_ms_ = 0.0;
@@ -1945,15 +2191,25 @@ private:
     double last_snapshot_clone_ms_ = 0.0;
     double last_annotated_draw_ms_ = 0.0;
     double last_stream_loop_ms_ = 0.0;
+    double last_infer_loop_ms_ = 0.0;
     double last_snapshot_request_clone_ms_ = 0.0;
     double last_annotated_request_clone_ms_ = 0.0;
     double last_snapshot_encode_ms_ = 0.0;
     double last_annotated_encode_ms_ = 0.0;
+
     uint64_t snapshot_encode_requests_ = 0;
     uint64_t annotated_encode_requests_ = 0;
     uint64_t camera_frames_ = 0;
     uint64_t detect_frames_ = 0;
+    uint64_t latest_capture_seq_ = 0;
+    uint64_t last_inferred_frame_seq_ = 0;
+    uint64_t dropped_overwrite_frames_ = 0;
+    uint64_t skipped_duplicate_frames_ = 0;
+    uint64_t read_failures_ = 0;
+    uint64_t consecutive_read_failures_ = 0;
+    uint64_t reconnect_count_ = 0;
 };
+
 
 static void handle_client(int client_fd, RknnRunner& runner, StreamWorker& stream_worker, const Args& args, const std::vector<std::string>& class_names) {
     try {
@@ -1973,6 +2229,13 @@ static void handle_client(int client_fd, RknnRunner& runner, StreamWorker& strea
         std::istringstream first_line(headers);
         std::string method, path, version;
         first_line >> method >> path >> version;
+        std::string raw_path = path;
+        std::string query_string;
+        size_t query_pos = path.find('?');
+        if (query_pos != std::string::npos) {
+            query_string = path.substr(query_pos + 1);
+            path = path.substr(0, query_pos);
+        }
 
         // v0.1.4: support curl/libcurl HTTP Expect: 100-continue.
         // Without this, large multipart uploads may wait about 1 second before sending body.
@@ -1998,7 +2261,7 @@ static void handle_client(int client_fd, RknnRunner& runner, StreamWorker& strea
             os << "{"
                << "\"status\":\"ok\","
                << "\"backend\":\"cpp-rknn\","
-               << "\"version\":\"v0.4.3\","
+               << "\"version\":\"v0.5.5\","
                << "\"output_mode\":\"" << json_escape(args.output_mode) << "\","
                << "\"preprocess_backend_requested\":\"" << json_escape(args.preprocess_status.requested_backend) << "\","
                << "\"preprocess_backend_active\":\"" << json_escape(args.preprocess_status.active_backend) << "\","
@@ -2027,6 +2290,8 @@ static void handle_client(int client_fd, RknnRunner& runner, StreamWorker& strea
                << "\"detect_fps\":" << args.detect_fps << ","
                << "\"stream_fps\":" << args.detect_fps << ","
                << "\"snapshot_fps\":" << args.snapshot_fps << ","
+               << "\"stream_modes\":[\"preview\",\"detect\"],"
+               << "\"inference_control_endpoints\":[\"/inference/start\",\"/inference/stop\"],"
                << "\"visual_debug_endpoint\":\"/stream/annotated.jpg\""
                << "}";
             send_all(client_fd, make_http_response(os.str()));
@@ -2039,10 +2304,50 @@ static void handle_client(int client_fd, RknnRunner& runner, StreamWorker& strea
         }
 
         if (method == "POST" && path == "/stream/start") {
+            std::string mode = query_param_value(query_string, "mode", "detect");
+            std::transform(mode.begin(), mode.end(), mode.begin(), ::tolower);
+            bool enable_inference = !(mode == "preview" || mode == "capture" || mode == "camera");
             std::string msg;
-            bool ok = stream_worker.start(&msg);
+            bool ok = stream_worker.start(&msg, enable_inference);
             std::string body = std::string("{\"status\":\"") + (ok ? "ok" : "error") +
+                               "\",\"mode\":\"" + (enable_inference ? "detect" : "preview") +
                                "\",\"message\":\"" + json_escape(msg) + "\"}";
+            send_all(client_fd, make_http_response(body, ok ? "200 OK" : "400 Bad Request"));
+            return;
+        }
+
+        if (method == "POST" && path == "/stream/preview/start") {
+            std::string msg;
+            bool ok = stream_worker.start_preview(&msg);
+            std::string body = std::string("{\"status\":\"") + (ok ? "ok" : "error") +
+                               "\",\"mode\":\"preview\",\"message\":\"" + json_escape(msg) + "\"}";
+            send_all(client_fd, make_http_response(body, ok ? "200 OK" : "400 Bad Request"));
+            return;
+        }
+
+        if (method == "POST" && path == "/stream/detect/start") {
+            std::string msg;
+            bool ok = stream_worker.start_detect(&msg);
+            std::string body = std::string("{\"status\":\"") + (ok ? "ok" : "error") +
+                               "\",\"mode\":\"detect\",\"message\":\"" + json_escape(msg) + "\"}";
+            send_all(client_fd, make_http_response(body, ok ? "200 OK" : "400 Bad Request"));
+            return;
+        }
+
+        if (method == "POST" && path == "/inference/start") {
+            std::string msg;
+            bool ok = stream_worker.enable_inference(&msg);
+            std::string body = std::string("{\"status\":\"") + (ok ? "ok" : "error") +
+                               "\",\"inference_enabled\":true,\"message\":\"" + json_escape(msg) + "\"}";
+            send_all(client_fd, make_http_response(body, ok ? "200 OK" : "400 Bad Request"));
+            return;
+        }
+
+        if (method == "POST" && path == "/inference/stop") {
+            std::string msg;
+            bool ok = stream_worker.disable_inference(&msg);
+            std::string body = std::string("{\"status\":\"") + (ok ? "ok" : "error") +
+                               "\",\"inference_enabled\":false,\"message\":\"" + json_escape(msg) + "\"}";
             send_all(client_fd, make_http_response(body, ok ? "200 OK" : "400 Bad Request"));
             return;
         }
@@ -2346,8 +2651,8 @@ int main(int argc, char** argv) {
 
         if (listen(server_fd, 32) < 0) throw std::runtime_error("listen failed");
 
-        std::cout << "[OK] visionops_inference_cpp v0.4.3 started at 0.0.0.0:" << args.port << "\n";
-        std::cout << "[OK] endpoints: GET /health, POST /infer, GET /stats, POST /stream/start, POST /stream/stop, GET /stream/status, GET /stream/latest_result, GET /stream/snapshot.jpg, GET /stream/annotated.jpg\n";
+        std::cout << "[OK] visionops_inference_cpp v0.5.5 started at 0.0.0.0:" << args.port << "\n";
+        std::cout << "[OK] endpoints: GET /health, POST /infer, GET /stats, POST /stream/start, POST /stream/stop, GET /stream/status, GET /stream/latest_result, GET /stream/snapshot.jpg, GET /stream/annotated.jpg, POST /inference/start, POST /inference/stop\n";
 
         while (true) {
             int client_fd = accept(server_fd, nullptr, nullptr);

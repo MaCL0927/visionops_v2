@@ -33,7 +33,15 @@ static void configure_ffmpeg_capture_options(const StreamOpenOptions& options) {
     // OpenCV FFmpeg expects stimeout in microseconds.
     long long stimeout_us = static_cast<long long>(options.rtsp_timeout_ms) * 1000LL;
     std::ostringstream os;
-    os << "rtsp_transport;" << options.rtsp_transport << "|stimeout;" << stimeout_us;
+    os << "rtsp_transport;" << options.rtsp_transport
+       << "|stimeout;" << stimeout_us
+       // Low-latency RTSP hints. Some OpenCV/FFmpeg builds may ignore part of
+       // these options, so v0.5.4 still relies primarily on the split
+       // capture/infer workers to keep draining the decoder buffer.
+       << "|fflags;nobuffer"
+       << "|flags;low_delay"
+       << "|max_delay;0"
+       << "|reorder_queue_size;0";
     setenv("OPENCV_FFMPEG_CAPTURE_OPTIONS", os.str().c_str(), 1);
 }
 

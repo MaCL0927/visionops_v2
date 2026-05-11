@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# VisionOps v0.4.3 C++ service one-key deploy
-# Steps: sync code -> compile on RK3588 -> install binary/service -> restart -> health check.
+# VisionOps C++ service one-key deploy
+# Steps: sync C++ code -> compile on RK3588 -> install binary/service -> restart -> health check.
+# Optional: sync Collector proxy files for v0.5.0 Web/Collector -> C++ service integration.
 # Usage examples:
 #   bash edge/deploy/deploy_cpp.sh --host 192.168.1.200
 #   EDGE_HOST=192.168.1.200 NUM_CLASSES=80 CAMERA_SOURCE='rtsp://...' bash edge/deploy/deploy_cpp.sh
@@ -44,6 +45,15 @@ GST_LATENCY_MS="${GST_LATENCY_MS:-100}"
 QUIET_FFMPEG_LOG="${QUIET_FFMPEG_LOG:-true}"
 INSTALL_GST="${INSTALL_GST:-0}"
 
+# v0.5.0 optional Collector proxy deployment.
+# Default keeps this script focused on C++ service only.
+SYNC_COLLECTOR="${SYNC_COLLECTOR:-0}"
+RESTART_COLLECTOR="${RESTART_COLLECTOR:-1}"
+APPLY_CPP_PROXY="${APPLY_CPP_PROXY:-1}"
+COLLECTOR_PORT="${COLLECTOR_PORT:-8090}"
+COLLECTOR_SERVICE="${COLLECTOR_SERVICE:-visionops-collector}"
+CPP_SERVICE_URL="${CPP_SERVICE_URL:-http://127.0.0.1:${CPP_PORT}}"
+
 SSH_OPTS=(-o StrictHostKeyChecking=no -o ConnectTimeout=10 -p "${EDGE_PORT}")
 SCP_OPTS=(-o StrictHostKeyChecking=no -o ConnectTimeout=10 -P "${EDGE_PORT}")
 RSYNC_SSH="ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p ${EDGE_PORT}"
@@ -76,6 +86,13 @@ Options:
   --enable-annotated true|false, default: ${ENABLE_ANNOTATED}
   --stream-backend opencv|gst-mpp, default: ${STREAM_BACKEND}
   --install-gst 0|1           Install common GStreamer packages, default: ${INSTALL_GST}
+
+  # v0.5.0 optional Collector proxy deployment:
+  --sync-collector true|false    Sync edge/collector and tools, default: ${SYNC_COLLECTOR}
+  --restart-collector true|false Restart Collector service after sync, default: ${RESTART_COLLECTOR}
+  --collector-service NAME       Collector systemd service name, default: ${COLLECTOR_SERVICE}
+  --collector-port PORT          Collector HTTP port for proxy check, default: ${COLLECTOR_PORT}
+  --cpp-service-url URL          C++ service URL for Collector proxy, default: ${CPP_SERVICE_URL}
   -h, --help
 
 Environment variables with the same names are also supported, e.g. EDGE_HOST, NUM_CLASSES, CAMERA_SOURCE.
@@ -103,6 +120,11 @@ while [[ $# -gt 0 ]]; do
     --stream-backend) STREAM_BACKEND="$2"; shift 2 ;;
     --stream-codec) STREAM_CODEC="$2"; shift 2 ;;
     --install-gst) INSTALL_GST="$2"; shift 2 ;;
+    --sync-collector) SYNC_COLLECTOR="$2"; shift 2 ;;
+    --restart-collector) RESTART_COLLECTOR="$2"; shift 2 ;;
+    --collector-service) COLLECTOR_SERVICE="$2"; shift 2 ;;
+    --collector-port) COLLECTOR_PORT="$2"; shift 2 ;;
+    --cpp-service-url) CPP_SERVICE_URL="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) log_error "Unknown argument: $1"; usage; exit 1 ;;
   esac
@@ -158,6 +180,8 @@ write_remote_cpp_env() {
     printf 'VISIONOPS_CPP_CAMERA_READ_FPS=%q\n' "${CAMERA_READ_FPS}"
     printf 'VISIONOPS_CPP_DETECT_FPS=%q\n' "${DETECT_FPS}"
     printf 'VISIONOPS_CPP_SNAPSHOT_FPS=%q\n' "${SNAPSHOT_FPS}"
+    printf 'VISIONOPS_CPP_ENABLE_SNAPSHOT=%q\n' "${ENABLE_SNAPSHOT}"
+    printf 'VISIONOPS_CPP_ENABLE_ANNOTATED=%q\n' "${ENABLE_ANNOTATED}"
     printf 'VISIONOPS_CPP_STREAM_AUTO_START=%q\n' "${STREAM_AUTO_START}"
     printf 'VISIONOPS_CPP_STREAM_BACKEND=%q\n' "${STREAM_BACKEND}"
     printf 'VISIONOPS_CPP_STREAM_CODEC=%q\n' "${STREAM_CODEC}"
@@ -173,6 +197,121 @@ write_remote_cpp_env() {
   remote_sudo chmod 644 "${INSTALL_DIR}/edge/runtime/cpp.env"
   rm -f "${local_tmp}"
 }
+
+normalize_bool() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON) echo "1" ;;
+    *) echo "0" ;;
+  esac
+}
+
+remote_service_exists() {
+  local svc="$1"
+  remote "systemctl list-unit-files --type=service 2>/dev/null | awk '{print \$1}' | grep -qx '${svc}.service' || systemctl list-units --type=service --all 2>/dev/null | awk '{print \$1}' | grep -qx '${svc}.service'"
+}
+
+restart_collector_service() {
+  if [[ "$(normalize_bool "${RESTART_COLLECTOR}")" != "1" ]]; then
+    log_warn "Collector restart skipped because RESTART_COLLECTOR=${RESTART_COLLECTOR}"
+    return 0
+  fi
+
+  local candidates=()
+  candidates+=("${COLLECTOR_SERVICE}")
+  candidates+=("visionops-collector")
+  candidates+=("visionops-edge-collector")
+
+  local svc=""
+  for c in "${candidates[@]}"; do
+    if [[ -n "${c}" ]] && remote "systemctl list-unit-files --type=service 2>/dev/null | awk '{print \$1}' | grep -qx '${c}.service' || systemctl list-units --type=service --all 2>/dev/null | awk '{print \$1}' | grep -qx '${c}.service'"; then
+      svc="${c}"
+      break
+    fi
+  done
+
+  if [[ -z "${svc}" ]]; then
+    log_warn "Collector systemd service not found. Tried: ${candidates[*]}"
+    log_warn "Please restart the Collector manually, otherwise /api/cpp routes will still be Not Found."
+    return 0
+  fi
+
+  log_info "Restart Collector service: ${svc}.service"
+  remote_sudo systemctl restart "${svc}.service"
+}
+
+sync_collector_proxy() {
+  if [[ "$(normalize_bool "${SYNC_COLLECTOR}")" != "1" ]]; then
+    log_info "Skip Collector sync. Use --sync-collector true to deploy v0.5.0 Web/Collector proxy files."
+    return 0
+  fi
+
+  if [[ ! -d "${REPO_ROOT}/edge/collector" ]]; then
+    log_error "Missing ${REPO_ROOT}/edge/collector. Cannot sync Collector proxy."
+    exit 1
+  fi
+
+  log_info "Sync edge/collector for v0.5.0 C++ proxy"
+  remote_sudo mkdir -p "${INSTALL_DIR}/edge/collector"
+  remote_sudo chown -R "${EDGE_USER}:${EDGE_USER}" "${INSTALL_DIR}/edge/collector" || true
+  rsync -az -e "${RSYNC_SSH}" \
+    --exclude '__pycache__/' \
+    --exclude '*.pyc' \
+    "${REPO_ROOT}/edge/collector/" \
+    "${EDGE_USER}@${EDGE_HOST}:${INSTALL_DIR}/edge/collector/"
+
+  if [[ -d "${REPO_ROOT}/tools" ]]; then
+    log_info "Sync tools directory"
+    remote "mkdir -p '${INSTALL_DIR}/tools'"
+    rsync -az -e "${RSYNC_SSH}" \
+      --exclude '__pycache__/' \
+      --exclude '*.pyc' \
+      "${REPO_ROOT}/tools/" \
+      "${EDGE_USER}@${EDGE_HOST}:${INSTALL_DIR}/tools/"
+  fi
+
+  if [[ "$(normalize_bool "${APPLY_CPP_PROXY}")" == "1" ]]; then
+    if remote "test -f '${INSTALL_DIR}/tools/apply_v0_5_0_cpp_proxy.py'"; then
+      log_info "Apply v0.5.0 Collector proxy registration"
+      remote "cd '${INSTALL_DIR}' && python3 tools/apply_v0_5_0_cpp_proxy.py"
+    else
+      log_warn "tools/apply_v0_5_0_cpp_proxy.py not found on remote. Ensure main.py registered cpp_inference_router manually."
+    fi
+  fi
+
+  log_info "Check Collector proxy Python files"
+  remote "cd '${INSTALL_DIR}' && python3 -m py_compile \
+    edge/collector/backend/services/cpp_inference_client.py \
+    edge/collector/backend/routers/cpp_inference.py \
+    edge/collector/backend/main.py"
+
+  # If Collector uses an env file/service, this is a helpful default. It is harmless if config.py already defaults to 127.0.0.1:18080.
+  log_info "Write optional C++ proxy env hints"
+  remote "grep -q '^VISIONOPS_CPP_SERVICE_URL=' '${INSTALL_DIR}/edge/runtime/cpp.env' 2>/dev/null || true"
+  remote_sudo mkdir -p "${INSTALL_DIR}/edge/runtime"
+  remote "cat > /tmp/visionops_cpp_proxy.env.$$ <<EOF
+# Optional hints for Collector C++ proxy
+VISIONOPS_CPP_SERVICE_URL=${CPP_SERVICE_URL}
+CPP_INFERENCE_URL=${CPP_SERVICE_URL}
+CPP_INFERENCE_ENABLED=1
+CPP_INFERENCE_TIMEOUT_SEC=3
+CPP_INFERENCE_IMAGE_TIMEOUT_SEC=10
+EOF"
+  remote_sudo mv "/tmp/visionops_cpp_proxy.env.$$" "${INSTALL_DIR}/edge/runtime/cpp_proxy.env"
+  remote_sudo chmod 644 "${INSTALL_DIR}/edge/runtime/cpp_proxy.env"
+
+  restart_collector_service
+
+  log_info "Check Collector proxy route"
+  if remote "curl -sf 'http://127.0.0.1:${COLLECTOR_PORT}/api/cpp/proxy_info' >/dev/null"; then
+    log_ok "Collector C++ proxy route is available: http://127.0.0.1:${COLLECTOR_PORT}/api/cpp/proxy_info"
+  else
+    log_warn "Collector proxy route check failed."
+    log_warn "Run on RK3588: curl -s http://127.0.0.1:${COLLECTOR_PORT}/openapi.json | grep -o '/api/cpp[^\" ]*' | sort | uniq"
+    log_warn "If routes are missing, confirm main.py registration and restart the actual Collector process."
+  fi
+}
+
+
 main() {
   require_cmd ssh
   require_cmd scp
@@ -283,9 +422,15 @@ main() {
     exit 1
   fi
 
-  log_ok "v0.4.1 C++ service deployed successfully"
+  log_ok "C++ service deployed successfully"
   log_ok "Local check from RK3588: curl http://127.0.0.1:${CPP_PORT}/health"
-  log_ok "Remote logs: ssh -p ${EDGE_PORT} ${EDGE_USER}@${EDGE_HOST} 'sudo journalctl -u ${SERVICE_NAME} -f'"
+
+  sync_collector_proxy
+
+  log_ok "Remote C++ logs: ssh -p ${EDGE_PORT} ${EDGE_USER}@${EDGE_HOST} 'sudo journalctl -u ${SERVICE_NAME} -f'"
+  if [[ "$(normalize_bool "${SYNC_COLLECTOR}")" == "1" ]]; then
+    log_ok "Collector proxy check: curl http://127.0.0.1:${COLLECTOR_PORT}/api/cpp/health"
+  fi
 }
 
 main "$@"
