@@ -335,11 +335,17 @@
             </div>
 
             <div id="cameraTypeUsb" class="camera-type-panel camera-inline-panel">
-              <div class="settings-section-title"><b>USB / 常规相机参数</b><span>适合本地 USB 摄像头或浏览器摄像头</span></div>
+              <div class="settings-section-title"><b>USB / 常规相机参数</b><span>自动扫描 /dev/video*，优先推荐 Orbbec RGB 节点；也可手动选择其他节点</span></div>
               <div class="settings-grid three">
-                <label class="setting-field">设备节点<input data-setting="camera.usb.device_node" value="/dev/video0" /></label>
+                <label class="setting-field">设备节点
+                  <select id="usbDeviceNodeSelect" data-setting="camera.usb.device_node">
+                    <option value="/dev/video0">/dev/video0</option>
+                  </select>
+                  <small id="usbDeviceHint">点击“刷新 USB 设备”后会列出可读取的 video 节点。</small>
+                </label>
                 <label class="setting-field">采集后端<select data-setting="camera.usb.backend"><option value="opencv">OpenCV</option><option value="v4l2">V4L2</option><option value="browser">浏览器 getUserMedia</option></select></label>
                 <label class="setting-field">缓冲帧数<input data-setting="camera.usb.buffer_size" type="number" value="1" min="1" /></label>
+                <div class="setting-field">USB 设备扫描<button id="refreshUsbDevicesBtn" class="secondary small" type="button">刷新 USB 设备</button><small>建议选择带“推荐 / Orbbec / RGB”的节点。若自动识别失败，可选择任意能测试通过的 /dev/videoX。</small></div>
               </div>
             </div>
 

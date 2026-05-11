@@ -136,6 +136,15 @@ def test_time_sync_api():
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"测试时间同步失败: {exc}") from exc
 
+@router.get("/camera/devices")
+def list_camera_devices():
+    """v2.3.4：扫描本机 USB/V4L2 摄像头节点，供设置页下拉选择。"""
+    try:
+        from backend.services.usb_camera_devices import list_usb_camera_devices
+        return list_usb_camera_devices(probe_read=True)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"扫描 USB 摄像头失败: {exc}") from exc
+
 @router.post("/camera/apply")
 def apply_camera_settings():
     """v2.1：保存后立即让 RTSP 相机与预览参数生效。"""
@@ -146,7 +155,7 @@ def apply_camera_settings():
         raise HTTPException(status_code=500, detail=f"应用相机设置失败: {exc}") from exc
     return {
         "ok": True,
-        "message": "相机设置已应用，正在重新连接 RTSP 预览",
+        "message": "相机设置已应用，正在重新连接后端摄像头预览",
         "camera": status,
     }
 
@@ -157,7 +166,7 @@ def test_camera_settings():
     try:
         from backend.services.camera import camera_service
         camera_service.reload_from_runtime(start=True)
-        # 读取一帧即可判断 RTSP 参数、账号密码、通道是否基本正确。
+        # 读取一帧即可判断当前相机配置是否基本正确。
         camera_service.get_latest_jpeg(timeout=6.0)
         status = camera_service.status()
     except Exception as exc:

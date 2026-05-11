@@ -189,12 +189,19 @@ def get_camera_runtime_config(settings: VisionOpsRuntimeSettings = None) -> Dict
     common = camera.get("common", {}) if isinstance(camera, dict) else {}
     rtsp = camera.get("rtsp", {}) if isinstance(camera, dict) else {}
     camera_type = str(camera.get("type") or "rtsp").lower()
-
+    usb_backend = "opencv"
+    usb_buffer_size = 1
     if camera_type == "rtsp":
         source = str(rtsp.get("url") or _build_standard_rtsp_url(rtsp) or "").strip()
+
     elif camera_type == "usb":
         usb = camera.get("usb", {}) if isinstance(camera, dict) else {}
+
+        usb_backend = str(usb.get("backend") or "opencv").strip().lower()
+        usb_buffer_size = _as_int(usb.get("buffer_size", 1), 1)
+
         source = str(usb.get("device_node") or CAMERA_SOURCE or "").strip()
+
     else:
         source = str(CAMERA_SOURCE or "").strip()
 
@@ -203,6 +210,8 @@ def get_camera_runtime_config(settings: VisionOpsRuntimeSettings = None) -> Dict
         "enabled": bool(source) and source.lower() not in {"browser", "none", "false", "0"},
         "type": camera_type,
         "source": source,
+        "usb_backend": usb_backend,
+        "usb_buffer_size": usb_buffer_size,
         "rtsp_transport": str(rtsp.get("transport") or "tcp").lower(),
         "stream_fps": _as_float(common.get("fps", CAMERA_STREAM_FPS), 6.0),
         "preview_width": _as_int(common.get("preview_width", CAMERA_PREVIEW_WIDTH), 960),

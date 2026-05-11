@@ -44,6 +44,8 @@ def _fallback_camera_config() -> Dict[str, Any]:
         "enabled": str(CAMERA_SOURCE or "browser").strip().lower() not in {"", "browser", "none", "false", "0"},
         "type": "rtsp" if str(CAMERA_SOURCE or "").startswith("rtsp://") else "usb",
         "source": CAMERA_SOURCE,
+        "usb_backend": "opencv",
+        "usb_buffer_size": 1,
         "rtsp_transport": "tcp",
         "stream_fps": float(CAMERA_STREAM_FPS),
         "preview_width": int(CAMERA_PREVIEW_WIDTH),
@@ -79,8 +81,15 @@ def _set_ffmpeg_rtsp_options(transport: str) -> None:
     os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = f"rtsp_transport;{transport}|stimeout;5000000"
 
 
-def _open_video_capture(cv2, source: Any, rtsp_transport: str = "tcp", resolution: Optional[Tuple[int, int]] = None):
-    """打开摄像头源。RTSP 优先使用 FFMPEG backend，失败则回退到默认 backend。"""
+def _open_video_capture(
+    cv2,
+    source: Any,
+    rtsp_transport: str = "tcp",
+    resolution: Optional[Tuple[int, int]] = None,
+    fps: Optional[float] = None,
+    buffer_size: int = 1,
+):
+    """打开摄像头源。RTSP 优先使用 FFMPEG backend，USB/OpenCV 使用普通 VideoCapture。"""
     if _is_rtsp_source(source):
         _set_ffmpeg_rtsp_options(rtsp_transport)
         cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG) if hasattr(cv2, "CAP_FFMPEG") else cv2.VideoCapture(source)
@@ -94,9 +103,15 @@ def _open_video_capture(cv2, source: Any, rtsp_transport: str = "tcp", resolutio
         cap = cv2.VideoCapture(source)
 
     try:
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, int(buffer_size or 1))
     except Exception:
         pass
+
+    if fps and float(fps) > 0:
+        try:
+            cap.set(cv2.CAP_PROP_FPS, float(fps))
+        except Exception:
+            pass
 
     if resolution:
         width, height = resolution
@@ -132,8 +147,10 @@ class CameraService:
 
     def _apply_config(self, cfg: Dict[str, Any], override_source: Optional[str] = None) -> None:
         self._last_runtime_config = dict(cfg or {})
-        self.camera_type = str(cfg.get("type") or "rtsp")
+        self.camera_type = str(cfg.get("type") or "rtsp").strip().lower()
         self.source = _normalize_source(override_source or str(cfg.get("source") or CAMERA_SOURCE))
+        self.usb_backend = str(cfg.get("usb_backend") or "opencv").strip().lower()
+        self.usb_buffer_size = int(cfg.get("usb_buffer_size") or 1)
         self.rtsp_transport = str(cfg.get("rtsp_transport") or "tcp").lower()
         self.stream_fps = float(cfg.get("stream_fps") or CAMERA_STREAM_FPS or 6.0)
         self.preview_width = int(cfg.get("preview_width") or CAMERA_PREVIEW_WIDTH or 960)
@@ -201,6 +218,8 @@ class CameraService:
             "preview_width": self.preview_width,
             "jpeg_quality": self.jpeg_quality,
             "rtsp_transport": self.rtsp_transport,
+            "usb_backend": self.usb_backend,
+            "usb_buffer_size": self.usb_buffer_size,
             "resolution": f"{self.resolution_width}x{self.resolution_height}" if self.resolution_width and self.resolution_height else "auto",
         }
 
@@ -213,6 +232,8 @@ class CameraService:
             self.source,
             rtsp_transport=self.rtsp_transport,
             resolution=(self.resolution_width, self.resolution_height),
+            fps=self.stream_fps,
+            buffer_size=self.usb_buffer_size if self.camera_type == "usb" else 1,
         )
         if not cap.isOpened():
             self._status = "error"
@@ -342,6 +363,8 @@ def read_one_jpeg(source: Optional[str] = None) -> bytes:
             _normalize_source(source),
             rtsp_transport=str(cfg.get("rtsp_transport") or "tcp"),
             resolution=(int(cfg.get("resolution_width") or 0), int(cfg.get("resolution_height") or 0)),
+            fps=float(cfg.get("stream_fps") or 0),
+            buffer_size=int(cfg.get("usb_buffer_size") or 1),
         )
         try:
             if not cap.isOpened():
@@ -356,7 +379,7 @@ def read_one_jpeg(source: Optional[str] = None) -> bytes:
         finally:
             cap.release()
     if not backend_camera_enabled():
-        raise RuntimeError("后端摄像头未启用：请在系统设置中配置 RTSP 网络相机")
+        raise RuntimeError("后端摄像头未启用：请在系统设置中配置 RTSP 或 USB 相机")
     camera_service.start()
     return camera_service.get_latest_frame_jpeg()
 
@@ -371,5 +394,5 @@ def mjpeg_stream(source: Optional[str] = None) -> Generator[bytes, None, None]:
             temp_service.stop()
         return
     if not backend_camera_enabled():
-        raise RuntimeError("后端摄像头未启用：请在系统设置中配置 RTSP 网络相机")
+        raise RuntimeError("后端摄像头未启用：请在系统设置中配置 RTSP 或 USB 相机")
     yield from camera_service.mjpeg_stream()

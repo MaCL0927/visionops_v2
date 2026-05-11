@@ -146,8 +146,13 @@ const viewerTitle=document.getElementById('viewerTitle');
 const viewerSubtitle=document.getElementById('viewerSubtitle');
 let useRealCamera=false;
 let useBackendCamera=false;
+let useCppCamera=false;
 let backendCameraAvailable=false;
 let cameraActive=false;
+let cppCapturePreviewTimer=null;
+let cppCapturePreviewStartedByCapturePage=false;
+let cppCapturePreviewExternalStream=false;
+const cppCapturePreviewIntervalMs=1000;
 let dataStore={all:[],positive:[],negative:[]};
 let currentDataset='local_dataset';
 let currentFolder='all';
@@ -307,27 +312,123 @@ function updateCameraLifecycle(){
   else stopCamera();
 }
 
+async function getCppStreamStatusSafe(){
+  try{return await apiGet('/api/cpp/stream/status');}
+  catch(_){return null;}
+}
+function setBackendImageVisible(title,text){
+  if(backendCamera){
+    backendCamera.style.display='';
+    backendCamera.classList.add('active','backend-active');
+  }
+  if(cameraVideo) cameraVideo.classList.remove('active');
+  if(simulatedCamera) simulatedCamera.classList.remove('active');
+  if(cameraStatusTitle) cameraStatusTitle.textContent=title || '摄像头画面';
+  if(cameraStatusText) cameraStatusText.textContent=text || '';
+}
+function stopCppCapturePreviewImageLoop(){
+  if(cppCapturePreviewTimer){
+    clearInterval(cppCapturePreviewTimer);
+    cppCapturePreviewTimer=null;
+  }
+}
+function startCppCapturePreviewImageLoop(){
+  stopCppCapturePreviewImageLoop();
+  const refresh=()=>{
+    if(!useCppCamera || !backendCamera) return;
+    backendCamera.src='/api/cpp/stream/snapshot.jpg?t=' + Date.now();
+  };
+  refresh();
+  cppCapturePreviewTimer=setInterval(refresh, cppCapturePreviewIntervalMs);
+}
+async function startCppCameraPreview(){
+  try{
+    const status=await getCppStreamStatusSafe();
+    const alreadyRunning=!!(status && status.running);
+    cppCapturePreviewExternalStream=alreadyRunning;
+    cppCapturePreviewStartedByCapturePage=false;
+
+    if(!alreadyRunning){
+      await apiPost('/api/cpp/stream/start?mode=preview',{});
+      cppCapturePreviewStartedByCapturePage=true;
+      await sleepMs(500);
+    }
+
+    useCppCamera=true;
+    useBackendCamera=false;
+    useRealCamera=false;
+    setBackendImageVisible(
+      alreadyRunning ? 'C++ 当前相机流画面' : 'C++ 低延迟预览画面',
+      alreadyRunning
+        ? 'C++ 服务已有相机流在运行，拍照采集页复用其最新帧；离开本页不会强制停止外部启动的流'
+        : 'C++ 服务正在以 preview 模式取流；离开拍照采集页后会自动停止以降低资源占用'
+    );
+    startCppCapturePreviewImageLoop();
+    return true;
+  }catch(err){
+    console.warn('C++ preview start failed, fallback to Python camera_service',err);
+    useCppCamera=false;
+    cppCapturePreviewStartedByCapturePage=false;
+    cppCapturePreviewExternalStream=false;
+    stopCppCapturePreviewImageLoop();
+    return false;
+  }
+}
+async function stopCppCameraPreview(callBackend=true){
+  stopCppCapturePreviewImageLoop();
+  const shouldStopCpp=callBackend && useCppCamera && cppCapturePreviewStartedByCapturePage && !realtimeRunning && !productionRunning;
+  useCppCamera=false;
+  cppCapturePreviewExternalStream=false;
+  const wasStartedByCapturePage=cppCapturePreviewStartedByCapturePage;
+  cppCapturePreviewStartedByCapturePage=false;
+  if(shouldStopCpp || (callBackend && wasStartedByCapturePage && !realtimeRunning && !productionRunning)){
+    try{await apiPost('/api/cpp/stream/stop',{});}catch(err){console.warn('stop C++ preview failed',err);}
+  }
+}
+async function captureCppSnapshotDataUrl(maxAttempts=5){
+  let lastError=null;
+  for(let i=0;i<maxAttempts;i++){
+    try{
+      const res=await fetch('/api/cpp/stream/snapshot.jpg?t='+Date.now(),{cache:'no-store'});
+      if(res.ok){
+        const blob=await res.blob();
+        return await blobToDataUrl(blob);
+      }
+      lastError=new Error(`读取 C++ 当前帧失败：HTTP ${res.status}`);
+    }catch(err){
+      lastError=err;
+    }
+    await sleepMs(250);
+  }
+  throw lastError || new Error('读取 C++ 当前帧失败');
+}
+
 async function startCamera(){
   if(cameraActive) return;
   cameraActive=true;
-  // 部署到 RK3588 + 海康 RTSP 时，设置 VISIONOPS_CAMERA_SOURCE 后使用后端 MJPEG 流；
-  // 普通笔记本调试时，仍优先使用浏览器 getUserMedia 读取电脑摄像头。
+  // v0.5.6：拍照采集页优先使用 C++ preview 模式作为唯一 RTSP 拉流 owner；失败时回退旧 Python MJPEG。
+  if((backendCameraAvailable || useBackendCamera) && isCapturePageVisible()){
+    const cppOk=await startCppCameraPreview();
+    if(cppOk) return;
+  }
+  // 部署到 RK3588 + 海康 RTSP 时，旧路径使用后端 Python MJPEG 流；保留为 fallback，避免影响原有功能。
   if(backendCameraAvailable || useBackendCamera){
     useBackendCamera=true;
+    useCppCamera=false;
     backendCamera.style.display='';
     backendCamera.src='/api/camera/stream?t=' + Date.now();
     backendCamera.classList.add('active','backend-active');
     cameraVideo.classList.remove('active');
     simulatedCamera.classList.remove('active');
     cameraStatusTitle.textContent='RTSP/后端摄像头画面';
-    cameraStatusText.textContent='后端单例线程正在读取 RTSP，离开拍照采集页后会自动停止以降低资源占用';
+    cameraStatusText.textContent='C++ 预览不可用，已回退到旧 Python 后端摄像头线程；离开拍照采集页后会自动停止以降低资源占用';
     return;
   }
   if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){cameraStatusTitle.textContent='模拟摄像头画面';cameraStatusText.textContent='当前浏览器不支持摄像头接口，点击按钮后保存模拟图片';return;}
   try{
     const stream=await navigator.mediaDevices.getUserMedia({video:{width:{ideal:1280},height:{ideal:720}},audio:false});
-    cameraVideo.srcObject=stream;useRealCamera=true;useBackendCamera=false;simulatedCamera.classList.remove('active');backendCamera.classList.remove('active','backend-active');cameraVideo.classList.add('active');cameraStatusTitle.textContent='笔记本摄像头画面';cameraStatusText.textContent='点击上方按钮后，将当前帧直接保存到对应文件夹；离开本页后会自动关闭摄像头';
-  }catch(err){useRealCamera=false;useBackendCamera=false;simulatedCamera.classList.add('active');backendCamera.classList.remove('active','backend-active');cameraStatusTitle.textContent='模拟摄像头画面';cameraStatusText.textContent='未获得摄像头权限，点击按钮后保存模拟图片';}
+    cameraVideo.srcObject=stream;useRealCamera=true;useBackendCamera=false;useCppCamera=false;simulatedCamera.classList.remove('active');backendCamera.classList.remove('active','backend-active');cameraVideo.classList.add('active');cameraStatusTitle.textContent='笔记本摄像头画面';cameraStatusText.textContent='点击上方按钮后，将当前帧直接保存到对应文件夹；离开本页后会自动关闭摄像头';
+  }catch(err){useRealCamera=false;useBackendCamera=false;useCppCamera=false;simulatedCamera.classList.add('active');backendCamera.classList.remove('active','backend-active');cameraStatusTitle.textContent='模拟摄像头画面';cameraStatusText.textContent='未获得摄像头权限，点击按钮后保存模拟图片';}
 }
 
 async function stopCamera(callBackend=true){
@@ -336,6 +437,7 @@ async function stopCamera(callBackend=true){
     cameraVideo.srcObject=null;
   }
   useRealCamera=false;
+  await stopCppCameraPreview(callBackend);
   if(backendCamera){
     backendCamera.removeAttribute('src');
     backendCamera.classList.remove('active','backend-active');
@@ -362,7 +464,7 @@ function buildSimulatedFrame(ctx,w,h){
 }
 function captureFrameAsJpeg(){
   const w=1280,h=720; captureCanvas.width=w; captureCanvas.height=h; const ctx=captureCanvas.getContext('2d');
-  if(useBackendCamera && backendCamera.complete && backendCamera.naturalWidth>0){
+  if((useBackendCamera || useCppCamera) && backendCamera.complete && backendCamera.naturalWidth>0){
     const vw=backendCamera.naturalWidth, vh=backendCamera.naturalHeight; const scale=Math.max(w/vw,h/vh); const sw=w/scale, sh=h/scale; const sx=(vw-sw)/2, sy=(vh-sh)/2; ctx.drawImage(backendCamera,sx,sy,sw,sh,0,0,w,h);
   } else if(useRealCamera && cameraVideo.videoWidth>0){
     const vw=cameraVideo.videoWidth, vh=cameraVideo.videoHeight; const scale=Math.max(w/vw,h/vh); const sw=w/scale, sh=h/scale; const sx=(vw-sw)/2, sy=(vh-sh)/2; ctx.drawImage(cameraVideo,sx,sy,sw,sh,0,0,w,h);
@@ -385,7 +487,7 @@ function clearPendingClassificationCapture(showCamera=true){
   pendingClassificationImageData='';
   closePendingCaptureModal(false);
   if(showCamera){
-    if(useBackendCamera && backendCamera) backendCamera.classList.add('active','backend-active');
+    if((useBackendCamera || useCppCamera) && backendCamera) backendCamera.classList.add('active','backend-active');
     else if(useRealCamera && cameraVideo) cameraVideo.classList.add('active');
     else if(simulatedCamera) simulatedCamera.classList.add('active');
   }
@@ -441,6 +543,9 @@ function blobToDataUrl(blob){
 async function captureCurrentFrameDataUrl(){
   await startCamera();
   await new Promise(resolve=>setTimeout(resolve,160));
+  if(useCppCamera){
+    return await captureCppSnapshotDataUrl();
+  }
   if(useBackendCamera){
     const res=await fetch('/api/camera/frame?t='+Date.now());
     if(!res.ok) throw new Error('读取摄像头当前帧失败');
@@ -461,9 +566,11 @@ function showPendingClassificationCapture(imageData){
 }
 async function captureToFolder(folder){
   const payload={dataset:currentDataset,folder,device_id:deviceId,user_id:userId};
-  // v4.7：RTSP/后端摄像头模式下，后端直接保存 latest_frame；
-  // 笔记本浏览器摄像头/模拟画面模式下，仍由前端 canvas 截图上传。
-  if(!useBackendCamera){
+  // v0.5.6：C++ preview 模式下从 C++ snapshot 取当前帧并沿用原 /api/capture 保存逻辑；
+  // 旧 Python 后端摄像头模式仍保持不传 image_data，由后端 camera_service 兜底保存 latest_frame。
+  if(useCppCamera){
+    payload.image_data=await captureCppSnapshotDataUrl();
+  }else if(!useBackendCamera){
     payload.image_data=captureFrameAsJpeg();
   }
   const data=await apiPost('/api/capture',payload);
@@ -1203,20 +1310,82 @@ async function loadValidationImages(){
   }
 }
 
+function appendCacheBuster(url){
+  const raw=String(url || '');
+  if(!raw) return raw;
+  const sep=raw.includes('?') ? '&' : '?';
+  return `${raw}${sep}_=${Date.now()}`;
+}
+
+function ensurePreviewImage(container, imgId, canvasId, wrapClass='', alt='实时画面'){
+  if(!container) return null;
+  let img=document.getElementById(imgId);
+  let canvas=document.getElementById(canvasId);
+  const wrap=container.querySelector('.preview-canvas-wrap');
+  if(!img || !canvas || !wrap){
+    container.innerHTML=`
+      <div class="preview-canvas-wrap ${wrapClass}">
+        <img id="${imgId}" alt="${escapeHtml(alt)}">
+        <canvas id="${canvasId}" aria-hidden="true"></canvas>
+      </div>
+    `;
+    img=document.getElementById(imgId);
+    canvas=document.getElementById(canvasId);
+  }
+  if(img) img.alt=alt;
+  return {img,canvas};
+}
+
+function swapPreviewImageAfterLoad(img, url, onReady){
+  if(!img || !url) return;
+
+  // 每次图像更新都生成 token，避免旧请求 / 旧 onload 晚到后把新检测框清掉。
+  const token=`${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  img.dataset.previewToken=token;
+
+  const bindVisibleImageAndDraw=()=>{
+    if(img.dataset.previewToken!==token) return;
+
+    let called=false;
+    const ready=()=>{
+      if(called || img.dataset.previewToken!==token) return;
+      called=true;
+      requestAnimationFrame(()=>{
+        if(img.dataset.previewToken===token && typeof onReady==='function') onReady();
+      });
+    };
+
+    // 清理上一帧遗留的 onload/onerror。上一版黑闪修复里 onload 会残留，
+    // 新 src 加载完成后可能再次触发旧回调，导致 canvas 检测框被旧 predictions 清空。
+    img.onload=ready;
+    img.onerror=()=>console.warn('preview image load failed:', url);
+    img.src=url;
+
+    // 对于已经预加载/浏览器缓存命中的图片，onload 可能很快或已经 complete，
+    // 这里补一次 ready，确保检测框在可见 img 尺寸稳定后绘制。
+    if(img.complete && img.naturalWidth>0){
+      ready();
+    }
+  };
+
+  // 首帧没有旧图时直接加载；之后先预加载新图，成功后再替换，避免画面黑闪。
+  if(!img.getAttribute('src') || !img.naturalWidth){
+    bindVisibleImageAndDraw();
+    return;
+  }
+
+  const next=new Image();
+  next.onload=bindVisibleImageAndDraw;
+  next.onerror=()=>console.warn('preview image preload failed:', url);
+  next.src=url;
+}
+
 function renderPreviewImage(url, alt='测试图片', detections=[]){
   if(!selectedImagePreview) return;
-  selectedImagePreview.innerHTML=`
-    <div class="preview-canvas-wrap">
-      <img id="resultPreviewImg" src="${url}" alt="${escapeHtml(alt)}">
-      <canvas id="detectionOverlayCanvas" aria-hidden="true"></canvas>
-    </div>
-  `;
-  const img=document.getElementById('resultPreviewImg');
-  if(!img) return;
-  img.addEventListener('load',()=>drawDetectionOverlay(detections));
-  if(img.complete && img.naturalWidth>0){
-    requestAnimationFrame(()=>drawDetectionOverlay(detections));
-  }
+  const view=ensurePreviewImage(selectedImagePreview, 'resultPreviewImg', 'detectionOverlayCanvas', '', alt);
+  if(!view || !view.img) return;
+  const finalUrl=appendCacheBuster(url);
+  swapPreviewImageAfterLoad(view.img, finalUrl, ()=>drawDetectionOverlay(detections));
 }
 function clearDetectionOverlay(){
   const canvas=document.getElementById('detectionOverlayCanvas');
@@ -1718,7 +1887,7 @@ async function realtimeClassifyOnce(){
     }
     const data=await apiPost('/api/validation/realtime_classify_once',payload);
     if(data.realtime){
-      const url=data.realtime.url || '/api/validation/realtime_image/realtime_latest.jpg?t='+Date.now();
+      const url=data.realtime.url || '/api/validation/realtime_image/realtime_latest.jpg';
       renderPreviewImage(url, '实时检测画面', data.predictions || []);
       if(selectedImageNameEl){
         selectedImageNameEl.textContent='实时画面';
@@ -1786,18 +1955,10 @@ function clearProductionOverlay(){
 function renderProductionPreview(url, detections=[]){
   if(!productionPreview) return;
   productionLastPredictions=Array.isArray(detections) ? detections : [];
-  productionPreview.innerHTML=`
-    <div class="preview-canvas-wrap production-canvas-wrap">
-      <img id="productionPreviewImg" src="${url}" alt="生产模式实时画面">
-      <canvas id="productionOverlayCanvas" aria-hidden="true"></canvas>
-    </div>
-  `;
-  const img=document.getElementById('productionPreviewImg');
-  if(!img) return;
-  img.addEventListener('load',()=>drawProductionOverlay(productionLastPredictions));
-  if(img.complete && img.naturalWidth>0){
-    requestAnimationFrame(()=>drawProductionOverlay(productionLastPredictions));
-  }
+  const view=ensurePreviewImage(productionPreview, 'productionPreviewImg', 'productionOverlayCanvas', 'production-canvas-wrap', '生产模式实时画面');
+  if(!view || !view.img) return;
+  const finalUrl=appendCacheBuster(url);
+  swapPreviewImageAfterLoad(view.img, finalUrl, ()=>drawProductionOverlay(productionLastPredictions));
 }
 
 function drawProductionOverlay(predictions=[]){
@@ -1943,7 +2104,7 @@ async function refreshProductionPushStatus(){
     if(productionUpdatedAt) productionUpdatedAt.textContent=new Date().toLocaleTimeString();
 
     if(latest.realtime){
-      const url=latest.realtime.url || `/api/validation/realtime_image/realtime_latest.jpg?t=${Date.now()}`;
+      const url=latest.realtime.url || '/api/validation/realtime_image/realtime_latest.jpg';
       renderProductionPreview(url, preds);
     }
 
@@ -2050,6 +2211,11 @@ const cameraTypePanels={
   industrial:document.getElementById('cameraTypeIndustrial'),
   mock:document.getElementById('cameraTypeMock')
 };
+const usbDeviceNodeSelect=document.getElementById('usbDeviceNodeSelect');
+const refreshUsbDevicesBtn=document.getElementById('refreshUsbDevicesBtn');
+const usbDeviceHint=document.getElementById('usbDeviceHint');
+let usbDevicesLoaded=false;
+let usbDevicesLoading=false;
 let runtimeSettingsCache=null;
 
 function openSettingsModal(){
@@ -2069,6 +2235,7 @@ function updateCameraTypePanel(){
   Object.entries(cameraTypePanels).forEach(([key,panel])=>{
     if(panel) panel.classList.toggle('active',key===type);
   });
+  if(type==='usb' && !usbDevicesLoaded) refreshUsbCameraDevices().catch(()=>{});
 }
 function getByPath(obj,path){
   return path.split('.').reduce((cur,key)=>{
@@ -2105,6 +2272,12 @@ function writeSettingValue(el,value){
   if(el.type==='checkbox'){
     el.checked=!!value;
     return;
+  }
+  if(el.tagName==='SELECT'){
+    const text=String(value);
+    if(text && !Array.from(el.options).some(opt=>opt.value===text)){
+      el.appendChild(new Option(text,text));
+    }
   }
   el.value=String(value);
 }
@@ -2147,6 +2320,71 @@ async function applyAlgorithmSettingsAfterSave(){
   return data;
 }
 
+function formatUsbDeviceOption(item){
+  const value=item.preferred_path || item.stable_path || item.path || '';
+  const path=item.path || value;
+  const title=item.name || item.card || path;
+  const parts=[];
+  if(item.recommended) parts.push('推荐');
+  if(item.orbbec) parts.push('Orbbec');
+  if(item.readable) parts.push('可读');
+  if(item.width && item.height) parts.push(`${item.width}x${item.height}`);
+  if(item.formats && item.formats.length) parts.push(item.formats.slice(0,3).join('/'));
+  const suffix=parts.length ? `（${parts.join('，')}）` : '';
+  return {value, label:`${value}${value!==path ? ` → ${path}` : ''} ${title}${suffix}`};
+}
+
+async function refreshUsbCameraDevices(preferredValue){
+  if(!usbDeviceNodeSelect || usbDevicesLoading) return;
+  usbDevicesLoading=true;
+  if(usbDeviceHint) usbDeviceHint.textContent='正在扫描 USB 摄像头节点...';
+  try{
+    const data=await apiGet('/api/settings/camera/devices');
+    const devices=(data && data.items) || [];
+    const current=preferredValue || usbDeviceNodeSelect.value || getByPath(runtimeSettingsCache || {}, 'camera.usb.device_node') || '';
+    usbDeviceNodeSelect.innerHTML='';
+
+    if(!devices.length){
+      const fallback=current || '/dev/video0';
+      usbDeviceNodeSelect.appendChild(new Option(`${fallback}（未扫描到设备，请手动确认）`, fallback));
+      usbDeviceNodeSelect.value=fallback;
+      if(usbDeviceHint) usbDeviceHint.textContent='未扫描到 /dev/video*，请确认相机连接和 v4l-utils。';
+      return;
+    }
+
+    let recommendedValue='';
+    devices.forEach(item=>{
+      const opt=formatUsbDeviceOption(item);
+      if(!opt.value) return;
+      const option=new Option(opt.label,opt.value);
+      option.dataset.path=item.path || '';
+      option.dataset.recommended=item.recommended ? '1' : '0';
+      usbDeviceNodeSelect.appendChild(option);
+      if(item.recommended && !recommendedValue) recommendedValue=opt.value;
+    });
+
+    const values=Array.from(usbDeviceNodeSelect.options).map(opt=>opt.value);
+    if(current && !values.includes(current)){
+      usbDeviceNodeSelect.appendChild(new Option(`${current}（当前配置）`, current));
+    }
+
+    const shouldAutoPick=!current || current==='/dev/video0' || !values.includes(current);
+    usbDeviceNodeSelect.value=(shouldAutoPick && recommendedValue) ? recommendedValue : (current || recommendedValue || usbDeviceNodeSelect.options[0].value);
+
+    const recommended=devices.find(item=>item.recommended);
+    if(usbDeviceHint){
+      usbDeviceHint.textContent=recommended
+        ? `已推荐：${recommended.preferred_path || recommended.stable_path || recommended.path}；如测试失败，可改选其他节点。`
+        : '已列出所有 /dev/video* 节点，未能自动判断 RGB 节点，请逐个测试可读项。';
+    }
+    usbDevicesLoaded=true;
+  }catch(err){
+    if(usbDeviceHint) usbDeviceHint.textContent=`扫描失败：${err.message || err}`;
+  }finally{
+    usbDevicesLoading=false;
+  }
+}
+
 function fillSettingsForm(settings){
   if(!settings) return;
   document.querySelectorAll('[data-setting]').forEach(el=>{
@@ -2154,6 +2392,9 @@ function fillSettingsForm(settings){
     writeSettingValue(el,value);
   });
   updateCameraTypePanel();
+  if(((settings.camera || {}).type || '') === 'usb'){
+    refreshUsbCameraDevices(getByPath(settings,'camera.usb.device_node')).catch(()=>{});
+  }
   applyRuntimeSettingsToClient(settings);
   refreshVisionBoxEffectiveStatus();
 }
@@ -2195,6 +2436,11 @@ function refreshBackendCameraPreview(){
   backendCameraAvailable=true;
   useBackendCamera=true;
   useRealCamera=false;
+  if(isCapturePageVisible()){
+    cameraActive=false;
+    startCamera();
+    return;
+  }
   if(backendCamera){
     backendCamera.removeAttribute('src');
     backendCamera.src='/api/camera/stream?t=' + Date.now();
@@ -2265,11 +2511,9 @@ async function resetRuntimeSettings(){
 }
 
 
-async function testRtspCameraConnection(){
+async function testCameraConnection(){
   try{
-    if(settingCameraType) settingCameraType.value='rtsp';
-    updateCameraTypePanel();
-    syncRtspUrlFromFields();
+    if(settingCameraType && settingCameraType.value === 'rtsp') syncRtspUrlFromFields();
     const settings=collectSettingsFromForm();
     const saved=await apiPost('/api/settings',settings);
     runtimeSettingsCache=saved.settings || settings;
@@ -2298,7 +2542,8 @@ const refreshTimeSyncStatusBtn=document.getElementById('refreshTimeSyncStatusBtn
 const testTimeSyncBtn=document.getElementById('testTimeSyncBtn');
 if(saveSettingsBtn) saveSettingsBtn.addEventListener('click',saveRuntimeSettingsFromForm);
 if(resetSettingsBtn) resetSettingsBtn.addEventListener('click',resetRuntimeSettings);
-if(testRtspCameraBtn) testRtspCameraBtn.addEventListener('click',testRtspCameraConnection);
+if(testRtspCameraBtn) testRtspCameraBtn.addEventListener('click',testCameraConnection);
+if(refreshUsbDevicesBtn) refreshUsbDevicesBtn.addEventListener('click',()=>refreshUsbCameraDevices().catch(err=>showToast(err.message || 'USB 设备扫描失败')));
 if(refreshTimeSyncStatusBtn) refreshTimeSyncStatusBtn.addEventListener('click',refreshTimeSyncStatus);
 if(testTimeSyncBtn) testTimeSyncBtn.addEventListener('click',testTimeSync);
 document.querySelectorAll('[data-setting^="camera.rtsp."]').forEach(el=>{
