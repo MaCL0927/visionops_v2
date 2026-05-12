@@ -27,7 +27,7 @@ from typing import Any, Dict, Set
 import uvicorn
 from fastapi import FastAPI, Request
 
-from protocol import build_detection_frame, build_error_frame
+from protocol import build_detection_frame, build_error_frame, encode_frame
 
 
 logging.basicConfig(
@@ -166,11 +166,20 @@ async def push_result(request: Request) -> Dict[str, Any]:
         frame_id = payload.get("frame_id")
         camera_id = int(payload.get("camera_id", 1))
 
-        frame = build_detection_frame(
-            inference_result=payload,
-            camera_id=camera_id,
-            frame_id=frame_id,
-        )
+        # v0.8.5: Collector may already send a complete custom gateway frame.
+        # If function=result is present, preserve the custom JSON instead of
+        # rebuilding a legacy detection-only frame and losing ROI/OBB/mask fields.
+        if payload.get("function") == "result":
+            payload.setdefault("camera_id", camera_id)
+            if frame_id is not None:
+                payload.setdefault("frame_id", frame_id)
+            frame = encode_frame(payload)
+        else:
+            frame = build_detection_frame(
+                inference_result=payload,
+                camera_id=camera_id,
+                frame_id=frame_id,
+            )
 
     except Exception as e:
         logger.exception("[HTTP] 构造推送帧失败")
