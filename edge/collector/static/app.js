@@ -152,7 +152,52 @@ let cameraActive=false;
 let cppCapturePreviewTimer=null;
 let cppCapturePreviewStartedByCapturePage=false;
 let cppCapturePreviewExternalStream=false;
-const cppCapturePreviewIntervalMs=1000;
+let cppCapturePreviewIntervalMs=1000;
+const CPP_PREVIEW_MIN_INTERVAL_MS=80;    // 最高约 12.5fps，避免 snapshot HTTP 请求过密
+const CPP_PREVIEW_MAX_INTERVAL_MS=2000;  // 最低约 0.5fps
+function normalizeCppPreviewFps(value){
+  const fps=Number(value);
+  if(!Number.isFinite(fps) || fps<=0) return 1;
+  return Math.max(0.5, Math.min(fps, 12.5));
+}
+function setCppPreviewFps(value){
+  const fps=normalizeCppPreviewFps(value);
+  const interval=Math.round(1000/fps);
+  cppCapturePreviewIntervalMs=Math.max(CPP_PREVIEW_MIN_INTERVAL_MS, Math.min(CPP_PREVIEW_MAX_INTERVAL_MS, interval));
+  return cppCapturePreviewIntervalMs;
+}
+function getCppPreviewIntervalMs(){
+  return cppCapturePreviewIntervalMs || 1000;
+}
+function getCppSnapshotFpsFromSettings(settings){
+  if(!settings || typeof settings!=='object') return null;
+  const value=settings.snapshot_fps ?? settings.cpp_snapshot_fps ?? settings.VISIONOPS_CPP_SNAPSHOT_FPS;
+  const n=Number(value);
+  return Number.isFinite(n) && n>0 ? n : null;
+}
+function restartCppPreviewLoopsAfterFpsChange(){
+  // setInterval 的间隔在创建后不会自动变化，因此修改 Snapshot FPS 后要重建正在运行的前端预览循环。
+  if(typeof startCppCapturePreviewImageLoop==='function' && cppCapturePreviewTimer && useCppCamera){
+    startCppCapturePreviewImageLoop();
+  }
+  if(typeof startCppPreviewAutoLoop==='function' && cppPreviewTimer && cppPreviewModal && cppPreviewModal.classList.contains('active') && cppPreviewAuto){
+    startCppPreviewAutoLoop();
+  }
+}
+function applyCppPreviewFpsFromSettings(settings, restartLoops=false){
+  const snapshotFps=getCppSnapshotFpsFromSettings(settings);
+  if(snapshotFps===null) return getCppPreviewIntervalMs();
+  const intervalMs=setCppPreviewFps(snapshotFps);
+  const fpsText=(1000/intervalMs).toFixed(1);
+  if(toggleCppPreviewAutoBtn){
+    toggleCppPreviewAutoBtn.title=`当前前端预览刷新间隔 ${intervalMs}ms，约 ${fpsText}fps，跟随 C++ Snapshot FPS 设置`;
+  }
+  if(refreshCppPreviewFrameBtn){
+    refreshCppPreviewFrameBtn.title=`手动刷新一帧；自动预览约 ${fpsText}fps`;
+  }
+  if(restartLoops) restartCppPreviewLoopsAfterFpsChange();
+  return intervalMs;
+}
 let dataStore={all:[],positive:[],negative:[]};
 let currentDataset='local_dataset';
 let currentFolder='all';
@@ -339,7 +384,7 @@ function startCppCapturePreviewImageLoop(){
     backendCamera.src='/api/cpp/stream/snapshot.jpg?t=' + Date.now();
   };
   refresh();
-  cppCapturePreviewTimer=setInterval(refresh, cppCapturePreviewIntervalMs);
+  cppCapturePreviewTimer=setInterval(refresh, getCppPreviewIntervalMs());
 }
 async function startCppCameraPreview(){
   try{
@@ -788,6 +833,7 @@ let realtimeBusy=false;
 const cppStatusCard=document.getElementById('cppInferenceStatusCard');
 const cppServiceBadge=document.getElementById('cppServiceBadge');
 const refreshCppStatusBtn=document.getElementById('refreshCppStatus');
+const startCppPreviewStreamBtn=document.getElementById('startCppPreviewStream');
 const startCppStreamBtn=document.getElementById('startCppStream');
 const stopCppStreamBtn=document.getElementById('stopCppStream');
 const openCppPreviewModalBtn=document.getElementById('openCppPreviewModal');
@@ -807,6 +853,7 @@ const cppRunningText=document.getElementById('cppRunningText');
 const cppTaskText=document.getElementById('cppTaskText');
 const cppModelText=document.getElementById('cppModelText');
 const cppBackendText=document.getElementById('cppBackendText');
+const cppCameraText=document.getElementById('cppCameraText');
 const cppFpsText=document.getElementById('cppFpsText');
 const cppLatencyText=document.getElementById('cppLatencyText');
 const cppCaptureText=document.getElementById('cppCaptureText');
@@ -858,22 +905,46 @@ function setCppStatusBadge(state, text){
 }
 function setCppStreamActionBusy(busy){
   cppActionBusy=!!busy;
-  [startCppStreamBtn, stopCppStreamBtn, refreshCppStatusBtn, openCppPreviewModalBtn].forEach(btn=>{
+  [startCppPreviewStreamBtn, startCppStreamBtn, stopCppStreamBtn, refreshCppStatusBtn, openCppPreviewModalBtn].forEach(btn=>{
     if(btn) btn.disabled=cppActionBusy;
   });
+  if(startCppPreviewStreamBtn) startCppPreviewStreamBtn.textContent=busy ? '处理中...' : '启动 C++ 预览';
   if(startCppStreamBtn) startCppStreamBtn.textContent=busy ? '处理中...' : '启动 C++ 检测';
 }
-function updateCppStreamButtons(running){
+function updateCppStreamButtons(running, inferenceEnabled=false){
+  const isRunning=!!running;
+  const isDetect=!!inferenceEnabled;
+  const isPreview=isRunning && !isDetect;
+  if(startCppPreviewStreamBtn){
+    startCppPreviewStreamBtn.disabled=cppActionBusy || isPreview;
+    startCppPreviewStreamBtn.classList.toggle('active', isPreview);
+  }
   if(startCppStreamBtn){
-    startCppStreamBtn.disabled=cppActionBusy || !!running;
-    startCppStreamBtn.classList.toggle('active', !!running);
+    startCppStreamBtn.disabled=cppActionBusy || isDetect;
+    startCppStreamBtn.classList.toggle('active', isDetect);
   }
   if(stopCppStreamBtn){
-    stopCppStreamBtn.disabled=cppActionBusy || !running;
+    stopCppStreamBtn.disabled=cppActionBusy || !isRunning;
   }
   if(openCppPreviewModalBtn){
     openCppPreviewModalBtn.disabled=cppActionBusy;
   }
+}
+function getCppCameraSummary(health={}, status={}){
+  const cameraType=status.camera_type || health.camera_type || '';
+  const source=status.camera_source || health.camera_source || '';
+  const width=Number(status.camera_width || health.camera_width || 0);
+  const height=Number(status.camera_height || health.camera_height || 0);
+  const fps=Number(status.camera_fps_target || status.camera_fps || health.camera_fps || 0);
+  const fourcc=status.camera_fourcc || health.camera_fourcc || '';
+  const sourceShort=source ? shortPathName(source) : '';
+  const parts=[];
+  if(cameraType && cameraType!=='auto') parts.push(cameraType);
+  if(sourceShort) parts.push(sourceShort);
+  if(width>0 && height>0) parts.push(`${width}×${height}`);
+  if(fourcc) parts.push(fourcc);
+  if(fps>0) parts.push(`${formatMetricNumber(fps,0)}fps`);
+  return parts.join(' · ') || '--';
 }
 function isValidatePageActive(){
   const validatePage=document.getElementById('validatePage');
@@ -886,6 +957,7 @@ function renderCppStatusUnavailable(message){
   if(cppTaskText) cppTaskText.textContent='--';
   if(cppModelText) cppModelText.textContent='--';
   if(cppBackendText) cppBackendText.textContent='--';
+  if(cppCameraText) cppCameraText.textContent='--';
   if(cppFpsText) cppFpsText.textContent='--';
   if(cppLatencyText) cppLatencyText.textContent='--';
   if(cppCaptureText) cppCaptureText.textContent='--';
@@ -893,16 +965,17 @@ function renderCppStatusUnavailable(message){
   if(cppRknnText) cppRknnText.textContent='--';
   if(cppPostprocessText) cppPostprocessText.textContent='--';
   if(cppLastErrorText) cppLastErrorText.textContent=message || '无法连接 C++ 推理服务';
-  updateCppStreamButtons(false);
+  updateCppStreamButtons(false,false);
 }
 function renderCppStatus({health={}, status={}, latest={}}={}){
   if(!cppStatusCard) return;
   cppStatusCard.classList.remove('collapsed','error');
   const healthOk=health && health.status==='ok';
   const running=!!status.running;
+  const inferenceEnabled=!!status.inference_enabled;
   setCppStatusBadge(healthOk ? 'ok' : 'warning', healthOk ? '服务正常' : '状态异常');
-  if(cppRunningText) cppRunningText.textContent=running ? '取流中' : '未取流';
-  updateCppStreamButtons(running);
+  if(cppRunningText) cppRunningText.textContent=running ? (inferenceEnabled ? '检测中' : '预览中') : '未取流';
+  updateCppStreamButtons(running, inferenceEnabled);
   const task=health.task || latest.task || '--';
   const input=Array.isArray(health.input_size) ? `${health.input_size[0]}×${health.input_size[1]}` : '';
   const classes=health.num_classes ? `${health.num_classes}类` : '';
@@ -915,6 +988,11 @@ function renderCppStatus({health={}, status={}, latest={}}={}){
   const backend=status.preprocess_backend_active || health.preprocess_backend_active || latest.preprocess_backend_active || latest.timing?.preprocess_backend || '--';
   const rgaMode=status.rga_mode_active || health.rga_mode_active || latest.rga_mode_active || '';
   if(cppBackendText) cppBackendText.textContent=[backend, rgaMode].filter(Boolean).join(' / ');
+  if(cppCameraText){
+    const cameraSummary=getCppCameraSummary(health,status);
+    cppCameraText.textContent=cameraSummary;
+    cppCameraText.title=cameraSummary;
+  }
   if(cppFpsText){
     const cameraFps=formatMetricNumber(status.camera_fps,1);
     const detectFps=formatMetricNumber(status.detect_fps,1);
@@ -931,7 +1009,7 @@ function renderCppStatus({health={}, status={}, latest={}}={}){
   const rawMessage=String(latest.message || '').trim();
   let statusInfo=status.last_error || '';
   if(!statusInfo){
-    if(!running) statusInfo='实时流未启动；点击“启动 C++ 检测”开始取流推理';
+    if(!running) statusInfo='实时流未启动；点击“启动 C++ 预览”只看画面，或点击“启动 C++ 检测”开始推理';
     else if(rawMessage && /not produced result|starting|no result/i.test(rawMessage)) statusInfo='取流已启动，正在等待首帧推理结果';
     else if(rawMessage) statusInfo=rawMessage;
     else statusInfo='无';
@@ -962,27 +1040,43 @@ async function refreshCppInferenceStatus(showMessage=false){
     cppStatusBusy=false;
   }
 }
-async function startCppStream(){
-  if(!cppStatusCard || cppActionBusy) return;
+async function startCppStreamMode(mode='detect', showOkToast=true){
+  if(!cppStatusCard || cppActionBusy) return false;
+  const normalized=mode==='preview' ? 'preview' : 'detect';
   setCppStreamActionBusy(true);
   try{
-    await apiPost('/api/cpp/stream/start');
-    showToast('C++ 实时检测已启动');
-    await sleepMs(900);
+    await apiPost(`/api/cpp/stream/start?mode=${encodeURIComponent(normalized)}`,{});
+    if(showOkToast) showToast(normalized==='preview' ? 'C++ 预览已启动' : 'C++ 实时检测已启动');
+    await sleepMs(normalized==='preview' ? 500 : 900);
     await refreshCppInferenceStatus(false);
+    return true;
   }catch(err){
     renderCppStatusUnavailable(err.message || String(err));
-    showToast(err.message || '启动 C++ 检测失败');
+    if(showOkToast) showToast(err.message || (normalized==='preview' ? '启动 C++ 预览失败' : '启动 C++ 检测失败'));
+    return false;
   }finally{
     setCppStreamActionBusy(false);
   }
+}
+async function startCppPreviewStream(){
+  return await startCppStreamMode('preview', true);
+}
+async function startCppStream(){
+  return await startCppStreamMode('detect', true);
+}
+async function ensureCppStreamForPreview(){
+  try{
+    const status=await apiGet('/api/cpp/stream/status');
+    if(status && status.running) return true;
+  }catch(_){/* continue and try to start preview */}
+  return await startCppStreamMode('preview', false);
 }
 async function stopCppStream(){
   if(!cppStatusCard || cppActionBusy) return;
   setCppStreamActionBusy(true);
   try{
     await apiPost('/api/cpp/stream/stop');
-    showToast('C++ 实时检测已停止');
+    showToast('C++ 流已停止');
     await sleepMs(300);
     await refreshCppInferenceStatus(false);
   }catch(err){
@@ -1120,13 +1214,13 @@ async function refreshCppPreviewFrame(showToastOnSuccess=false){
   cppPreviewBusy=true;
   if(refreshCppPreviewFrameBtn) refreshCppPreviewFrameBtn.disabled=true;
   try{
-    setCppPreviewStatus('正在刷新低频预览...');
+    setCppPreviewStatus(`正在刷新预览...（约 ${(1000/getCppPreviewIntervalMs()).toFixed(1)}fps）`);
     const [status, latest]=await Promise.all([
       apiGet('/api/cpp/stream/status').catch(()=>({})),
       apiGet('/api/cpp/stream/latest_result').catch(()=>({}))
     ]);
     if(!status.running){
-      clearCppPreviewCanvas('实时流未启动；请先点击“启动 C++ 检测”。');
+      clearCppPreviewCanvas('实时流未启动；请先点击“启动 C++ 预览”或“启动 C++ 检测”。');
       renderCppPreviewSide(latest,{});
       setCppPreviewStatus('实时流未启动', true);
       return;
@@ -1148,11 +1242,12 @@ async function refreshCppPreviewFrame(showToastOnSuccess=false){
 }
 function startCppPreviewAutoLoop(){
   if(cppPreviewTimer) clearInterval(cppPreviewTimer);
+  const intervalMs=getCppPreviewIntervalMs();
   cppPreviewTimer=setInterval(()=>{
     if(cppPreviewModal && cppPreviewModal.classList.contains('active') && cppPreviewAuto){
       refreshCppPreviewFrame(false);
     }
-  },1000);
+  },intervalMs);
 }
 function stopCppPreviewAutoLoop(){
   if(cppPreviewTimer){
@@ -1162,16 +1257,23 @@ function stopCppPreviewAutoLoop(){
 }
 function updateCppPreviewAutoButton(){
   if(!toggleCppPreviewAutoBtn) return;
-  toggleCppPreviewAutoBtn.textContent=cppPreviewAuto ? '暂停低频预览' : '恢复低频预览';
+  toggleCppPreviewAutoBtn.textContent=cppPreviewAuto ? '暂停自动预览' : '恢复自动预览';
   toggleCppPreviewAutoBtn.classList.toggle('active', cppPreviewAuto);
 }
-function openCppPreviewModal(){
+async function openCppPreviewModal(){
   if(!cppPreviewModal) return;
   cppPreviewModal.classList.add('active');
   cppPreviewAuto=true;
   updateCppPreviewAutoButton();
   setCppPreviewStatus('正在打开预览...');
-  refreshCppPreviewFrame(false);
+  const ok=await ensureCppStreamForPreview();
+  if(!ok){
+    clearCppPreviewCanvas('C++ 预览启动失败，请检查 /api/cpp/health 和 C++ 服务日志。');
+    setCppPreviewStatus('C++ 预览启动失败', true);
+    startCppPreviewAutoLoop();
+    return;
+  }
+  await refreshCppPreviewFrame(false);
   startCppPreviewAutoLoop();
 }
 function closeCppPreviewModal(){
@@ -1856,6 +1958,7 @@ document.getElementById('refreshValidationImages').addEventListener('click',asyn
 document.getElementById('runSingleImageInfer').addEventListener('click',runSingleImageClassification);
 document.getElementById('captureAndInfer').addEventListener('click',captureAndRunClassification);
 if(realtimeInferToggle){realtimeInferToggle.addEventListener('click',toggleRealtimeInferUI);}
+if(startCppPreviewStreamBtn){startCppPreviewStreamBtn.addEventListener('click',startCppPreviewStream);}
 if(startCppStreamBtn){startCppStreamBtn.addEventListener('click',startCppStream);}
 if(stopCppStreamBtn){stopCppStreamBtn.addEventListener('click',stopCppStream);}
 if(refreshCppStatusBtn){refreshCppStatusBtn.addEventListener('click',()=>refreshCppInferenceStatus(true));}
@@ -2214,13 +2317,31 @@ const cameraTypePanels={
 const usbDeviceNodeSelect=document.getElementById('usbDeviceNodeSelect');
 const refreshUsbDevicesBtn=document.getElementById('refreshUsbDevicesBtn');
 const usbDeviceHint=document.getElementById('usbDeviceHint');
+const cppSettingCameraType=document.getElementById('cppSettingCameraType');
+const cppCameraTypePanels={
+  rtsp:document.getElementById('cppCameraTypeRtsp'),
+  usb:document.getElementById('cppCameraTypeUsb'),
+};
+const cppUsbDeviceNodeSelect=document.getElementById('cppUsbDeviceNodeSelect');
+const refreshCppUsbDevicesBtn=document.getElementById('refreshCppUsbDevicesBtn');
+const cppUsbDeviceHint=document.getElementById('cppUsbDeviceHint');
+const cppSettingResolution=document.getElementById('cppSettingResolution');
+const cppSettingsStatus=document.getElementById('cppSettingsStatus');
+const loadCppSettingsBtn=document.getElementById('loadCppSettingsBtn');
+const saveCppSettingsBtn=document.getElementById('saveCppSettingsBtn');
+const applyCppSettingsBtn=document.getElementById('applyCppSettingsBtn');
+const testCppSettingsPreviewBtn=document.getElementById('testCppSettingsPreviewBtn');
 let usbDevicesLoaded=false;
 let usbDevicesLoading=false;
+let cppUsbDevicesLoaded=false;
+let cppUsbDevicesLoading=false;
 let runtimeSettingsCache=null;
+let cppSettingsCache=null;
 
 function openSettingsModal(){
   if(settingsModal) settingsModal.classList.add('active');
   loadRuntimeSettingsToForm();
+  loadCppSettingsToForm().catch(()=>{});
   refreshTimeSyncStatus();
 }
 function closeSettingsModal(){
@@ -2229,6 +2350,12 @@ function closeSettingsModal(){
 function switchSettingsTab(tabId){
   settingTabs.forEach(btn=>btn.classList.toggle('active',btn.dataset.settingsTab===tabId));
   settingPanels.forEach(panel=>panel.classList.toggle('active',panel.id===tabId));
+  if(tabId==='cppSettingsPanel'){
+    loadCppSettingsToForm().catch(()=>{});
+    if((cppSettingCameraType && cppSettingCameraType.value)==='usb' && !cppUsbDevicesLoaded){
+      refreshCppUsbCameraDevices().catch(()=>{});
+    }
+  }
 }
 function updateCameraTypePanel(){
   const type=(settingCameraType && settingCameraType.value) || 'rtsp';
@@ -2382,6 +2509,215 @@ async function refreshUsbCameraDevices(preferredValue){
     if(usbDeviceHint) usbDeviceHint.textContent=`扫描失败：${err.message || err}`;
   }finally{
     usbDevicesLoading=false;
+  }
+}
+
+
+function updateCppCameraTypePanel(){
+  const type=(cppSettingCameraType && cppSettingCameraType.value) || 'rtsp';
+  Object.entries(cppCameraTypePanels).forEach(([key,panel])=>{
+    if(panel) panel.classList.toggle('active', key===type);
+  });
+  if(type==='usb' && !cppUsbDevicesLoaded){
+    refreshCppUsbCameraDevices().catch(()=>{});
+  }
+}
+function setCppSettingsStatus(message, isWarn=false){
+  if(!cppSettingsStatus) return;
+  cppSettingsStatus.textContent=message || '--';
+  cppSettingsStatus.classList.toggle('warn', !!isWarn);
+}
+function normalizeCppSettingsPayload(raw){
+  const source=raw && typeof raw==='object' ? raw : {};
+  const out={...source};
+  const type=String(out.camera_type || 'rtsp').toLowerCase();
+  out.camera_type=(type==='usb') ? 'usb' : 'rtsp';
+  out.camera_source=String(out.camera_source || (out.camera_type==='usb' ? '/dev/video7' : '')).trim();
+  out.stream_backend=String(out.stream_backend || 'opencv').trim() || 'opencv';
+  out.rtsp_transport=String(out.rtsp_transport || 'tcp').toLowerCase()==='udp' ? 'udp' : 'tcp';
+  out.rtsp_timeout_ms=Number(out.rtsp_timeout_ms || 5000);
+  out.camera_width=Number(out.camera_width || 0);
+  out.camera_height=Number(out.camera_height || 0);
+  out.camera_fps=Number(out.camera_fps || (out.camera_type==='usb' ? 10 : 0));
+  out.camera_buffer_size=Number(out.camera_buffer_size || 1);
+  let fourcc=String(out.camera_fourcc || '').toUpperCase();
+  if(fourcc==='MJPEG') fourcc='MJPG';
+  out.camera_fourcc=out.camera_type==='usb' ? (fourcc || 'YUYV') : '';
+  out.stream_auto_start=String(out.stream_auto_start)==='true' || out.stream_auto_start===true;
+  out.camera_read_fps=Number(out.camera_read_fps || 10);
+  out.detect_fps=Number(out.detect_fps || 10);
+  out.snapshot_fps=Number(out.snapshot_fps || 5);
+  out.preprocess_backend=String(out.preprocess_backend || 'auto');
+  out.rga_mode=String(out.rga_mode || 'resize_color');
+  return out;
+}
+function setCppSelectOrAppend(select,value){
+  if(!select) return;
+  const text=String(value ?? '');
+  if(text && !Array.from(select.options).some(opt=>opt.value===text)){
+    select.appendChild(new Option(text,text));
+  }
+  select.value=text;
+}
+function fillCppSettingsForm(settings){
+  const cfg=normalizeCppSettingsPayload(settings || {});
+  cppSettingsCache=cfg;
+  applyCppPreviewFpsFromSettings(cfg,true);
+  document.querySelectorAll('[data-cpp-setting]').forEach(el=>{
+    const key=el.dataset.cppSetting;
+    if(!key) return;
+    let value=cfg[key];
+    if(value===undefined || value===null) return;
+    if(el.type==='checkbox'){
+      el.checked=!!value;
+    }else if(el.tagName==='SELECT'){
+      setCppSelectOrAppend(el,value);
+    }else{
+      el.value=String(value);
+    }
+  });
+  if(document.getElementById('cppSettingRtspUrl') && cfg.camera_type==='rtsp'){
+    document.getElementById('cppSettingRtspUrl').value=cfg.camera_source || '';
+  }
+  if(cppUsbDeviceNodeSelect && cfg.camera_type==='usb'){
+    setCppSelectOrAppend(cppUsbDeviceNodeSelect,cfg.camera_source || '/dev/video7');
+  }
+  if(cppSettingResolution){
+    const res=(cfg.camera_width && cfg.camera_height) ? `${cfg.camera_width}x${cfg.camera_height}` : '1280x800';
+    setCppSelectOrAppend(cppSettingResolution,res);
+  }
+  updateCppCameraTypePanel();
+  if(cfg.camera_type==='usb'){
+    refreshCppUsbCameraDevices(cfg.camera_source).catch(()=>{});
+  }
+  const intervalMs=getCppPreviewIntervalMs();
+  setCppSettingsStatus(`已读取 C++ 设置：${cfg.camera_type} · ${cfg.camera_source || '--'} · ${cfg.camera_width || 0}×${cfg.camera_height || 0} · ${cfg.camera_fourcc || '--'}；前端预览约 ${(1000/intervalMs).toFixed(1)}fps`);
+}
+function collectCppSettingsFromForm(){
+  const base=cppSettingsCache?JSON.parse(JSON.stringify(cppSettingsCache)):{};
+  document.querySelectorAll('[data-cpp-setting]').forEach(el=>{
+    const key=el.dataset.cppSetting;
+    if(!key) return;
+    base[key]=parseSettingValue(el);
+  });
+  if(cppSettingResolution){
+    const [w,h]=String(cppSettingResolution.value || '').split('x').map(x=>Number(x));
+    if(Number.isFinite(w) && Number.isFinite(h)){
+      base.camera_width=w;
+      base.camera_height=h;
+    }
+  }
+  base.camera_type=(cppSettingCameraType && cppSettingCameraType.value) || base.camera_type || 'rtsp';
+  if(base.camera_type==='usb'){
+    base.camera_source=(cppUsbDeviceNodeSelect && cppUsbDeviceNodeSelect.value) || base.camera_source || '/dev/video7';
+    base.stream_backend=(document.getElementById('cppSettingUsbBackend') && document.getElementById('cppSettingUsbBackend').value) || 'opencv';
+  }else{
+    base.camera_source=(document.getElementById('cppSettingRtspUrl') && document.getElementById('cppSettingRtspUrl').value) || base.camera_source || '';
+    base.stream_backend=(document.getElementById('cppSettingRtspBackend') && document.getElementById('cppSettingRtspBackend').value) || base.stream_backend || 'opencv';
+  }
+  const normalized=normalizeCppSettingsPayload(base);
+  if(normalized.camera_type==='rtsp'){
+    normalized.camera_width=0;
+    normalized.camera_height=0;
+    normalized.camera_fps=0;
+    normalized.camera_fourcc='';
+  }else{
+    normalized.stream_backend='opencv';
+  }
+  return normalized;
+}
+async function loadCppSettingsToForm(){
+  if(!cppSettingsStatus) return;
+  setCppSettingsStatus('正在读取 C++ 设置...');
+  try{
+    const data=await apiGet('/api/cpp/settings');
+    const settings=data.settings || data.effective_settings || data.saved_settings || {};
+    fillCppSettingsForm(settings);
+  }catch(err){
+    setCppSettingsStatus(`读取 C++ 设置失败：${err.message || err}`, true);
+  }
+}
+async function saveCppSettingsOnly(){
+  try{
+    const payload=collectCppSettingsFromForm();
+    setCppSettingsStatus('正在保存 C++ 设置...');
+    const data=await apiPost('/api/cpp/settings',payload);
+    const settings=data.settings || payload;
+    fillCppSettingsForm(settings);
+    showToast(data.message || 'C++ 设置已保存');
+  }catch(err){
+    setCppSettingsStatus(`保存 C++ 设置失败：${err.message || err}`, true);
+    showToast(err.message || '保存 C++ 设置失败');
+  }
+}
+async function applyCppSettingsAndRestart(){
+  try{
+    const payload=collectCppSettingsFromForm();
+    setCppSettingsStatus('正在写入 cpp.env 并重启 C++ 服务...');
+    const data=await apiPost('/api/cpp/settings/apply',payload);
+    const settings=data.settings || payload;
+    fillCppSettingsForm(settings);
+    await refreshCppInferenceStatus(true);
+    showToast(data.message || 'C++ 设置已应用并重启服务');
+  }catch(err){
+    setCppSettingsStatus(`应用 C++ 设置失败：${err.message || err}`, true);
+    showToast(err.message || '应用 C++ 设置失败');
+  }
+}
+async function testCppSettingsPreview(){
+  try{
+    await applyCppSettingsAndRestart();
+    await startCppPreviewStream();
+    await openCppPreviewModal();
+    setCppSettingsStatus('C++ 预览已启动，请在预览窗口确认画面。');
+  }catch(err){
+    setCppSettingsStatus(`测试 C++ 预览失败：${err.message || err}`, true);
+    showToast(err.message || '测试 C++ 预览失败');
+  }
+}
+async function refreshCppUsbCameraDevices(preferredValue){
+  if(!cppUsbDeviceNodeSelect || cppUsbDevicesLoading) return;
+  cppUsbDevicesLoading=true;
+  if(cppUsbDeviceHint) cppUsbDeviceHint.textContent='正在扫描 USB 摄像头节点...';
+  try{
+    const data=await apiGet('/api/settings/camera/devices');
+    const devices=(data && data.items) || [];
+    const current=preferredValue || cppUsbDeviceNodeSelect.value || (cppSettingsCache && cppSettingsCache.camera_source) || '';
+    cppUsbDeviceNodeSelect.innerHTML='';
+    if(!devices.length){
+      const fallback=current || '/dev/video7';
+      cppUsbDeviceNodeSelect.appendChild(new Option(`${fallback}（未扫描到设备，请手动确认）`, fallback));
+      cppUsbDeviceNodeSelect.value=fallback;
+      if(cppUsbDeviceHint) cppUsbDeviceHint.textContent='未扫描到 /dev/video*，请确认相机连接和 v4l-utils。';
+      return;
+    }
+    let recommendedValue='';
+    devices.forEach(item=>{
+      const opt=formatUsbDeviceOption(item);
+      if(!opt.value) return;
+      const option=new Option(opt.label,opt.value);
+      option.dataset.path=item.path || '';
+      option.dataset.recommended=item.recommended ? '1' : '0';
+      cppUsbDeviceNodeSelect.appendChild(option);
+      if(item.recommended && !recommendedValue) recommendedValue=opt.value;
+    });
+    const values=Array.from(cppUsbDeviceNodeSelect.options).map(opt=>opt.value);
+    if(current && !values.includes(current)){
+      cppUsbDeviceNodeSelect.appendChild(new Option(`${current}（当前配置）`, current));
+    }
+    const shouldAutoPick=!current || current==='/dev/video0' || !values.includes(current);
+    cppUsbDeviceNodeSelect.value=(shouldAutoPick && recommendedValue) ? recommendedValue : (current || recommendedValue || cppUsbDeviceNodeSelect.options[0].value);
+    const recommended=devices.find(item=>item.recommended);
+    if(cppUsbDeviceHint){
+      cppUsbDeviceHint.textContent=recommended
+        ? `已推荐：${recommended.preferred_path || recommended.stable_path || recommended.path}；如测试失败，可改选其他节点。`
+        : '已列出所有 /dev/video* 节点，未能自动判断 RGB 节点，请逐个测试可读项。';
+    }
+    cppUsbDevicesLoaded=true;
+  }catch(err){
+    if(cppUsbDeviceHint) cppUsbDeviceHint.textContent=`扫描失败：${err.message || err}`;
+  }finally{
+    cppUsbDevicesLoading=false;
   }
 }
 
@@ -2544,9 +2880,23 @@ if(saveSettingsBtn) saveSettingsBtn.addEventListener('click',saveRuntimeSettings
 if(resetSettingsBtn) resetSettingsBtn.addEventListener('click',resetRuntimeSettings);
 if(testRtspCameraBtn) testRtspCameraBtn.addEventListener('click',testCameraConnection);
 if(refreshUsbDevicesBtn) refreshUsbDevicesBtn.addEventListener('click',()=>refreshUsbCameraDevices().catch(err=>showToast(err.message || 'USB 设备扫描失败')));
+if(cppSettingCameraType) cppSettingCameraType.addEventListener('change',updateCppCameraTypePanel);
+if(refreshCppUsbDevicesBtn) refreshCppUsbDevicesBtn.addEventListener('click',()=>refreshCppUsbCameraDevices().catch(err=>showToast(err.message || 'C++ USB 设备扫描失败')));
+if(loadCppSettingsBtn) loadCppSettingsBtn.addEventListener('click',()=>loadCppSettingsToForm());
+if(saveCppSettingsBtn) saveCppSettingsBtn.addEventListener('click',saveCppSettingsOnly);
+if(applyCppSettingsBtn) applyCppSettingsBtn.addEventListener('click',applyCppSettingsAndRestart);
+if(testCppSettingsPreviewBtn) testCppSettingsPreviewBtn.addEventListener('click',testCppSettingsPreview);
+document.querySelectorAll('[data-cpp-setting="snapshot_fps"]').forEach(el=>{
+  el.addEventListener('change',()=>{
+    const payload=collectCppSettingsFromForm();
+    const intervalMs=applyCppPreviewFpsFromSettings(payload,true);
+    setCppSettingsStatus(`Snapshot FPS 已更新为 ${payload.snapshot_fps}，前端预览间隔 ${intervalMs}ms，保存并应用后 C++ 服务端也会同步生效。`);
+  });
+});
 if(refreshTimeSyncStatusBtn) refreshTimeSyncStatusBtn.addEventListener('click',refreshTimeSyncStatus);
 if(testTimeSyncBtn) testTimeSyncBtn.addEventListener('click',testTimeSync);
 document.querySelectorAll('[data-setting^="camera.rtsp."]').forEach(el=>{
   if(el.dataset.setting !== 'camera.rtsp.url') el.addEventListener('change',syncRtspUrlFromFields);
 });
+updateCppCameraTypePanel();
 updateCameraTypePanel();

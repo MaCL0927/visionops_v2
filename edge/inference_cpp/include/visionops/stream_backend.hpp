@@ -17,6 +17,16 @@ struct StreamOpenOptions {
     int rtsp_timeout_ms = 5000;               // OpenCV FFmpeg stimeout in ms
     int gst_latency_ms = 100;                 // rtspsrc latency, only used by gst-mpp
     bool quiet_ffmpeg_log = true;
+
+    // v0.7.1: USB/OpenCV camera options. These are ignored by RTSP backends
+    // except buffer_size, and are mainly used for /dev/videoX UVC cameras.
+    // camera_type is informational for logs/health: auto | rtsp | usb.
+    std::string camera_type = "auto";
+    int camera_width = 0;
+    int camera_height = 0;
+    int camera_fps = 0;
+    int camera_buffer_size = 1;
+    std::string camera_fourcc = "";          // e.g. YUYV | MJPG | empty
 };
 
 class IStreamBackend {

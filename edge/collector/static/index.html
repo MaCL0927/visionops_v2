@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>VisionOps Edge Collector UI</title>
-  <link rel="stylesheet" href="/static/styles.css?v=setting_v0_5_3_cpp_preview_canvas" />
+  <link rel="stylesheet" href="/static/styles.css?v=v0_7_3_2_cpp_settings" />
 </head>
 <body>
   <header class="topbar">
@@ -195,14 +195,15 @@
             <section id="cppInferenceStatusCard" class="cpp-status-card collapsed">
               <div class="cpp-status-head">
                 <div>
-                  <div class="kicker">C++ 推理服务 / v0.5.3</div>
-                  <h2>C++ + RGA 实时推理状态</h2>
-                  <p>通过 Collector 代理控制 C++ 服务启停并读取状态；Python 只做控制和代理，不参与每帧推理。</p>
+                  <div class="kicker">C++ 推理服务 / v0.7.2</div>
+                  <h2>C++ USB/OpenCV 实时预览与推理状态</h2>
+                  <p>通过 Collector 代理控制 C++ 服务 preview / detect 模式；Python 只做控制和代理，不参与每帧推理。</p>
                 </div>
                 <div class="cpp-status-actions">
                   <span id="cppServiceBadge" class="cpp-service-badge unknown">未连接</span>
+                  <button id="startCppPreviewStream" class="mini-btn cpp-action-preview-start" type="button">启动 C++ 预览</button>
                   <button id="startCppStream" class="mini-btn cpp-action-start" type="button">启动 C++ 检测</button>
-                  <button id="stopCppStream" class="mini-btn cpp-action-stop" type="button">停止 C++ 检测</button>
+                  <button id="stopCppStream" class="mini-btn cpp-action-stop" type="button">停止 C++ 流</button>
                   <button id="openCppPreviewModal" class="mini-btn cpp-action-preview" type="button">打开预览窗口</button>
                   <button id="refreshCppStatus" class="mini-btn" type="button">刷新 C++ 状态</button>
                 </div>
@@ -212,6 +213,7 @@
                 <div><span>模型任务</span><b id="cppTaskText">--</b></div>
                 <div><span>模型文件</span><b id="cppModelText">--</b></div>
                 <div><span>预处理后端</span><b id="cppBackendText">--</b></div>
+                <div><span>相机输入</span><b id="cppCameraText">--</b></div>
                 <div><span>camera / detect FPS</span><b id="cppFpsText">--</b></div>
                 <div><span>最新总耗时</span><b id="cppLatencyText">--</b></div>
                 <div><span>取流/解码</span><b id="cppCaptureText">--</b></div>
@@ -308,6 +310,7 @@
 
       <div class="settings-tab-row">
         <button class="settings-main-tab active" data-settings-tab="cameraSettingsPanel">相机设置</button>
+        <button class="settings-main-tab" data-settings-tab="cppSettingsPanel">C++推理设置</button>
         <button class="settings-main-tab" data-settings-tab="boardSettingsPanel">视觉盒子设置</button>
         <button class="settings-main-tab" data-settings-tab="algorithmSettingsPanel">算法设置</button>
       </div>
@@ -455,6 +458,117 @@
               <label class="setting-field">标定类型<select data-setting="camera.calibration.calibration_type"><option value="mono">单目相机标定</option><option value="camera_lidar">相机-雷达外参</option><option value="stereo">双目相机标定</option></select></label>
               <label class="setting-field">棋盘格规格<input data-setting="camera.calibration.checkerboard" value="9x6" /></label>
               <label class="setting-field">方格尺寸 mm<input data-setting="camera.calibration.square_size_mm" type="number" value="25" /></label>
+            </div>
+          </div>
+        </section>
+
+
+        <section id="cppSettingsPanel" class="settings-panel">
+          <div class="settings-panel-head">
+            <div>
+              <h3>C++ 实时推理设置</h3>
+              <p>独立配置 C++ 服务使用的相机来源。当前 Python 相机设置仍保留，后续 C++ 架构成熟后再逐步替换旧链路。</p>
+            </div>
+            <span id="cppSettingsBadge" class="settings-status-badge">独立 C++ 配置</span>
+          </div>
+
+          <div class="settings-section cpp-settings-card implemented-setting-block">
+            <div class="settings-section-title cpp-settings-title">
+              <b>C++ 相机类型与输入源</b>
+              <select id="cppSettingCameraType" class="camera-type-title-select" aria-label="C++ 相机类型" data-cpp-setting="camera_type">
+                <option value="rtsp">RTSP 网络相机</option>
+                <option value="usb">USB / Orbbec RGB 相机</option>
+              </select>
+              <span>C++ 服务会根据这里的配置写入 cpp.env，并重启 visionops-inference-cpp 生效。</span>
+            </div>
+
+            <div id="cppCameraTypeRtsp" class="cpp-camera-type-panel camera-inline-panel active">
+              <div class="settings-section-title"><b>C++ RTSP 参数</b><span>适合海康/大华网络相机；stream backend 可选 OpenCV 或后续 gst-mpp。</span></div>
+              <div class="settings-grid three">
+                <label class="setting-field full">RTSP URL
+                  <input id="cppSettingRtspUrl" value="rtsp://admin:Abcd123_@192.168.2.64:554/Streaming/channels/101" />
+                </label>
+                <label class="setting-field">RTSP 传输
+                  <select data-cpp-setting="rtsp_transport"><option value="tcp" selected>TCP</option><option value="udp">UDP</option></select>
+                </label>
+                <label class="setting-field">RTSP 超时 ms
+                  <input data-cpp-setting="rtsp_timeout_ms" type="number" value="5000" min="1000" />
+                </label>
+                <label class="setting-field">取流后端
+                  <select id="cppSettingRtspBackend" data-cpp-setting="stream_backend"><option value="opencv" selected>OpenCV</option><option value="gst-mpp">GStreamer / MPP</option></select>
+                </label>
+              </div>
+            </div>
+
+            <div id="cppCameraTypeUsb" class="cpp-camera-type-panel camera-inline-panel">
+              <div class="settings-section-title"><b>C++ USB / Orbbec RGB 参数</b><span>复用 USB 设备扫描，建议 Orbbec 第一版使用 1280×800、YUYV、10fps。</span></div>
+              <div class="settings-grid three">
+                <label class="setting-field">设备节点
+                  <select id="cppUsbDeviceNodeSelect">
+                    <option value="/dev/video7">/dev/video7</option>
+                  </select>
+                  <small id="cppUsbDeviceHint">点击“刷新 USB 设备”后会列出可读取的 video 节点。</small>
+                </label>
+                <div class="setting-field">USB 设备扫描
+                  <button id="refreshCppUsbDevicesBtn" class="secondary small" type="button">刷新 USB 设备</button>
+                  <small>优先选择带“推荐 / Orbbec / 可读”的节点，建议后续改用 /dev/v4l/by-id 稳定路径。</small>
+                </div>
+                <label class="setting-field">取流后端
+                  <select id="cppSettingUsbBackend" data-cpp-setting="stream_backend"><option value="opencv" selected>OpenCV / V4L2</option></select>
+                </label>
+                <label class="setting-field">分辨率
+                  <select id="cppSettingResolution">
+                    <option value="640x480">640 × 480</option>
+                    <option value="848x480">848 × 480</option>
+                    <option value="1280x720">1280 × 720</option>
+                    <option value="1280x800" selected>1280 × 800</option>
+                  </select>
+                </label>
+                <label class="setting-field">相机 FPS
+                  <select data-cpp-setting="camera_fps"><option value="5">5</option><option value="10" selected>10</option><option value="15">15</option><option value="30">30</option><option value="60">60</option></select>
+                </label>
+                <label class="setting-field">FOURCC
+                  <select data-cpp-setting="camera_fourcc"><option value="YUYV" selected>YUYV</option><option value="MJPG">MJPG</option></select>
+                </label>
+                <label class="setting-field">缓冲帧数
+                  <input data-cpp-setting="camera_buffer_size" type="number" value="1" min="1" max="8" />
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-section cpp-settings-card implemented-setting-block">
+            <div class="settings-section-title"><b>C++ 运行参数</b><span>影响 C++ 服务启动和前端 preview/detect 控制，不影响旧 Python 相机设置。</span></div>
+            <div class="settings-grid three">
+              <label class="setting-field">相机读取 FPS
+                <input data-cpp-setting="camera_read_fps" type="number" value="10" min="1" max="60" />
+              </label>
+              <label class="setting-field">检测 FPS
+                <input data-cpp-setting="detect_fps" type="number" value="10" min="1" max="60" />
+              </label>
+              <label class="setting-field">Snapshot FPS
+                <input data-cpp-setting="snapshot_fps" type="number" value="5" min="1" max="30" />
+              </label>
+              <label class="setting-field">服务启动自动取流
+                <select data-cpp-setting="stream_auto_start"><option value="false" selected>否，前端按钮启动</option><option value="true">是，服务启动即取流</option></select>
+              </label>
+              <label class="setting-field">预处理后端
+                <select data-cpp-setting="preprocess_backend"><option value="auto" selected>auto</option><option value="rga">rga</option><option value="cpu">cpu</option></select>
+              </label>
+              <label class="setting-field">RGA 模式
+                <select data-cpp-setting="rga_mode"><option value="resize_color" selected>resize_color</option><option value="resize_only">resize_only</option><option value="off">off</option></select>
+              </label>
+            </div>
+          </div>
+
+          <div class="settings-section cpp-settings-card">
+            <div class="settings-section-title"><b>C++ 设置状态</b><span>保存只写 runtime_overrides.yaml；应用会写 cpp.env 并重启 C++ 服务。</span></div>
+            <div id="cppSettingsStatus" class="settings-inline-status">尚未读取 C++ 设置。</div>
+            <div class="settings-actions compact-actions cpp-settings-actions">
+              <button id="loadCppSettingsBtn" class="secondary small" type="button">读取 C++ 设置</button>
+              <button id="saveCppSettingsBtn" class="secondary small" type="button">保存 C++ 设置</button>
+              <button id="applyCppSettingsBtn" class="primary small" type="button">保存并应用重启</button>
+              <button id="testCppSettingsPreviewBtn" class="secondary small" type="button">测试 C++ 预览</button>
             </div>
           </div>
         </section>
@@ -733,7 +847,7 @@
       <div class="cpp-preview-body">
         <div class="cpp-preview-canvas-wrap">
           <canvas id="cppPreviewCanvas" class="cpp-preview-canvas"></canvas>
-          <div id="cppPreviewEmpty" class="cpp-preview-empty">请先启动 C++ 检测，然后等待最新帧。</div>
+          <div id="cppPreviewEmpty" class="cpp-preview-empty">点击“启动 C++ 预览”或“启动 C++ 检测”后等待最新帧。</div>
         </div>
         <aside class="cpp-preview-side">
           <div class="cpp-preview-side-card"><span>检测数量</span><b id="cppPreviewCount">--</b></div>
@@ -750,6 +864,6 @@
 
   <div id="toast" class="toast"></div>
   <div id="centerNotice" class="center-notice" role="status" aria-live="polite"><div id="centerNoticeBox" class="center-notice-box"></div></div>
-  <script src="/static/app.js?v=setting_v0_5_3_cpp_preview_canvas"></script>
+  <script src="/static/app.js?v=v0_7_3_2_cpp_settings"></script>
 </body>
 </html>

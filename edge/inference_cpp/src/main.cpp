@@ -38,7 +38,7 @@ extern "C" {
 static void configure_opencv_ffmpeg_quiet_logging(bool quiet) {
     if (!quiet) return;
 
-    // v0.5.5: force quiet OpenCV/FFmpeg logging.
+    // v0.7.2: force quiet OpenCV/FFmpeg logging.
     // Some boards may already export OPENCV_FFMPEG_DEBUG=1 or
     // OPENCV_FFMPEG_LOGLEVEL=56, which produces very verbose trace logs such as
     // "tcp_read_packet". Override them here so manual shell environment does not
@@ -73,30 +73,38 @@ struct Args {
 
     // v0.2/v0.3: RTSP stream worker sidecar mode.
     std::string camera_source = "";
+    // v0.7.1: USB/OpenCV camera options. Existing stream_backend remains the
+    // abstraction layer; these fields configure /dev/videoX UVC cameras.
+    std::string camera_type = "auto";      // auto | rtsp | usb
+    int camera_width = 0;                  // 0 means backend default
+    int camera_height = 0;                 // 0 means backend default
+    int camera_fps = 0;                    // 0 means backend/default; for USB usually 10/15
+    int camera_buffer_size = 1;
+    std::string camera_fourcc = "";        // YUYV | MJPG | empty
     int stream_fps = 10;          // legacy alias, kept for compatibility; equals detect_fps by default.
     int camera_read_fps = 10;     // v0.3: throttle RTSP read/decode rate on main stream.
     int detect_fps = 10;          // v0.3: target inference FPS.
     int snapshot_fps = 1;         // v0.3: how often to refresh cached snapshot/annotated caches.
     int snapshot_jpeg_quality = 80;
-    // v0.5.5: decouple visual cache generation from realtime inference.
+    // v0.7.2: decouple visual cache generation from realtime inference.
     // Disable these to measure RTSP + inference CPU without frame clone / overlay overhead.
     bool enable_snapshot = true;
     bool enable_annotated = true;
     bool stream_auto_start = false;
 
-    // v0.5.5: RTSP robustness / log control. Keep TCP by default for main stream.
+    // v0.7.2: RTSP robustness / log control. Keep TCP by default for main stream.
     std::string rtsp_transport = "tcp";   // tcp | udp
     int rtsp_timeout_ms = 5000;            // maps to FFmpeg stimeout, microseconds internally
     bool quiet_ffmpeg_log = true;          // reduce FFmpeg/OpenCV decode warning noise
 
-    // v0.5.5: selectable stream backend.
+    // v0.7.2: selectable stream backend.
     // opencv: low-risk OpenCV/FFmpeg path, kept as the default fallback.
     // gst-mpp: OpenCV + GStreamer pipeline using Rockchip mppvideodec.
     std::string stream_backend = "opencv"; // opencv | gst-mpp
     std::string stream_codec = "h264";     // h264 | h265
     int gst_latency_ms = 100;              // rtspsrc latency for gst-mpp backend
 
-    // v0.5.5: preprocessing backend switch with RGA experiment modes.
+    // v0.7.2: preprocessing backend switch with RGA experiment modes.
     // preprocess_backend: cpu | rga | auto
     // rga_mode:
     //   off          -> force CPU preprocessing for fair baseline comparison
@@ -1255,7 +1263,7 @@ static std::string detections_to_json(
     os << "{";
     os << "\"status\":\"ok\",";
     os << "\"backend\":\"cpp-rknn\",";
-    os << "\"version\":\"v0.5.5\",";
+    os << "\"version\":\"v0.7.2\",";
     os << "\"output_mode\":\"" << json_escape(args.output_mode) << "\",";
     os << "\"preprocess_backend_requested\":\"" << json_escape(args.preprocess_status.requested_backend) << "\",";
     os << "\"preprocess_backend_active\":\"" << json_escape(args.preprocess_status.active_backend) << "\",";
@@ -1431,7 +1439,7 @@ static std::string stats_json() {
     os << std::fixed << std::setprecision(3);
     os << "{";
     os << "\"backend\":\"cpp-rknn\",";
-    os << "\"version\":\"v0.5.5\",";
+    os << "\"version\":\"v0.7.2\",";
     os << "\"total_inferences\":" << total << ",";
     os << "\"errors\":" << errors << ",";
     os << "\"successes\":" << (total >= errors ? total - errors : 0) << ",";
@@ -1563,13 +1571,13 @@ public:
 
     bool start(std::string* message = nullptr, bool enable_inference = true) {
         if (args_.camera_source.empty()) {
-            if (message) *message = "camera_source is empty; start with --camera-source <rtsp_url>";
+            if (message) *message = "camera_source is empty; start with --camera-source <rtsp_url|/dev/videoX>";
             return false;
         }
 
         bool expected = false;
         if (!running_.compare_exchange_strong(expected, true)) {
-            // v0.5.5: stream may already be running in preview mode. In that case
+            // v0.7.2: stream may already be running in preview mode. In that case
             // /stream/start?mode=detect should simply enable inference without
             // reopening RTSP.
             set_inference_enabled(enable_inference);
@@ -1640,7 +1648,7 @@ public:
         os << "{";
         os << "\"status\":\"ok\",";
         os << "\"backend\":\"cpp-rknn\",";
-        os << "\"version\":\"v0.5.5\",";
+        os << "\"version\":\"v0.7.2\",";
         os << "\"running\":" << (running_.load() ? "true" : "false") << ",";
         os << "\"inference_enabled\":" << (inference_enabled_.load() ? "true" : "false") << ",";
         os << "\"stream_mode\":\"" << (running_.load() ? (inference_enabled_.load() ? "detect" : "preview") : "stopped") << "\",";
@@ -1648,6 +1656,13 @@ public:
         os << "\"capture_thread_alive\":" << (capture_thread_alive_ ? "true" : "false") << ",";
         os << "\"infer_thread_alive\":" << (infer_thread_alive_ ? "true" : "false") << ",";
         os << "\"camera_source_set\":" << (!args_.camera_source.empty() ? "true" : "false") << ",";
+        os << "\"camera_source\":\"" << json_escape(args_.camera_source) << "\",";
+        os << "\"camera_type\":\"" << json_escape(args_.camera_type) << "\",";
+        os << "\"camera_width\":" << args_.camera_width << ",";
+        os << "\"camera_height\":" << args_.camera_height << ",";
+        os << "\"camera_fps\":" << args_.camera_fps << ",";
+        os << "\"camera_buffer_size\":" << args_.camera_buffer_size << ",";
+        os << "\"camera_fourcc\":\"" << json_escape(args_.camera_fourcc) << "\",";
         os << "\"stream_backend\":\"" << json_escape(args_.stream_backend) << "\",";
         os << "\"stream_codec\":\"" << json_escape(args_.stream_codec) << "\",";
         os << "\"gst_latency_ms\":" << args_.gst_latency_ms << ",";
@@ -1858,7 +1873,7 @@ private:
     }
 
     double latest_snapshot_age_ms_locked() const {
-        // v0.5.5: snapshot.jpg is served from the latest captured frame, so this
+        // v0.7.2: snapshot.jpg is served from the latest captured frame, so this
         // age reflects the freshest capture frame rather than the inference loop.
         return latest_frame_age_ms_locked();
     }
@@ -1892,6 +1907,12 @@ private:
         stream_options.rtsp_timeout_ms = args_.rtsp_timeout_ms;
         stream_options.gst_latency_ms = args_.gst_latency_ms;
         stream_options.quiet_ffmpeg_log = args_.quiet_ffmpeg_log;
+        stream_options.camera_type = args_.camera_type;
+        stream_options.camera_width = args_.camera_width;
+        stream_options.camera_height = args_.camera_height;
+        stream_options.camera_fps = args_.camera_fps;
+        stream_options.camera_buffer_size = args_.camera_buffer_size;
+        stream_options.camera_fourcc = args_.camera_fourcc;
 
         auto backend = visionops::create_stream_backend(stream_options);
         std::string open_error;
@@ -2261,7 +2282,7 @@ static void handle_client(int client_fd, RknnRunner& runner, StreamWorker& strea
             os << "{"
                << "\"status\":\"ok\","
                << "\"backend\":\"cpp-rknn\","
-               << "\"version\":\"v0.5.5\","
+               << "\"version\":\"v0.7.2\","
                << "\"output_mode\":\"" << json_escape(args.output_mode) << "\","
                << "\"preprocess_backend_requested\":\"" << json_escape(args.preprocess_status.requested_backend) << "\","
                << "\"preprocess_backend_active\":\"" << json_escape(args.preprocess_status.active_backend) << "\","
@@ -2278,6 +2299,13 @@ static void handle_client(int client_fd, RknnRunner& runner, StreamWorker& strea
                << "\"input_size\":[" << args.input_h << "," << args.input_w << "],"
                << "\"num_classes\":" << args.num_classes << ","
                << "\"camera_source_set\":" << (!args.camera_source.empty() ? "true" : "false") << ","
+               << "\"camera_source\":\"" << json_escape(args.camera_source) << "\","
+               << "\"camera_type\":\"" << json_escape(args.camera_type) << "\","
+               << "\"camera_width\":" << args.camera_width << ","
+               << "\"camera_height\":" << args.camera_height << ","
+               << "\"camera_fps\":" << args.camera_fps << ","
+               << "\"camera_buffer_size\":" << args.camera_buffer_size << ","
+               << "\"camera_fourcc\":\"" << json_escape(args.camera_fourcc) << "\","
                << "\"stream_backend\":\"" << json_escape(args.stream_backend) << "\","
                << "\"stream_codec\":\"" << json_escape(args.stream_codec) << "\","
                << "\"gst_latency_ms\":" << args.gst_latency_ms << ","
@@ -2486,6 +2514,36 @@ static Args parse_args(int argc, char** argv) {
         else if (k == "--camera-source") {
             a.camera_source = need(k);
         }
+        else if (k == "--camera-type") {
+            a.camera_type = need(k);
+            std::transform(a.camera_type.begin(), a.camera_type.end(), a.camera_type.begin(), ::tolower);
+            if (a.camera_type != "auto" && a.camera_type != "rtsp" && a.camera_type != "usb") {
+                throw std::runtime_error("invalid --camera-type, expected auto, rtsp, or usb");
+            }
+        }
+        else if (k == "--camera-width") {
+            a.camera_width = std::stoi(need(k));
+            if (a.camera_width < 0) throw std::runtime_error("invalid --camera-width");
+        }
+        else if (k == "--camera-height") {
+            a.camera_height = std::stoi(need(k));
+            if (a.camera_height < 0) throw std::runtime_error("invalid --camera-height");
+        }
+        else if (k == "--camera-fps") {
+            a.camera_fps = std::stoi(need(k));
+            if (a.camera_fps < 0) throw std::runtime_error("invalid --camera-fps");
+        }
+        else if (k == "--camera-buffer-size") {
+            a.camera_buffer_size = std::stoi(need(k));
+            if (a.camera_buffer_size <= 0) throw std::runtime_error("invalid --camera-buffer-size");
+        }
+        else if (k == "--camera-fourcc") {
+            a.camera_fourcc = need(k);
+            std::transform(a.camera_fourcc.begin(), a.camera_fourcc.end(), a.camera_fourcc.begin(), ::toupper);
+            if (!a.camera_fourcc.empty() && a.camera_fourcc.size() != 4) {
+                throw std::runtime_error("invalid --camera-fourcc, expected 4 chars, e.g. YUYV or MJPG");
+            }
+        }
         else if (k == "--stream-fps") {
             // Legacy v0.2 argument: treat it as both camera read FPS and detect FPS.
             a.stream_fps = std::stoi(need(k));
@@ -2580,7 +2638,11 @@ static Args parse_args(int argc, char** argv) {
         } else if (k == "-h" || k == "--help") {
             std::cout << "Usage: visionops_inference_cpp "
                       << "--model xxx.rknn --task detection --input-size 640,640 "
-                      << "--class-names-file xxx.yaml --port 18080 [--camera-source rtsp://...] [--stream-backend opencv|gst-mpp] [--preprocess-backend cpu|rga|auto] [--rga-mode off|resize_color|resize_only] [--enable-snapshot true|false] [--enable-annotated true|false] [--stream-codec h264|h265] [--camera-read-fps 10] [--detect-fps 10] [--rtsp-transport tcp]\n";
+                      << "--class-names-file xxx.yaml --port 18080 [--camera-source rtsp://...|/dev/video7] "
+                      << "[--camera-type rtsp|usb|auto] [--camera-width 1280 --camera-height 800 --camera-fps 10 --camera-fourcc YUYV] "
+                      << "[--stream-backend opencv|gst-mpp] [--preprocess-backend cpu|rga|auto] [--rga-mode off|resize_color|resize_only] "
+                      << "[--enable-snapshot true|false] [--enable-annotated true|false] [--stream-codec h264|h265] "
+                      << "[--camera-read-fps 10] [--detect-fps 10] [--rtsp-transport tcp]\n";
             std::exit(0);
         } else {
             throw std::runtime_error("unknown arg: " + k);
@@ -2620,6 +2682,13 @@ int main(int argc, char** argv) {
         std::cout << "[INFO] stream_backend=" << args.stream_backend
                   << " stream_codec=" << args.stream_codec
                   << " gst_latency_ms=" << args.gst_latency_ms << "\n";
+        std::cout << "[INFO] camera_type=" << args.camera_type
+                  << " camera_source=" << args.camera_source
+                  << " camera_width=" << args.camera_width
+                  << " camera_height=" << args.camera_height
+                  << " camera_fps=" << args.camera_fps
+                  << " camera_fourcc=" << args.camera_fourcc
+                  << " camera_buffer_size=" << args.camera_buffer_size << "\n";
         std::cout << "[INFO] rtsp_transport=" << args.rtsp_transport
                   << " rtsp_timeout_ms=" << args.rtsp_timeout_ms
                   << " quiet_ffmpeg_log=" << (args.quiet_ffmpeg_log ? "true" : "false") << "\n";
@@ -2651,7 +2720,7 @@ int main(int argc, char** argv) {
 
         if (listen(server_fd, 32) < 0) throw std::runtime_error("listen failed");
 
-        std::cout << "[OK] visionops_inference_cpp v0.5.5 started at 0.0.0.0:" << args.port << "\n";
+        std::cout << "[OK] visionops_inference_cpp v0.7.2 started at 0.0.0.0:" << args.port << "\n";
         std::cout << "[OK] endpoints: GET /health, POST /infer, GET /stats, POST /stream/start, POST /stream/stop, GET /stream/status, GET /stream/latest_result, GET /stream/snapshot.jpg, GET /stream/annotated.jpg, POST /inference/start, POST /inference/stop\n";
 
         while (true) {

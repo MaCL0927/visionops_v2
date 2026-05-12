@@ -1,0 +1,427 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""C++ inference runtime settings helpers.
+
+v0.7.3.1: keep the old Python camera settings intact, but add an independent
+C++ camera settings path for the C++ inference service.
+
+Design:
+- Persistent editable settings are stored under runtime_overrides.yaml:
+    cpp_inference:
+      camera: {...}
+- Effective process settings are written to edge/runtime/cpp.env.
+- Applying settings restarts visionops-inference-cpp.service so the C++ binary
+  reloads cpp.env through its systemd start script.
+"""
+from __future__ import annotations
+
+import os
+import shlex
+import subprocess
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any, Dict, Mapping, Optional
+
+try:
+    import yaml  # type: ignore
+except Exception:  # pragma: no cover - PyYAML should exist in VisionOps venv
+    yaml = None
+
+try:
+    from backend.config import CPP_INFERENCE_URL
+except Exception:  # pragma: no cover
+    CPP_INFERENCE_URL = "http://127.0.0.1:18080"
+
+
+INSTALL_DIR = Path(os.environ.get("VISIONOPS_INSTALL_DIR", "/opt/visionops"))
+RUNTIME_DIR = Path(os.environ.get("VISIONOPS_RUNTIME_DIR", str(INSTALL_DIR / "edge" / "runtime")))
+CPP_ENV_PATH = Path(os.environ.get("VISIONOPS_CPP_ENV_PATH", str(RUNTIME_DIR / "cpp.env")))
+RUNTIME_SETTINGS_PATH = Path(
+    os.environ.get("VISIONOPS_RUNTIME_SETTINGS_PATH", str(RUNTIME_DIR / "runtime_overrides.yaml"))
+)
+CPP_SERVICE_NAME = os.environ.get("VISIONOPS_CPP_SERVICE_NAME", "visionops-inference-cpp")
+
+
+_CPP_ENV_TO_SETTING = {
+    "VISIONOPS_CPP_CAMERA_TYPE": "camera_type",
+    "VISIONOPS_CPP_CAMERA_SOURCE": "camera_source",
+    "VISIONOPS_CAMERA_SOURCE": "camera_source",
+    "VISIONOPS_CPP_CAMERA_WIDTH": "camera_width",
+    "VISIONOPS_CPP_CAMERA_HEIGHT": "camera_height",
+    "VISIONOPS_CPP_CAMERA_FPS": "camera_fps",
+    "VISIONOPS_CPP_CAMERA_BUFFER_SIZE": "camera_buffer_size",
+    "VISIONOPS_CPP_CAMERA_FOURCC": "camera_fourcc",
+    "VISIONOPS_CPP_STREAM_BACKEND": "stream_backend",
+    "VISIONOPS_CPP_STREAM_CODEC": "stream_codec",
+    "VISIONOPS_CPP_STREAM_AUTO_START": "stream_auto_start",
+    "VISIONOPS_CPP_CAMERA_READ_FPS": "camera_read_fps",
+    "VISIONOPS_CPP_DETECT_FPS": "detect_fps",
+    "VISIONOPS_CPP_SNAPSHOT_FPS": "snapshot_fps",
+    "VISIONOPS_CPP_ENABLE_SNAPSHOT": "enable_snapshot",
+    "VISIONOPS_CPP_ENABLE_ANNOTATED": "enable_annotated",
+    "VISIONOPS_CPP_RTSP_TRANSPORT": "rtsp_transport",
+    "VISIONOPS_CPP_RTSP_TIMEOUT_MS": "rtsp_timeout_ms",
+    "VISIONOPS_CPP_GST_LATENCY_MS": "gst_latency_ms",
+    "VISIONOPS_CPP_QUIET_FFMPEG_LOG": "quiet_ffmpeg_log",
+}
+
+_SETTING_TO_CPP_ENV = {
+    "camera_type": "VISIONOPS_CPP_CAMERA_TYPE",
+    "camera_source": "VISIONOPS_CPP_CAMERA_SOURCE",
+    "camera_width": "VISIONOPS_CPP_CAMERA_WIDTH",
+    "camera_height": "VISIONOPS_CPP_CAMERA_HEIGHT",
+    "camera_fps": "VISIONOPS_CPP_CAMERA_FPS",
+    "camera_buffer_size": "VISIONOPS_CPP_CAMERA_BUFFER_SIZE",
+    "camera_fourcc": "VISIONOPS_CPP_CAMERA_FOURCC",
+    "stream_backend": "VISIONOPS_CPP_STREAM_BACKEND",
+    "stream_codec": "VISIONOPS_CPP_STREAM_CODEC",
+    "stream_auto_start": "VISIONOPS_CPP_STREAM_AUTO_START",
+    "camera_read_fps": "VISIONOPS_CPP_CAMERA_READ_FPS",
+    "detect_fps": "VISIONOPS_CPP_DETECT_FPS",
+    "snapshot_fps": "VISIONOPS_CPP_SNAPSHOT_FPS",
+    "enable_snapshot": "VISIONOPS_CPP_ENABLE_SNAPSHOT",
+    "enable_annotated": "VISIONOPS_CPP_ENABLE_ANNOTATED",
+    "rtsp_transport": "VISIONOPS_CPP_RTSP_TRANSPORT",
+    "rtsp_timeout_ms": "VISIONOPS_CPP_RTSP_TIMEOUT_MS",
+    "gst_latency_ms": "VISIONOPS_CPP_GST_LATENCY_MS",
+    "quiet_ffmpeg_log": "VISIONOPS_CPP_QUIET_FFMPEG_LOG",
+}
+
+_NUMERIC_KEYS = {
+    "camera_width",
+    "camera_height",
+    "camera_fps",
+    "camera_buffer_size",
+    "camera_read_fps",
+    "detect_fps",
+    "snapshot_fps",
+    "rtsp_timeout_ms",
+    "gst_latency_ms",
+}
+_BOOL_KEYS = {
+    "stream_auto_start",
+    "enable_snapshot",
+    "enable_annotated",
+    "quiet_ffmpeg_log",
+}
+
+_DEFAULT_SETTINGS: Dict[str, Any] = {
+    "camera_type": "auto",            # auto | rtsp | usb
+    "camera_source": "",             # rtsp://... | /dev/video7 | /dev/v4l/by-id/...
+    "camera_width": 0,
+    "camera_height": 0,
+    "camera_fps": 0,
+    "camera_buffer_size": 1,
+    "camera_fourcc": "",             # YUYV | MJPG | empty
+    "stream_backend": "opencv",      # opencv | gst-mpp
+    "stream_codec": "h264",
+    "stream_auto_start": False,
+    "camera_read_fps": 10,
+    "detect_fps": 10,
+    "snapshot_fps": 1,
+    "enable_snapshot": True,
+    "enable_annotated": True,
+    "rtsp_transport": "tcp",
+    "rtsp_timeout_ms": 5000,
+    "gst_latency_ms": 100,
+    "quiet_ffmpeg_log": True,
+}
+
+
+class CppRuntimeSettingsError(RuntimeError):
+    """Raised when C++ runtime settings cannot be read/applied."""
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    s = str(value).strip().lower()
+    if s in {"1", "true", "yes", "y", "on"}:
+        return True
+    if s in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or str(value).strip() == "":
+            return default
+        return int(float(str(value).strip()))
+    except Exception:
+        return default
+
+
+def _normalize_camera_type(value: Any) -> str:
+    s = str(value or "auto").strip().lower()
+    return s if s in {"auto", "rtsp", "usb"} else "auto"
+
+
+def _normalize_stream_backend(value: Any) -> str:
+    s = str(value or "opencv").strip().lower()
+    return s if s in {"opencv", "gst-mpp"} else "opencv"
+
+
+def _normalize_fourcc(value: Any) -> str:
+    s = str(value or "").strip().upper()
+    # OpenCV FOURCC is 4 characters. Accept common user typo MJPEG -> MJPG.
+    if s == "MJPEG":
+        s = "MJPG"
+    if not s:
+        return ""
+    return s if len(s) == 4 else ""
+
+
+def _normalize_settings(raw: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    data = dict(_DEFAULT_SETTINGS)
+    if raw:
+        data.update({k: v for k, v in dict(raw).items() if v is not None})
+
+    data["camera_type"] = _normalize_camera_type(data.get("camera_type"))
+    data["camera_source"] = str(data.get("camera_source") or "").strip()
+    data["stream_backend"] = _normalize_stream_backend(data.get("stream_backend"))
+    data["stream_codec"] = str(data.get("stream_codec") or "h264").strip().lower() or "h264"
+    data["rtsp_transport"] = str(data.get("rtsp_transport") or "tcp").strip().lower()
+    if data["rtsp_transport"] not in {"tcp", "udp"}:
+        data["rtsp_transport"] = "tcp"
+    data["camera_fourcc"] = _normalize_fourcc(data.get("camera_fourcc"))
+
+    for key in _NUMERIC_KEYS:
+        default = int(_DEFAULT_SETTINGS.get(key, 0))
+        data[key] = _as_int(data.get(key), default)
+
+    if data["camera_buffer_size"] <= 0:
+        data["camera_buffer_size"] = 1
+
+    for key in _BOOL_KEYS:
+        data[key] = _as_bool(data.get(key), bool(_DEFAULT_SETTINGS.get(key, False)))
+
+    # Safety: USB must use OpenCV in current v0.7.x. gst-mpp is RTSP-only.
+    if data["camera_type"] == "usb" and data["stream_backend"] == "gst-mpp":
+        data["stream_backend"] = "opencv"
+
+    return data
+
+
+def _validate_settings(settings: Mapping[str, Any]) -> None:
+    camera_type = str(settings.get("camera_type") or "auto")
+    source = str(settings.get("camera_source") or "").strip()
+    if not source:
+        raise CppRuntimeSettingsError("camera_source 不能为空")
+
+    if camera_type == "usb":
+        if not (source.startswith("/dev/video") or source.startswith("/dev/v4l/") or source.isdigit()):
+            raise CppRuntimeSettingsError("USB 相机源应为 /dev/videoX、/dev/v4l/... 或数字索引")
+        if str(settings.get("stream_backend") or "opencv") != "opencv":
+            raise CppRuntimeSettingsError("USB C++ 相机当前只支持 stream_backend=opencv")
+
+    if camera_type == "rtsp":
+        if not source.lower().startswith("rtsp://"):
+            raise CppRuntimeSettingsError("RTSP 相机源应以 rtsp:// 开头")
+
+
+def _parse_env_line(line: str) -> Optional[tuple[str, str]]:
+    line = line.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        return None
+    try:
+        parts = shlex.split(line, comments=False, posix=True)
+        if parts:
+            token = parts[0]
+        else:
+            token = line
+    except Exception:
+        token = line
+    if "=" not in token:
+        return None
+    key, value = token.split("=", 1)
+    return key.strip(), value
+
+
+def read_cpp_env(path: Path = CPP_ENV_PATH) -> Dict[str, str]:
+    env: Dict[str, str] = {}
+    if not path.exists():
+        return env
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        parsed = _parse_env_line(line)
+        if parsed:
+            key, value = parsed
+            env[key] = value
+    return env
+
+
+def _env_to_settings(env: Mapping[str, str]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for env_key, setting_key in _CPP_ENV_TO_SETTING.items():
+        if env_key in env and setting_key not in out:
+            out[setting_key] = env[env_key]
+    return _normalize_settings(out)
+
+
+def _load_yaml_file(path: Path) -> Dict[str, Any]:
+    if yaml is None or not path.exists():
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_yaml_file(path: Path, data: Mapping[str, Any]) -> None:
+    if yaml is None:
+        raise CppRuntimeSettingsError("当前 Python 环境未安装 PyYAML，无法写入 runtime_overrides.yaml")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        yaml.safe_dump(dict(data), allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+
+def get_saved_cpp_camera_settings() -> Dict[str, Any]:
+    data = _load_yaml_file(RUNTIME_SETTINGS_PATH)
+    cpp = data.get("cpp_inference") if isinstance(data.get("cpp_inference"), dict) else {}
+    camera = cpp.get("camera") if isinstance(cpp.get("camera"), dict) else {}
+    return _normalize_settings(camera)
+
+
+def save_cpp_camera_settings(settings: Mapping[str, Any]) -> Dict[str, Any]:
+    normalized = _normalize_settings(settings)
+    _validate_settings(normalized)
+
+    data = _load_yaml_file(RUNTIME_SETTINGS_PATH)
+    cpp = data.setdefault("cpp_inference", {})
+    if not isinstance(cpp, dict):
+        cpp = {}
+        data["cpp_inference"] = cpp
+    cpp["camera"] = normalized
+    _write_yaml_file(RUNTIME_SETTINGS_PATH, data)
+    return normalized
+
+
+def get_effective_cpp_env_settings() -> Dict[str, Any]:
+    return _env_to_settings(read_cpp_env())
+
+
+def get_cpp_settings_payload() -> Dict[str, Any]:
+    env = read_cpp_env()
+    effective = _env_to_settings(env)
+    saved = get_saved_cpp_camera_settings()
+    # If saved settings are still default and env exists, expose env as editable default.
+    editable = saved if saved.get("camera_source") else effective
+    return {
+        "ok": True,
+        "settings": editable,
+        "saved_settings": saved,
+        "effective_settings": effective,
+        "cpp_env_path": str(CPP_ENV_PATH),
+        "runtime_settings_path": str(RUNTIME_SETTINGS_PATH),
+        "service_name": CPP_SERVICE_NAME,
+    }
+
+
+def _format_env_value(value: Any) -> str:
+    if isinstance(value, bool):
+        value = "true" if value else "false"
+    elif value is None:
+        value = ""
+    else:
+        value = str(value)
+    return shlex.quote(value)
+
+
+def write_cpp_env(settings: Mapping[str, Any]) -> Path:
+    normalized = _normalize_settings(settings)
+    _validate_settings(normalized)
+
+    env = read_cpp_env()
+    for setting_key, env_key in _SETTING_TO_CPP_ENV.items():
+        env[env_key] = str(normalized.get(setting_key, ""))
+
+    # Keep legacy/shared source variable in sync for scripts and diagnostics.
+    env["VISIONOPS_CAMERA_SOURCE"] = str(normalized.get("camera_source") or "")
+
+    # If cpp.env does not exist yet, provide safe defaults for the keys needed by the start script.
+    env.setdefault("VISIONOPS_CPP_BIN", str(INSTALL_DIR / "bin" / "visionops_inference_cpp"))
+    env.setdefault("VISIONOPS_CPP_PORT", "18080")
+    env.setdefault("VISIONOPS_CPP_STREAM_BACKEND", str(normalized.get("stream_backend", "opencv")))
+
+    CPP_ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["# Auto-generated/updated by VisionOps Collector C++ settings API"]
+    for key in sorted(env.keys()):
+        lines.append(f"{key}={_format_env_value(env[key])}")
+    CPP_ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return CPP_ENV_PATH
+
+
+def _run_command(cmd: list[str], timeout: float = 15.0) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def restart_cpp_service() -> Dict[str, Any]:
+    commands = [
+        ["sudo", "-n", "systemctl", "restart", f"{CPP_SERVICE_NAME}.service"],
+        ["systemctl", "restart", f"{CPP_SERVICE_NAME}.service"],
+    ]
+    last: Optional[subprocess.CompletedProcess] = None
+    for cmd in commands:
+        last = _run_command(cmd, timeout=20.0)
+        if last.returncode == 0:
+            return {"ok": True, "command": " ".join(cmd), "stdout": last.stdout.strip()}
+    stderr = (last.stderr if last else "").strip()
+    raise CppRuntimeSettingsError(
+        f"重启 {CPP_SERVICE_NAME}.service 失败：{stderr or 'unknown error'}。"
+        "请确认 Collector 运行用户具备 sudo -n systemctl restart 权限。"
+    )
+
+
+def wait_cpp_health(timeout_sec: float = 12.0) -> Dict[str, Any]:
+    base = str(CPP_INFERENCE_URL or "http://127.0.0.1:18080").rstrip("/")
+    url = base + "/health"
+    deadline = time.time() + timeout_sec
+    last_error = ""
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=2.0) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+            import json
+
+            data = json.loads(raw) if raw.strip() else {}
+            if isinstance(data, dict):
+                return data
+            return {"data": data}
+        except Exception as exc:
+            last_error = str(exc)
+            time.sleep(0.5)
+    raise CppRuntimeSettingsError(f"C++ 服务重启后 health 检查超时：{last_error}")
+
+
+def apply_cpp_camera_settings(settings: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    if settings is not None:
+        normalized = save_cpp_camera_settings(settings)
+    else:
+        normalized = get_saved_cpp_camera_settings()
+        _validate_settings(normalized)
+
+    env_path = write_cpp_env(normalized)
+    restart_info = restart_cpp_service()
+    health = wait_cpp_health()
+    return {
+        "ok": True,
+        "message": "C++ 相机设置已写入 cpp.env，并已重启 C++ 推理服务",
+        "settings": normalized,
+        "cpp_env_path": str(env_path),
+        "restart": restart_info,
+        "health": health,
+    }

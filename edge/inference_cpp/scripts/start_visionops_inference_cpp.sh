@@ -42,6 +42,13 @@ fi
 : "${VISIONOPS_CPP_RTSP_TIMEOUT_MS:=5000}"
 : "${VISIONOPS_CPP_QUIET_FFMPEG_LOG:=true}"
 : "${VISIONOPS_CPP_STREAM_AUTO_START:=false}"
+# v0.7.1 USB/OpenCV camera options. For RTSP, leave width/height/fps/fourcc empty or 0.
+: "${VISIONOPS_CPP_CAMERA_TYPE:=auto}"
+: "${VISIONOPS_CPP_CAMERA_WIDTH:=0}"
+: "${VISIONOPS_CPP_CAMERA_HEIGHT:=0}"
+: "${VISIONOPS_CPP_CAMERA_FPS:=0}"
+: "${VISIONOPS_CPP_CAMERA_BUFFER_SIZE:=1}"
+: "${VISIONOPS_CPP_CAMERA_FOURCC:=}"
 
 cmd=(
   "$VISIONOPS_CPP_BIN"
@@ -73,9 +80,20 @@ cmd=(
   --rtsp-timeout-ms "$VISIONOPS_CPP_RTSP_TIMEOUT_MS"
   --quiet-ffmpeg-log "$VISIONOPS_CPP_QUIET_FFMPEG_LOG"
   --stream-auto-start "$VISIONOPS_CPP_STREAM_AUTO_START"
+  --camera-type "$VISIONOPS_CPP_CAMERA_TYPE"
+  --camera-width "$VISIONOPS_CPP_CAMERA_WIDTH"
+  --camera-height "$VISIONOPS_CPP_CAMERA_HEIGHT"
+  --camera-fps "$VISIONOPS_CPP_CAMERA_FPS"
+  --camera-buffer-size "$VISIONOPS_CPP_CAMERA_BUFFER_SIZE"
 )
 
-if [[ -n "${VISIONOPS_CAMERA_SOURCE:-}" ]]; then
+if [[ -n "${VISIONOPS_CPP_CAMERA_FOURCC:-}" ]]; then
+  cmd+=(--camera-fourcc "$VISIONOPS_CPP_CAMERA_FOURCC")
+fi
+
+if [[ -n "${VISIONOPS_CPP_CAMERA_SOURCE:-}" ]]; then
+  cmd+=(--camera-source "$VISIONOPS_CPP_CAMERA_SOURCE")
+elif [[ -n "${VISIONOPS_CAMERA_SOURCE:-}" ]]; then
   cmd+=(--camera-source "$VISIONOPS_CAMERA_SOURCE")
 elif [[ -n "${CAMERA_SOURCE:-}" ]]; then
   cmd+=(--camera-source "$CAMERA_SOURCE")

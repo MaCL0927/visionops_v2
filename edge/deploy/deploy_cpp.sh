@@ -31,6 +31,14 @@ PREPROCESS_BACKEND="${PREPROCESS_BACKEND:-auto}"
 RGA_MODE="${RGA_MODE:-resize_color}"
 MAX_DET="${MAX_DET:-100}"
 CAMERA_SOURCE="${CAMERA_SOURCE:-rtsp://admin:Abcd123_@192.168.2.64:554/Streaming/channels/101}"
+# v0.7.1 C++ USB/OpenCV camera options. For Orbbec UVC RGB, use:
+#   CAMERA_TYPE=usb CAMERA_SOURCE=/dev/video7 CAMERA_WIDTH=1280 CAMERA_HEIGHT=800 CAMERA_FPS=10 CAMERA_FOURCC=YUYV
+CAMERA_TYPE="${CAMERA_TYPE:-auto}"
+CAMERA_WIDTH="${CAMERA_WIDTH:-0}"
+CAMERA_HEIGHT="${CAMERA_HEIGHT:-0}"
+CAMERA_FPS="${CAMERA_FPS:-0}"
+CAMERA_BUFFER_SIZE="${CAMERA_BUFFER_SIZE:-1}"
+CAMERA_FOURCC="${CAMERA_FOURCC:-}"
 CAMERA_READ_FPS="${CAMERA_READ_FPS:-10}"
 DETECT_FPS="${DETECT_FPS:-10}"
 SNAPSHOT_FPS="${SNAPSHOT_FPS:-1}"
@@ -46,8 +54,9 @@ QUIET_FFMPEG_LOG="${QUIET_FFMPEG_LOG:-true}"
 INSTALL_GST="${INSTALL_GST:-0}"
 
 # v0.5.0 optional Collector proxy deployment.
-# Default keeps this script focused on C++ service only.
-SYNC_COLLECTOR="${SYNC_COLLECTOR:-0}"
+# v0.7.2 default syncs Collector so the C++ preview/detect buttons are deployed together.
+# Set SYNC_COLLECTOR=0 if you only want to deploy the C++ service.
+SYNC_COLLECTOR="${SYNC_COLLECTOR:-1}"
 RESTART_COLLECTOR="${RESTART_COLLECTOR:-1}"
 APPLY_CPP_PROXY="${APPLY_CPP_PROXY:-1}"
 COLLECTOR_PORT="${COLLECTOR_PORT:-8090}"
@@ -80,7 +89,13 @@ Options:
   --num-classes N             default: 80 for current RKNN test model
   --preprocess-backend MODE    cpu|rga|auto, default: ${PREPROCESS_BACKEND}
   --rga-mode MODE              off|resize_color|resize_only, default: ${RGA_MODE}
-  --camera-source URL_OR_IDX  Optional RTSP URL or USB camera index, e.g. 0
+  --camera-source URL_OR_IDX  Optional RTSP URL, USB camera index, or /dev/videoX
+  --camera-type auto|rtsp|usb  Camera type hint, default: ${CAMERA_TYPE}
+  --camera-width W            USB/OpenCV requested width, default: ${CAMERA_WIDTH}
+  --camera-height H           USB/OpenCV requested height, default: ${CAMERA_HEIGHT}
+  --camera-fps FPS            USB/OpenCV requested capture FPS, default: ${CAMERA_FPS}
+  --camera-fourcc FOURCC      USB/OpenCV FOURCC, e.g. YUYV or MJPG, default: ${CAMERA_FOURCC}
+  --camera-buffer-size N      USB/OpenCV buffer size, default: ${CAMERA_BUFFER_SIZE}
   --stream-auto-start true|false, default: ${STREAM_AUTO_START}
   --enable-snapshot true|false, default: ${ENABLE_SNAPSHOT}
   --enable-annotated true|false, default: ${ENABLE_ANNOTATED}
@@ -88,7 +103,7 @@ Options:
   --install-gst 0|1           Install common GStreamer packages, default: ${INSTALL_GST}
 
   # v0.5.0 optional Collector proxy deployment:
-  --sync-collector true|false    Sync edge/collector and tools, default: ${SYNC_COLLECTOR}
+  --sync-collector true|false    Sync edge/collector and tools, default: ${SYNC_COLLECTOR} (v0.7.2 defaults to true)
   --restart-collector true|false Restart Collector service after sync, default: ${RESTART_COLLECTOR}
   --collector-service NAME       Collector systemd service name, default: ${COLLECTOR_SERVICE}
   --collector-port PORT          Collector HTTP port for proxy check, default: ${COLLECTOR_PORT}
@@ -114,6 +129,12 @@ while [[ $# -gt 0 ]]; do
     --preprocess-backend) PREPROCESS_BACKEND="$2"; shift 2 ;;
     --rga-mode) RGA_MODE="$2"; shift 2 ;;
     --camera-source) CAMERA_SOURCE="$2"; shift 2 ;;
+    --camera-type) CAMERA_TYPE="$2"; shift 2 ;;
+    --camera-width) CAMERA_WIDTH="$2"; shift 2 ;;
+    --camera-height) CAMERA_HEIGHT="$2"; shift 2 ;;
+    --camera-fps) CAMERA_FPS="$2"; shift 2 ;;
+    --camera-fourcc) CAMERA_FOURCC="$2"; shift 2 ;;
+    --camera-buffer-size) CAMERA_BUFFER_SIZE="$2"; shift 2 ;;
     --stream-auto-start) STREAM_AUTO_START="$2"; shift 2 ;;
     --enable-snapshot) ENABLE_SNAPSHOT="$2"; shift 2 ;;
     --enable-annotated) ENABLE_ANNOTATED="$2"; shift 2 ;;
@@ -189,12 +210,20 @@ write_remote_cpp_env() {
     printf 'VISIONOPS_CPP_RTSP_TRANSPORT=%q\n' "${RTSP_TRANSPORT}"
     printf 'VISIONOPS_CPP_RTSP_TIMEOUT_MS=%q\n' "${RTSP_TIMEOUT_MS}"
     printf 'VISIONOPS_CPP_QUIET_FFMPEG_LOG=%q\n' "${QUIET_FFMPEG_LOG}"
+    printf 'VISIONOPS_CPP_CAMERA_TYPE=%q\n' "${CAMERA_TYPE}"
+    printf 'VISIONOPS_CPP_CAMERA_WIDTH=%q\n' "${CAMERA_WIDTH}"
+    printf 'VISIONOPS_CPP_CAMERA_HEIGHT=%q\n' "${CAMERA_HEIGHT}"
+    printf 'VISIONOPS_CPP_CAMERA_FPS=%q\n' "${CAMERA_FPS}"
+    printf 'VISIONOPS_CPP_CAMERA_BUFFER_SIZE=%q\n' "${CAMERA_BUFFER_SIZE}"
+    printf 'VISIONOPS_CPP_CAMERA_FOURCC=%q\n' "${CAMERA_FOURCC}"
+    printf 'VISIONOPS_CPP_CAMERA_SOURCE=%q\n' "${CAMERA_SOURCE}"
     printf 'VISIONOPS_CAMERA_SOURCE=%q\n' "${CAMERA_SOURCE}"
   } > "${local_tmp}"
   scp "${SCP_OPTS[@]}" "${local_tmp}" "${EDGE_USER}@${EDGE_HOST}:${remote_tmp}" >/dev/null
   remote_sudo mkdir -p "${INSTALL_DIR}/edge/runtime"
   remote_sudo mv "${remote_tmp}" "${INSTALL_DIR}/edge/runtime/cpp.env"
-  remote_sudo chmod 644 "${INSTALL_DIR}/edge/runtime/cpp.env"
+  remote_sudo chmod 664 "${INSTALL_DIR}/edge/runtime/cpp.env"
+  remote_sudo chown "${EDGE_USER}:${EDGE_USER}" "${INSTALL_DIR}/edge/runtime/cpp.env" || true
   rm -f "${local_tmp}"
 }
 
@@ -281,6 +310,7 @@ sync_collector_proxy() {
   log_info "Check Collector proxy Python files"
   remote "cd '${INSTALL_DIR}' && python3 -m py_compile \
     edge/collector/backend/services/cpp_inference_client.py \
+    edge/collector/backend/services/cpp_runtime_settings.py \
     edge/collector/backend/routers/cpp_inference.py \
     edge/collector/backend/main.py"
 
@@ -332,6 +362,7 @@ main() {
   log_info "Target: ${EDGE_USER}@${EDGE_HOST}:${EDGE_PORT}"
   log_info "Install dir: ${INSTALL_DIR}"
   log_info "C++ port: ${CPP_PORT}, task=${TASK}, num_classes=${num_classes_final}, input_size=${INPUT_SIZE}, preprocess_backend=${PREPROCESS_BACKEND}, rga_mode=${RGA_MODE}, snapshot=${ENABLE_SNAPSHOT}, annotated=${ENABLE_ANNOTATED}"
+  log_info "Camera: type=${CAMERA_TYPE}, source=${CAMERA_SOURCE}, width=${CAMERA_WIDTH}, height=${CAMERA_HEIGHT}, fps=${CAMERA_FPS}, fourcc=${CAMERA_FOURCC}, buffer_size=${CAMERA_BUFFER_SIZE}, stream_backend=${STREAM_BACKEND}"
 
   remote "echo connected >/dev/null"
   if ! remote "sudo -n true"; then

@@ -1,8 +1,10 @@
 #include "visionops/stream_backend.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <sstream>
 #include <stdexcept>
+#include <iostream>
 
 #include <opencv2/core/utils/logger.hpp>
 
@@ -15,6 +17,33 @@ static bool looks_like_integer_camera_index(const std::string& source) {
         if (c < '0' || c > '9') return false;
     }
     return true;
+}
+
+static bool starts_with(const std::string& s, const std::string& prefix) {
+    return s.rfind(prefix, 0) == 0;
+}
+
+static bool looks_like_rtsp_source(const std::string& source) {
+    return starts_with(source, "rtsp://") || starts_with(source, "rtsps://");
+}
+
+static bool looks_like_usb_v4l2_source(const std::string& source) {
+    return starts_with(source, "/dev/video") || starts_with(source, "/dev/v4l/");
+}
+
+static int make_fourcc(const std::string& fourcc) {
+    if (fourcc.size() != 4) return 0;
+    return cv::VideoWriter::fourcc(fourcc[0], fourcc[1], fourcc[2], fourcc[3]);
+}
+
+static std::string fourcc_to_string(double fourcc_value) {
+    int v = static_cast<int>(fourcc_value);
+    std::string s;
+    s.push_back(static_cast<char>(v & 0xFF));
+    s.push_back(static_cast<char>((v >> 8) & 0xFF));
+    s.push_back(static_cast<char>((v >> 16) & 0xFF));
+    s.push_back(static_cast<char>((v >> 24) & 0xFF));
+    return s;
 }
 
 static void configure_quiet_logs(bool quiet) {
@@ -63,9 +92,16 @@ public:
             int idx = std::stoi(options_.camera_source);
             ok = cap_.open(idx, cv::CAP_V4L2);
             if (!ok) ok = cap_.open(idx);
-        } else {
+        } else if (looks_like_usb_v4l2_source(options_.camera_source)) {
+            // v0.7.1: USB/UVC cameras such as Orbbec RGB should use V4L2, not FFmpeg.
+            ok = cap_.open(options_.camera_source, cv::CAP_V4L2);
+            if (!ok) ok = cap_.open(options_.camera_source);
+        } else if (looks_like_rtsp_source(options_.camera_source)) {
             ok = cap_.open(options_.camera_source, cv::CAP_FFMPEG);
             if (!ok) ok = cap_.open(options_.camera_source);
+        } else {
+            // Keep the old fallback behavior for local video files or other OpenCV sources.
+            ok = cap_.open(options_.camera_source);
         }
 
         if (!ok || !cap_.isOpened()) {
@@ -74,7 +110,27 @@ public:
         }
 
         // Keep latency low where backend supports these properties.
-        cap_.set(cv::CAP_PROP_BUFFERSIZE, 1);
+        int buffer_size = options_.camera_buffer_size > 0 ? options_.camera_buffer_size : 1;
+        cap_.set(cv::CAP_PROP_BUFFERSIZE, buffer_size);
+
+        if (!looks_like_rtsp_source(options_.camera_source)) {
+            int fourcc = make_fourcc(options_.camera_fourcc);
+            if (fourcc != 0) cap_.set(cv::CAP_PROP_FOURCC, fourcc);
+            if (options_.camera_width > 0) cap_.set(cv::CAP_PROP_FRAME_WIDTH, options_.camera_width);
+            if (options_.camera_height > 0) cap_.set(cv::CAP_PROP_FRAME_HEIGHT, options_.camera_height);
+            if (options_.camera_fps > 0) cap_.set(cv::CAP_PROP_FPS, options_.camera_fps);
+        }
+
+        std::ostringstream info;
+        info << "[STREAM] OpenCV source=" << options_.camera_source
+             << " camera_type=" << options_.camera_type
+             << " width=" << cap_.get(cv::CAP_PROP_FRAME_WIDTH)
+             << " height=" << cap_.get(cv::CAP_PROP_FRAME_HEIGHT)
+             << " fps=" << cap_.get(cv::CAP_PROP_FPS)
+             << " fourcc=" << fourcc_to_string(cap_.get(cv::CAP_PROP_FOURCC))
+             << " buffer_size=" << buffer_size;
+        std::cout << info.str() << std::endl;
+
         return true;
     }
 
@@ -131,6 +187,10 @@ public:
         configure_quiet_logs(options_.quiet_ffmpeg_log);
         if (options_.camera_source.empty()) {
             if (error_message) *error_message = "camera_source is empty";
+            return false;
+        }
+        if (!looks_like_rtsp_source(options_.camera_source)) {
+            if (error_message) *error_message = "gst-mpp backend only supports RTSP sources; use --stream-backend opencv for USB";
             return false;
         }
         pipeline_ = make_gst_mpp_pipeline(options_);
