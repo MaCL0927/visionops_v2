@@ -175,7 +175,8 @@
             <div id="modelList" class="model-list">
               <div class="empty-models">正在读取模型...</div>
             </div>
-            <button id="refreshModels" class="big-action secondary">刷新模型</button>
+            <button id="switchCppModel" class="big-action primary" type="button">切换为 C++ 当前模型</button>
+            <button id="refreshModels" class="big-action secondary" type="button">刷新模型</button>
           </aside>
 
           <section class="content-card validate-card">
@@ -202,9 +203,9 @@
                 <div class="cpp-status-actions">
                   <span id="cppServiceBadge" class="cpp-service-badge unknown">未连接</span>
                   <button id="startCppPreviewStream" class="mini-btn cpp-action-preview-start" type="button">启动 C++ 预览</button>
-                  <button id="startCppStream" class="mini-btn cpp-action-start" type="button">启动 C++ 检测</button>
+                  <button id="startCppStream" class="mini-btn cpp-action-start" type="button">启动 C++ 推理</button>
                   <button id="stopCppStream" class="mini-btn cpp-action-stop" type="button">停止 C++ 流</button>
-                  <button id="openCppPreviewModal" class="mini-btn cpp-action-preview" type="button">打开预览窗口</button>
+                  <button id="openCppPreviewModal" class="mini-btn cpp-action-preview" type="button">打开任务预览</button>
                   <button id="refreshCppStatus" class="mini-btn" type="button">刷新 C++ 状态</button>
                 </div>
               </div>
@@ -834,8 +835,8 @@
     <div class="dialog cpp-preview-dialog">
       <div class="dialog-head cpp-preview-head">
         <div>
-          <h2>C++ 实时检测预览</h2>
-          <p>低频读取 C++ snapshot，并在前端 canvas 根据 latest_result 绘制检测框；不高频请求 annotated.jpg。</p>
+          <h2>C++ 实时任务预览</h2>
+          <p>低频读取 C++ snapshot，并根据 latest_result.task 自动绘制分类结果、检测框、OBB 四边形或分割 polygon；不高频请求 annotated.jpg。</p>
         </div>
         <button id="closeCppPreviewModal" class="close-btn">×</button>
       </div>
@@ -847,13 +848,13 @@
       <div class="cpp-preview-body">
         <div class="cpp-preview-canvas-wrap">
           <canvas id="cppPreviewCanvas" class="cpp-preview-canvas"></canvas>
-          <div id="cppPreviewEmpty" class="cpp-preview-empty">点击“启动 C++ 预览”或“启动 C++ 检测”后等待最新帧。</div>
+          <div id="cppPreviewEmpty" class="cpp-preview-empty">点击“启动 C++ 预览”或“启动 C++ 推理”后等待最新帧。</div>
         </div>
         <aside class="cpp-preview-side">
-          <div class="cpp-preview-side-card"><span>检测数量</span><b id="cppPreviewCount">--</b></div>
-          <div class="cpp-preview-side-card"><span>图像尺寸</span><b id="cppPreviewImageSize">--</b></div>
+          <div class="cpp-preview-side-card"><span>结果数量</span><b id="cppPreviewCount">--</b></div>
+          <div class="cpp-preview-side-card"><span>任务 / 图像尺寸</span><b id="cppPreviewImageSize">--</b></div>
           <div class="cpp-preview-side-card"><span>更新时间</span><b id="cppPreviewUpdatedAt">--</b></div>
-          <div class="cpp-preview-side-card wide"><span>检测结果</span><div id="cppPreviewPredictions" class="cpp-preview-predictions">暂无结果</div></div>
+          <div class="cpp-preview-side-card wide"><span>任务结果</span><div id="cppPreviewPredictions" class="cpp-preview-predictions">暂无结果</div></div>
         </aside>
       </div>
       <div class="dialog-actions cpp-preview-actions">
@@ -864,6 +865,6 @@
 
   <div id="toast" class="toast"></div>
   <div id="centerNotice" class="center-notice" role="status" aria-live="polite"><div id="centerNoticeBox" class="center-notice-box"></div></div>
-  <script src="/static/app.js?v=v0_7_3_2_cpp_settings"></script>
+  <script src="/static/app.js?v=v0_8_3_5_cpp_task_preview"></script>
 </body>
 </html>

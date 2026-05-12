@@ -334,6 +334,259 @@ def _format_env_value(value: Any) -> str:
     return shlex.quote(value)
 
 
+
+
+# -----------------------------------------------------------------------------
+# v0.8.1 C++ current model config helpers
+# -----------------------------------------------------------------------------
+
+_CPP_MODEL_ENV_KEYS = {
+    "VISIONOPS_CPP_BIN",
+    "VISIONOPS_CPP_MODEL_PATH",
+    "VISIONOPS_CPP_CLASS_NAMES_FILE",
+    "VISIONOPS_CPP_TASK",
+    "VISIONOPS_CPP_PIPELINE_CONFIG",
+    "VISIONOPS_CPP_PORT",
+    "VISIONOPS_CPP_NPU_CORE",
+    "VISIONOPS_CPP_NUM_CLASSES",
+    "VISIONOPS_CPP_INPUT_SIZE",
+    "VISIONOPS_CPP_CONF_THRESHOLD",
+    "VISIONOPS_CPP_NMS_THRESHOLD",
+    "VISIONOPS_CPP_TOPK",
+    "VISIONOPS_CPP_MAX_DET",
+    "VISIONOPS_CPP_OUTPUT_MODE",
+    "VISIONOPS_CPP_PREPROCESS_BACKEND",
+    "VISIONOPS_CPP_RGA_MODE",
+}
+
+
+def _normalize_model_task(value: Any) -> str:
+    task = str(value or "").strip().lower()
+    aliases = {
+        "cls": "classification",
+        "classify": "classification",
+        "classification": "classification",
+        "det": "detection",
+        "detect": "detection",
+        "detection": "detection",
+        "obb": "obb_detection",
+        "oriented_detection": "obb_detection",
+        "rotated_detection": "obb_detection",
+        "yolo_obb": "obb_detection",
+        "yolov8_obb": "obb_detection",
+        "seg": "segmentation",
+        "segment": "segmentation",
+        "segmentation": "segmentation",
+        "instance_segmentation": "segmentation",
+        "yolo_seg": "segmentation",
+        "yolov8_seg": "segmentation",
+        "roi": "roi_classification",
+        "roi_classification": "roi_classification",
+        "roi_detection_classification": "roi_classification",
+    }
+    return aliases.get(task, task)
+
+
+def _parse_input_size(value: Any) -> list[int]:
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        try:
+            return [int(value[0]), int(value[1])]
+        except Exception:
+            return []
+    s = str(value or "").strip().replace("\\,", ",")
+    if not s:
+        return []
+    for sep in [",", "x", "X", " "]:
+        if sep in s:
+            parts = [x for x in s.replace("x", sep).replace("X", sep).split(sep) if x.strip()]
+            if len(parts) >= 2:
+                try:
+                    return [int(float(parts[0])), int(float(parts[1]))]
+                except Exception:
+                    return []
+    return []
+
+
+def _format_input_size_for_env(value: Any) -> str:
+    size = _parse_input_size(value)
+    if len(size) == 2:
+        return f"{size[0]},{size[1]}"
+    return str(value or "").strip()
+
+
+def _as_float_or_none(value: Any) -> Optional[float]:
+    try:
+        if value is None or str(value).strip() == "":
+            return None
+        return float(str(value).strip())
+    except Exception:
+        return None
+
+
+def get_cpp_current_model_config() -> Dict[str, Any]:
+    """Read the configured C++ model from edge/runtime/cpp.env.
+
+    v0.8.1 treats cpp.env as the single persistent source of truth for the
+    C++ inference model. This function intentionally does not call the running
+    C++ service: it still works when visionops-inference-cpp.service is stopped.
+    """
+    env = read_cpp_env()
+    model_path = str(env.get("VISIONOPS_CPP_MODEL_PATH") or "").strip()
+    meta_path = str(env.get("VISIONOPS_CPP_CLASS_NAMES_FILE") or "").strip()
+    pipeline_config = str(env.get("VISIONOPS_CPP_PIPELINE_CONFIG") or "").strip()
+    task = _normalize_model_task(env.get("VISIONOPS_CPP_TASK"))
+    input_size = _parse_input_size(env.get("VISIONOPS_CPP_INPUT_SIZE"))
+    num_classes = _as_int(env.get("VISIONOPS_CPP_NUM_CLASSES"), 0)
+
+    missing = []
+    if task == "roi_classification":
+        if not pipeline_config:
+            missing.append("VISIONOPS_CPP_PIPELINE_CONFIG")
+    else:
+        if not model_path:
+            missing.append("VISIONOPS_CPP_MODEL_PATH")
+        if not meta_path:
+            missing.append("VISIONOPS_CPP_CLASS_NAMES_FILE")
+    if not task:
+        missing.append("VISIONOPS_CPP_TASK")
+    if num_classes <= 0:
+        missing.append("VISIONOPS_CPP_NUM_CLASSES")
+    if len(input_size) != 2:
+        missing.append("VISIONOPS_CPP_INPUT_SIZE")
+
+    raw_model_env = {k: env.get(k, "") for k in sorted(_CPP_MODEL_ENV_KEYS) if k in env}
+
+    return {
+        "ok": True,
+        "source": "cpp.env",
+        "cpp_env_path": str(CPP_ENV_PATH),
+        "cpp_env_exists": CPP_ENV_PATH.exists(),
+        "service_name": CPP_SERVICE_NAME,
+        "valid": len(missing) == 0,
+        "missing": missing,
+        "model_path": model_path,
+        "pipeline_config": pipeline_config,
+        "class_names_file": meta_path,
+        "meta_path": meta_path,
+        "task": task,
+        "num_classes": num_classes,
+        "input_size": input_size,
+        "port": _as_int(env.get("VISIONOPS_CPP_PORT"), 18080),
+        "npu_core": str(env.get("VISIONOPS_CPP_NPU_CORE") or "auto"),
+        "conf_threshold": _as_float_or_none(env.get("VISIONOPS_CPP_CONF_THRESHOLD")),
+        "nms_threshold": _as_float_or_none(env.get("VISIONOPS_CPP_NMS_THRESHOLD")),
+        "mask_threshold": _as_float_or_none(env.get("VISIONOPS_CPP_MASK_THRESHOLD")),
+        "topk": _as_int(env.get("VISIONOPS_CPP_TOPK"), 5),
+        "max_det": _as_int(env.get("VISIONOPS_CPP_MAX_DET"), 100),
+        "output_mode": str(env.get("VISIONOPS_CPP_OUTPUT_MODE") or "float"),
+        "preprocess_backend": str(env.get("VISIONOPS_CPP_PREPROCESS_BACKEND") or "auto"),
+        "rga_mode": str(env.get("VISIONOPS_CPP_RGA_MODE") or "resize_color"),
+        "raw_env": raw_model_env,
+    }
+
+
+
+def write_cpp_pipeline_env(pipeline_config: Mapping[str, Any]) -> Path:
+    """v0.8.4: Update cpp.env for ROI classification pipeline bundles.
+
+    The C++ binary uses --task roi_classification and --pipeline-config. Camera,
+    stream and preprocessing settings are preserved from existing cpp.env.
+    """
+    env = read_cpp_env()
+    cfg_path = str(
+        pipeline_config.get("pipeline_config")
+        or pipeline_config.get("config_path")
+        or pipeline_config.get("path")
+        or ""
+    ).strip()
+    task = _normalize_model_task(pipeline_config.get("task") or "roi_classification")
+    if task != "roi_classification":
+        raise CppRuntimeSettingsError(f"当前 pipeline 切换仅支持 roi_classification，收到: {task or 'empty'}")
+    if not cfg_path:
+        raise CppRuntimeSettingsError("pipeline_config 不能为空")
+
+    env["VISIONOPS_CPP_TASK"] = "roi_classification"
+    env["VISIONOPS_CPP_PIPELINE_CONFIG"] = cfg_path
+    # Keep single-model keys for compatibility/diagnostics, but the C++ binary
+    # ignores them in roi_classification mode.
+    env.setdefault("VISIONOPS_CPP_MODEL_PATH", str(INSTALL_DIR / "models" / "unused_roi_pipeline.rknn"))
+    env.setdefault("VISIONOPS_CPP_CLASS_NAMES_FILE", cfg_path)
+    env.setdefault("VISIONOPS_CPP_NUM_CLASSES", "1")
+    env.setdefault("VISIONOPS_CPP_INPUT_SIZE", "640,640")
+    env.setdefault("VISIONOPS_CPP_BIN", str(INSTALL_DIR / "bin" / "visionops_inference_cpp"))
+    env.setdefault("VISIONOPS_CPP_PORT", "18080")
+    env.setdefault("VISIONOPS_CPP_NPU_CORE", "auto")
+
+    CPP_ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["# Auto-generated/updated by VisionOps Collector C++ ROI pipeline API"]
+    for key in sorted(env.keys()):
+        lines.append(f"{key}={_format_env_value(env[key])}")
+    CPP_ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return CPP_ENV_PATH
+
+def write_cpp_model_env(model_config: Mapping[str, Any]) -> Path:
+    """Update model-related keys in cpp.env while preserving camera settings.
+
+    This helper is added in v0.8.1 for v0.8.2 model switching. v0.8.1 itself
+    only exposes current config; it does not call this function from the UI.
+    """
+    env = read_cpp_env()
+
+    model_path = str(model_config.get("model_path") or model_config.get("path") or "").strip()
+    meta_path = str(
+        model_config.get("class_names_file")
+        or model_config.get("meta_path")
+        or model_config.get("yaml_path")
+        or ""
+    ).strip()
+    task = _normalize_model_task(model_config.get("task"))
+    input_size = _format_input_size_for_env(model_config.get("input_size") or env.get("VISIONOPS_CPP_INPUT_SIZE") or "")
+    num_classes = _as_int(model_config.get("num_classes"), _as_int(env.get("VISIONOPS_CPP_NUM_CLASSES"), 0))
+
+    if not model_path:
+        raise CppRuntimeSettingsError("model_path 不能为空")
+    if not meta_path:
+        raise CppRuntimeSettingsError("class_names_file/meta_path 不能为空")
+    if task not in {"classification", "detection", "obb_detection", "segmentation"}:
+        raise CppRuntimeSettingsError(f"当前单模型切换不支持任务类型: {task or 'empty'}")
+    if num_classes <= 0:
+        raise CppRuntimeSettingsError("num_classes 必须大于 0")
+    if len(_parse_input_size(input_size)) != 2:
+        raise CppRuntimeSettingsError("input_size 必须为形如 640,640 或 [640, 640] 的格式")
+
+    env["VISIONOPS_CPP_MODEL_PATH"] = model_path
+    env["VISIONOPS_CPP_CLASS_NAMES_FILE"] = meta_path
+    env["VISIONOPS_CPP_TASK"] = task
+    env["VISIONOPS_CPP_NUM_CLASSES"] = str(num_classes)
+    env["VISIONOPS_CPP_INPUT_SIZE"] = input_size
+
+    # Optional algorithm parameters. Omit means preserve existing cpp.env values.
+    optional_key_map = {
+        "conf_threshold": "VISIONOPS_CPP_CONF_THRESHOLD",
+        "nms_threshold": "VISIONOPS_CPP_NMS_THRESHOLD",
+        "mask_threshold": "VISIONOPS_CPP_MASK_THRESHOLD",
+        "topk": "VISIONOPS_CPP_TOPK",
+        "max_det": "VISIONOPS_CPP_MAX_DET",
+        "output_mode": "VISIONOPS_CPP_OUTPUT_MODE",
+        "preprocess_backend": "VISIONOPS_CPP_PREPROCESS_BACKEND",
+        "rga_mode": "VISIONOPS_CPP_RGA_MODE",
+    }
+    for cfg_key, env_key in optional_key_map.items():
+        if cfg_key in model_config and model_config.get(cfg_key) is not None:
+            env[env_key] = str(model_config.get(cfg_key))
+
+    env.setdefault("VISIONOPS_CPP_BIN", str(INSTALL_DIR / "bin" / "visionops_inference_cpp"))
+    env.setdefault("VISIONOPS_CPP_PORT", "18080")
+    env.setdefault("VISIONOPS_CPP_NPU_CORE", "auto")
+
+    CPP_ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["# Auto-generated/updated by VisionOps Collector C++ model API"]
+    for key in sorted(env.keys()):
+        lines.append(f"{key}={_format_env_value(env[key])}")
+    CPP_ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return CPP_ENV_PATH
+
+
 def write_cpp_env(settings: Mapping[str, Any]) -> Path:
     normalized = _normalize_settings(settings)
     _validate_settings(normalized)

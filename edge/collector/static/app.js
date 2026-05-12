@@ -206,6 +206,9 @@ let deviceId='rk3588-001';
 let userId='operator-001';
 let selectedModel='';
 let modelItems=[];
+let modelListSource='legacy';
+let cppCurrentModel=null;
+let cppModelSwitchBusy=false;
 let pendingClassificationImageData='';
 let pendingCaptureZoom=1;
 let captureBusy=false;
@@ -822,6 +825,7 @@ const resultClassName=document.getElementById('resultClassName');
 const resultConfidence=document.getElementById('resultConfidence');
 const resultLatency=document.getElementById('resultLatency');
 const topkResult=document.getElementById('topkResult');
+const switchCppModelBtn=document.getElementById('switchCppModel');
 const realtimeInferToggle=document.getElementById('realtimeInferToggle');
 let realtimeIntervalMs=1000; // v2.2：由系统设置动态控制
 let productionDetectIntervalMs=1000;
@@ -967,26 +971,32 @@ function renderCppStatusUnavailable(message){
   if(cppLastErrorText) cppLastErrorText.textContent=message || '无法连接 C++ 推理服务';
   updateCppStreamButtons(false,false);
 }
-function renderCppStatus({health={}, status={}, latest={}}={}){
+function renderCppStatus({health={}, status={}, latest={}, current={}}={}){
   if(!cppStatusCard) return;
   cppStatusCard.classList.remove('collapsed','error');
+  const currentCpp=current.current_cpp || {};
+  const configured=currentCpp.config || {};
   const healthOk=health && health.status==='ok';
+  const hasConfig=!!(configured && configured.model_path);
   const running=!!status.running;
   const inferenceEnabled=!!status.inference_enabled;
-  setCppStatusBadge(healthOk ? 'ok' : 'warning', healthOk ? '服务正常' : '状态异常');
-  if(cppRunningText) cppRunningText.textContent=running ? (inferenceEnabled ? '检测中' : '预览中') : '未取流';
+  if(healthOk) setCppStatusBadge('ok','服务正常');
+  else if(hasConfig) setCppStatusBadge('warning','仅读配置');
+  else setCppStatusBadge('warning','状态异常');
+  if(cppRunningText) cppRunningText.textContent=running ? (inferenceEnabled ? '检测中' : '预览中') : (healthOk ? '未取流' : '服务未连接');
   updateCppStreamButtons(running, inferenceEnabled);
-  const task=health.task || latest.task || '--';
-  const input=Array.isArray(health.input_size) ? `${health.input_size[0]}×${health.input_size[1]}` : '';
-  const classes=health.num_classes ? `${health.num_classes}类` : '';
+  const task=health.task || configured.task || latest.task || '--';
+  const inputArr=Array.isArray(health.input_size) ? health.input_size : (Array.isArray(configured.input_size) ? configured.input_size : []);
+  const input=inputArr.length>=2 ? `${inputArr[0]}×${inputArr[1]}` : '';
+  const classes=health.num_classes ? `${health.num_classes}类` : (configured.num_classes ? `${configured.num_classes}类` : '');
   if(cppTaskText) cppTaskText.textContent=[taskDisplayName(task), input, classes].filter(Boolean).join(' · ') || '--';
   if(cppModelText){
-    const model=health.model || health.model_path || latest.model || '--';
+    const model=health.model || health.model_path || configured.model_path || latest.model || '--';
     cppModelText.textContent=shortPathName(model);
     cppModelText.title=model;
   }
-  const backend=status.preprocess_backend_active || health.preprocess_backend_active || latest.preprocess_backend_active || latest.timing?.preprocess_backend || '--';
-  const rgaMode=status.rga_mode_active || health.rga_mode_active || latest.rga_mode_active || '';
+  const backend=status.preprocess_backend_active || health.preprocess_backend_active || configured.preprocess_backend || latest.preprocess_backend_active || latest.timing?.preprocess_backend || '--';
+  const rgaMode=status.rga_mode_active || health.rga_mode_active || configured.rga_mode || latest.rga_mode_active || '';
   if(cppBackendText) cppBackendText.textContent=[backend, rgaMode].filter(Boolean).join(' / ');
   if(cppCameraText){
     const cameraSummary=getCppCameraSummary(health,status);
@@ -1009,7 +1019,9 @@ function renderCppStatus({health={}, status={}, latest={}}={}){
   const rawMessage=String(latest.message || '').trim();
   let statusInfo=status.last_error || '';
   if(!statusInfo){
-    if(!running) statusInfo='实时流未启动；点击“启动 C++ 预览”只看画面，或点击“启动 C++ 检测”开始推理';
+    if(!healthOk && hasConfig) statusInfo='C++ 服务不可用；当前显示的是 cpp.env 中配置的模型';
+    else if(currentCpp.config_matches_runtime===false && healthOk && hasConfig) statusInfo='注意：cpp.env 配置与运行中 C++ 模型不一致，建议重启 C++ 服务';
+    else if(!running) statusInfo='实时流未启动；点击“启动 C++ 预览”只看画面，或点击“启动 C++ 检测”开始推理';
     else if(rawMessage && /not produced result|starting|no result/i.test(rawMessage)) statusInfo='取流已启动，正在等待首帧推理结果';
     else if(rawMessage) statusInfo=rawMessage;
     else statusInfo='无';
@@ -1020,18 +1032,20 @@ async function refreshCppInferenceStatus(showMessage=false){
   if(!cppStatusCard || cppStatusBusy) return;
   cppStatusBusy=true;
   try{
-    const [healthRes,statusRes,latestRes]=await Promise.allSettled([
+    const [currentRes,healthRes,statusRes,latestRes]=await Promise.allSettled([
+      apiGet('/api/cpp/model/current'),
       apiGet('/api/cpp/health'),
       apiGet('/api/cpp/stream/status'),
       apiGet('/api/cpp/stream/latest_result')
     ]);
+    const current=currentRes.status==='fulfilled' ? currentRes.value : {};
     const health=healthRes.status==='fulfilled' ? healthRes.value : {};
     const status=statusRes.status==='fulfilled' ? statusRes.value : {};
     const latest=latestRes.status==='fulfilled' ? latestRes.value : {};
-    if(healthRes.status==='rejected' && statusRes.status==='rejected'){
-      throw new Error(healthRes.reason?.message || statusRes.reason?.message || 'C++ 服务不可用');
+    if(healthRes.status==='rejected' && statusRes.status==='rejected' && currentRes.status==='rejected'){
+      throw new Error(healthRes.reason?.message || statusRes.reason?.message || currentRes.reason?.message || 'C++ 服务不可用');
     }
-    renderCppStatus({health,status,latest});
+    renderCppStatus({health,status,latest,current});
     if(showMessage) showToast('C++ 状态已刷新');
   }catch(err){
     renderCppStatusUnavailable(err.message || String(err));
@@ -1046,13 +1060,13 @@ async function startCppStreamMode(mode='detect', showOkToast=true){
   setCppStreamActionBusy(true);
   try{
     await apiPost(`/api/cpp/stream/start?mode=${encodeURIComponent(normalized)}`,{});
-    if(showOkToast) showToast(normalized==='preview' ? 'C++ 预览已启动' : 'C++ 实时检测已启动');
+    if(showOkToast) showToast(normalized==='preview' ? 'C++ 预览已启动' : 'C++ 实时推理已启动');
     await sleepMs(normalized==='preview' ? 500 : 900);
     await refreshCppInferenceStatus(false);
     return true;
   }catch(err){
     renderCppStatusUnavailable(err.message || String(err));
-    if(showOkToast) showToast(err.message || (normalized==='preview' ? '启动 C++ 预览失败' : '启动 C++ 检测失败'));
+    if(showOkToast) showToast(err.message || (normalized==='preview' ? '启动 C++ 预览失败' : '启动 C++ 推理失败')); 
     return false;
   }finally{
     setCppStreamActionBusy(false);
@@ -1111,24 +1125,249 @@ function clearCppPreviewCanvas(message='暂无预览图像'){
     cppPreviewEmpty.classList.add('active');
   }
 }
+function getCppPreviewTask(latest={}){
+  return normalizeTaskName(latest.task || latest.model_task || latest.runtime_task || '');
+}
+function getCppPreviewPredictions(latest={}){
+  return Array.isArray(latest.predictions) ? latest.predictions : [];
+}
+function getCppPreviewClassificationItems(latest={}){
+  if(Array.isArray(latest.topk) && latest.topk.length) return latest.topk;
+  if(latest.prediction && typeof latest.prediction==='object') return [latest.prediction];
+  return [];
+}
+function getCppPreviewResultCount(latest={}){
+  const task=getCppPreviewTask(latest);
+  if(task==='classification'){
+    return getCppPreviewClassificationItems(latest).length || (latest.prediction ? 1 : 0);
+  }
+  const preds=getCppPreviewPredictions(latest);
+  return preds.length || Number(latest.count || 0) || 0;
+}
+function scalePointToCanvas(point, sx, sy, canvasW, canvasH){
+  if(!Array.isArray(point) || point.length<2) return null;
+  const x=Number(point[0]);
+  const y=Number(point[1]);
+  if(!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return [
+    Math.max(0, Math.min(canvasW, x*sx)),
+    Math.max(0, Math.min(canvasH, y*sy)),
+  ];
+}
+function scalePolygonToCanvas(points, sx, sy, canvasW, canvasH, minPoints=3){
+  if(!Array.isArray(points) || points.length<minPoints) return null;
+  const out=[];
+  for(const p of points){
+    const pt=scalePointToCanvas(p, sx, sy, canvasW, canvasH);
+    if(!pt) return null;
+    out.push(pt);
+  }
+  return out.length>=minPoints ? out : null;
+}
+function getCppPreviewMaskSegments(pred, sx, sy, canvasW, canvasH){
+  const mask=pred && pred.mask && typeof pred.mask==='object' ? pred.mask : null;
+  if(!mask) return [];
+  const segments=[];
+  if(Array.isArray(mask.segments)){
+    mask.segments.forEach((seg)=>{
+      const scaled=scalePolygonToCanvas(seg, sx, sy, canvasW, canvasH, 3);
+      if(scaled) segments.push(scaled);
+    });
+  }
+  if(!segments.length && Array.isArray(mask.polygon)){
+    const scaled=scalePolygonToCanvas(mask.polygon, sx, sy, canvasW, canvasH, 3);
+    if(scaled) segments.push(scaled);
+  }
+  return segments;
+}
+function getCppPreviewObbPoints(pred, sx, sy, canvasW, canvasH){
+  const points=pred && pred.obb && Array.isArray(pred.obb.points) ? pred.obb.points : null;
+  return scalePolygonToCanvas(points, sx, sy, canvasW, canvasH, 4);
+}
+function getCppPreviewBox(pred, sx, sy, canvasW, canvasH){
+  const box=Array.isArray(pred && pred.bbox) ? pred.bbox.map(Number) : null;
+  if(!box || box.length<4 || box.some((v)=>!Number.isFinite(v))) return null;
+  const x1=Math.max(0, Math.min(canvasW, box[0]*sx));
+  const y1=Math.max(0, Math.min(canvasH, box[1]*sy));
+  const x2=Math.max(0, Math.min(canvasW, box[2]*sx));
+  const y2=Math.max(0, Math.min(canvasH, box[3]*sy));
+  return [x1,y1,x2,y2];
+}
+function getCppPreviewRoiObject(pred, latest={}){
+  if(pred && pred.roi && typeof pred.roi==='object') return pred.roi;
+  if(latest && latest.roi && typeof latest.roi==='object') return latest.roi;
+  return null;
+}
+function getCppPreviewRoiBox(pred, latest, sx, sy, canvasW, canvasH){
+  const roi=getCppPreviewRoiObject(pred, latest);
+  const box=roi && Array.isArray(roi.bbox) ? roi.bbox.map(Number) : null;
+  if(!box || box.length<4 || box.some((v)=>!Number.isFinite(v))) return null;
+  const x1=Math.max(0, Math.min(canvasW, box[0]*sx));
+  const y1=Math.max(0, Math.min(canvasH, box[1]*sy));
+  const x2=Math.max(0, Math.min(canvasW, box[2]*sx));
+  const y2=Math.max(0, Math.min(canvasH, box[3]*sy));
+  if((x2-x1)<2 || (y2-y1)<2) return null;
+  return [x1,y1,x2,y2];
+}
+function drawCppPreviewRoiBox(ctx, roiBox, canvasW, canvasH){
+  if(!roiBox || roiBox.length<4) return;
+  const [x1,y1,x2,y2]=roiBox;
+  const w=Math.max(0,x2-x1);
+  const h=Math.max(0,y2-y1);
+  if(w<2 || h<2) return;
+  ctx.save();
+  const lineW=Math.max(3, Math.round(canvasW/360));
+  ctx.lineWidth=lineW;
+  ctx.setLineDash([Math.max(8,lineW*3), Math.max(5,lineW*2)]);
+  ctx.strokeStyle='#f97316';
+  ctx.fillStyle='rgba(249,115,22,.12)';
+  ctx.fillRect(x1,y1,w,h);
+  ctx.strokeRect(x1,y1,w,h);
+  ctx.setLineDash([]);
+
+  const label='Final ROI';
+  const pad=Math.max(5, Math.round(canvasW/220));
+  const fontSize=Math.max(14, Math.round(canvasW/66));
+  ctx.font=`800 ${fontSize}px sans-serif`;
+  const textW=ctx.measureText(label).width;
+  const labelH=Math.max(20, fontSize+pad);
+  const lx=Math.max(0, Math.min(canvasW-(textW+pad*2), x1));
+  const ly=Math.max(0, Math.min(canvasH-labelH, y2+3));
+  ctx.fillStyle='rgba(249,115,22,.96)';
+  ctx.fillRect(lx,ly,textW+pad*2,labelH);
+  ctx.fillStyle='#fff';
+  ctx.fillText(label,lx+pad,ly+Math.max(3,pad/2));
+  ctx.restore();
+}
+function drawCppPreviewPolygon(ctx, points){
+  if(!points || points.length<3) return;
+  ctx.beginPath();
+  ctx.moveTo(points[0][0], points[0][1]);
+  for(let i=1;i<points.length;i++) ctx.lineTo(points[i][0], points[i][1]);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+}
+function getCppPreviewPolygonAnchor(points, fallback=[0,0]){
+  if(Array.isArray(points) && points.length){
+    let best=null;
+    points.forEach((p)=>{
+      const x=Number(p && p[0]);
+      const y=Number(p && p[1]);
+      if(!Number.isFinite(x) || !Number.isFinite(y)) return;
+      if(!best || y<best[1] || (y===best[1] && x<best[0])) best=[x,y];
+    });
+    if(best) return best;
+  }
+  return fallback;
+}
+function drawCppPreviewLabel(ctx, label, anchor, canvasW){
+  const safeLabel=String(label || '').trim();
+  if(!safeLabel) return;
+  const pad=Math.max(6, Math.round(canvasW/180));
+  const textW=ctx.measureText(safeLabel).width;
+  const labelH=Math.max(22, Math.round(canvasW/55));
+  const ax=Number(anchor && anchor[0]);
+  const ay=Number(anchor && anchor[1]);
+  const lx=Math.max(0, Math.min(canvasW-(textW+pad*2), Number.isFinite(ax) ? ax : 0));
+  const ly=Math.max(0, (Number.isFinite(ay) ? ay : 0)-labelH-2);
+  ctx.fillStyle='rgba(15,23,42,.88)';
+  ctx.fillRect(lx,ly,Math.min(textW+pad*2,canvasW-lx),labelH);
+  ctx.fillStyle='#fff';
+  ctx.fillText(safeLabel,lx+pad,ly+labelH-7);
+}
+function drawCppClassificationOverlay(ctx, latest, canvasW){
+  const items=getCppPreviewClassificationItems(latest);
+  const top=items[0] || latest.prediction || null;
+  if(!top) return;
+  const cls=String(top.class_name ?? top.class ?? top.label ?? top.class_id ?? '分类结果');
+  const conf=Number(top.confidence ?? top.score);
+  const title=Number.isFinite(conf) ? `${cls} ${(conf*100).toFixed(1)}%` : cls;
+  const sub=[`任务：${taskDisplayName('classification')}`];
+  if(Number.isFinite(Number(latest.latency_ms))) sub.push(`耗时：${Number(latest.latency_ms).toFixed(1)} ms`);
+  if(Number.isFinite(Number(top.logit))) sub.push(`logit：${Number(top.logit).toFixed(3)}`);
+
+  ctx.save();
+  const pad=Math.max(14, Math.round(canvasW/80));
+  const titleFont=Math.max(22, Math.round(canvasW/42));
+  const subFont=Math.max(14, Math.round(canvasW/72));
+  ctx.font=`900 ${titleFont}px sans-serif`;
+  const titleW=ctx.measureText(title).width;
+  ctx.font=`800 ${subFont}px sans-serif`;
+  const subW=Math.max(...sub.map((x)=>ctx.measureText(x).width), 0);
+  const boxW=Math.min(canvasW-pad*2, Math.max(titleW, subW)+pad*2);
+  const boxH=pad*2 + titleFont + sub.length*(subFont+6);
+  const x=pad;
+  const y=pad;
+  ctx.fillStyle='rgba(15,23,42,.86)';
+  ctx.fillRect(x,y,boxW,boxH);
+  ctx.strokeStyle='rgba(255,255,255,.35)';
+  ctx.lineWidth=1;
+  ctx.strokeRect(x,y,boxW,boxH);
+  ctx.font=`900 ${titleFont}px sans-serif`;
+  ctx.fillStyle='#fff';
+  ctx.fillText(title,x+pad,y+pad);
+  ctx.font=`800 ${subFont}px sans-serif`;
+  ctx.fillStyle='rgba(226,232,240,.96)';
+  sub.forEach((line,idx)=>ctx.fillText(line,x+pad,y+pad+titleFont+8+idx*(subFont+6)));
+  ctx.restore();
+}
+function formatCppPreviewSideDetail(task, p){
+  const t=normalizeTaskName(task);
+  if(t==='segmentation'){
+    const area=Number(p && p.mask && p.mask.area);
+    return Number.isFinite(area) ? `mask ${Math.round(area)} px` : 'seg';
+  }
+  if(t==='obb_detection'){
+    const angle=Number(p && p.obb && p.obb.angle);
+    return Number.isFinite(angle) ? `angle ${angle.toFixed(3)}` : 'obb';
+  }
+  if(t==='roi_classification'){
+    const roi=getCppPreviewRoiObject(p, {});
+    const roiBox=roi && Array.isArray(roi.bbox) ? roi.bbox : null;
+    const mode=roi ? formatRoiMode(roi) : 'roi';
+    return roiBox ? `${mode} · ROI ${formatBBox(roiBox)}` : mode;
+  }
+  const conf=Number(p && (p.confidence ?? p.score));
+  return Number.isFinite(conf) ? `${(conf*100).toFixed(1)}%` : '--';
+}
 function renderCppPreviewSide(latest={}, imageInfo={}){
-  const preds=Array.isArray(latest.predictions) ? latest.predictions : [];
-  if(cppPreviewCount) cppPreviewCount.textContent=String(preds.length || latest.count || 0);
+  const task=getCppPreviewTask(latest);
+  const isCls=task==='classification';
+  const preds=isCls ? getCppPreviewClassificationItems(latest) : getCppPreviewPredictions(latest);
+  if(cppPreviewCount) cppPreviewCount.textContent=String(getCppPreviewResultCount(latest));
   if(cppPreviewImageSize){
     const w=latest.image_width || imageInfo.width;
     const h=latest.image_height || imageInfo.height;
-    cppPreviewImageSize.textContent=(w && h) ? `${w}×${h}` : '--';
+    const taskText=task ? taskDisplayName(task) : '';
+    const sizeText=(w && h) ? `${w}×${h}` : '--';
+    cppPreviewImageSize.textContent=taskText ? `${taskText} · ${sizeText}` : sizeText;
   }
   if(cppPreviewUpdatedAt) cppPreviewUpdatedAt.textContent=new Date().toLocaleTimeString();
   if(cppPreviewPredictions){
     if(!preds.length){
-      cppPreviewPredictions.textContent='暂无检测目标';
+      cppPreviewPredictions.textContent=isCls ? '暂无分类结果' : '暂无目标结果';
     }else{
-      cppPreviewPredictions.innerHTML=preds.slice(0,8).map((p,idx)=>{
-        const name=p.class_name || p.class_id || 'target';
-        const conf=Number(p.confidence);
-        const confText=Number.isFinite(conf) ? `${(conf*100).toFixed(1)}%` : '--';
-        return `<div class="cpp-preview-pred"><b>${idx+1}. ${escapeHtml(String(name))}</b><span>${confText}</span></div>`;
+      cppPreviewPredictions.innerHTML=preds.slice(0,10).map((p,idx)=>{
+        const name=p.class_name ?? p.class ?? p.label ?? p.class_id ?? 'target';
+        const conf=Number(p.confidence ?? p.score);
+        const mainText=Number.isFinite(conf) ? `${escapeHtml(String(name))} ${(conf*100).toFixed(1)}%` : escapeHtml(String(name));
+        const detail=isCls
+          ? (Number.isFinite(Number(p.logit)) ? `logit ${Number(p.logit).toFixed(3)}` : `Top ${idx+1}`)
+          : formatCppPreviewSideDetail(task,p);
+        let extra='';
+        if(task==='roi_classification'){
+          const det=p.detector || {};
+          const clsPred=p.classifier || {};
+          const roi=getCppPreviewRoiObject(p, latest);
+          const detConf=Number(det.confidence);
+          const clsConf=Number(clsPred.confidence);
+          const detText=det.class_name ? `检测 ${det.class_name}${Number.isFinite(detConf) ? ' '+(detConf*100).toFixed(1)+'%' : ''}` : '';
+          const clsText=clsPred.class_name ? `分类 ${clsPred.class_name}${Number.isFinite(clsConf) ? ' '+(clsConf*100).toFixed(1)+'%' : ''}` : '';
+          const relText=roi && roi.relative_box ? `比例 ${formatRelativeBox(roi.relative_box)}` : '';
+          extra=[detText, clsText, relText].filter(Boolean).map((x)=>`<span>${escapeHtml(x)}</span>`).join('');
+        }
+        return `<div class="cpp-preview-pred"><b>${idx+1}. ${mainText}</b><span>${escapeHtml(detail)}</span>${extra}</div>`;
       }).join('');
     }
   }
@@ -1151,39 +1390,71 @@ function drawCppPreviewFrame(img, latest={}){
   const srcH=Number(latest.image_height) || naturalH;
   const sx=canvasW / Math.max(1,srcW);
   const sy=canvasH / Math.max(1,srcH);
-  const preds=Array.isArray(latest.predictions) ? latest.predictions : [];
+  const task=getCppPreviewTask(latest);
+  const preds=getCppPreviewPredictions(latest);
+
   ctx.lineWidth=Math.max(2, Math.round(canvasW / 480));
   ctx.font=`${Math.max(14, Math.round(canvasW/70))}px sans-serif`;
-  preds.forEach((p,idx)=>{
-    const box=Array.isArray(p.bbox) ? p.bbox.map(Number) : null;
-    if(!box || box.length<4 || box.some(v=>!Number.isFinite(v))) return;
-    const x1=box[0]*sx;
-    const y1=box[1]*sy;
-    const x2=box[2]*sx;
-    const y2=box[3]*sy;
-    const w=Math.max(1,x2-x1);
-    const h=Math.max(1,y2-y1);
-    ctx.strokeStyle='#22c55e';
-    ctx.fillStyle='rgba(34,197,94,.14)';
-    ctx.strokeRect(x1,y1,w,h);
-    ctx.fillRect(x1,y1,w,h);
-    const conf=Number(p.confidence);
-    const label=`${p.class_name || p.class_id || 'target'} ${Number.isFinite(conf) ? (conf*100).toFixed(1)+'%' : ''}`.trim();
-    const textW=ctx.measureText(label).width;
-    const labelH=Math.max(22, Math.round(canvasW/55));
-    const ly=Math.max(0,y1-labelH-2);
-    ctx.fillStyle='rgba(15,23,42,.88)';
-    ctx.fillRect(x1,ly,Math.min(textW+14,canvasW-x1),labelH);
-    ctx.fillStyle='#fff';
-    ctx.fillText(label,x1+7,ly+labelH-7);
-    const center=getPredictionCenter(p, box);
-    if(center){
-      ctx.beginPath();
-      ctx.arc(center[0]*sx, center[1]*sy, Math.max(3,ctx.lineWidth+1), 0, Math.PI*2);
-      ctx.fillStyle='#ef4444';
-      ctx.fill();
-    }
-  });
+  ctx.textBaseline='top';
+
+  if(task==='classification'){
+    drawCppClassificationOverlay(ctx, latest, canvasW);
+  }else{
+    preds.forEach((p)=>{
+      const maskSegments=getCppPreviewMaskSegments(p, sx, sy, canvasW, canvasH);
+      const obbPoints=getCppPreviewObbPoints(p, sx, sy, canvasW, canvasH);
+      const box=getCppPreviewBox(p, sx, sy, canvasW, canvasH);
+      let labelAnchor=null;
+      let hasShape=false;
+
+      if(maskSegments.length){
+        ctx.strokeStyle='#f97316';
+        ctx.fillStyle=`rgba(249,115,22,${getMaskOverlayAlpha()})`;
+        ctx.lineWidth=Math.max(2, Math.round(canvasW/420));
+        drawMaskSegmentsOverlay(ctx, maskSegments);
+        labelAnchor=getCppPreviewPolygonAnchor(maskSegments[0], box ? [box[0],box[1]] : [0,0]);
+        hasShape=true;
+      }else if(obbPoints){
+        ctx.strokeStyle='#06b6d4';
+        ctx.fillStyle='rgba(6,182,212,.16)';
+        drawCppPreviewPolygon(ctx, obbPoints);
+        labelAnchor=getCppPreviewPolygonAnchor(obbPoints, box ? [box[0],box[1]] : [0,0]);
+        hasShape=true;
+      }else if(box){
+        const [x1,y1,x2,y2]=box;
+        const w=Math.max(1,x2-x1);
+        const h=Math.max(1,y2-y1);
+        if(w>=2 && h>=2){
+          ctx.strokeStyle='#22c55e';
+          ctx.fillStyle='rgba(34,197,94,.14)';
+          ctx.strokeRect(x1,y1,w,h);
+          ctx.fillRect(x1,y1,w,h);
+          labelAnchor=[x1,y1];
+          hasShape=true;
+        }
+      }
+      if(!hasShape) return;
+
+      // ROI 双模型：绿色框表示 stage1 detector bbox；橙色虚线框表示最终送入分类模型的 Final ROI。
+      if(task==='roi_classification'){
+        const roiBox=getCppPreviewRoiBox(p, latest, sx, sy, canvasW, canvasH);
+        if(roiBox) drawCppPreviewRoiBox(ctx, roiBox, canvasW, canvasH);
+      }
+
+      const conf=Number(p.confidence ?? p.score);
+      const label=`${p.class_name || p.class_id || 'target'} ${Number.isFinite(conf) ? (conf*100).toFixed(1)+'%' : ''}`.trim();
+      drawCppPreviewLabel(ctx, label, labelAnchor, canvasW);
+
+      const rawCenter=getPredictionCenter(p, Array.isArray(p.bbox) ? p.bbox.map(Number) : null);
+      if(shouldShowDetectionCenter() && rawCenter && Number.isFinite(rawCenter[0]) && Number.isFinite(rawCenter[1])){
+        ctx.beginPath();
+        ctx.arc(rawCenter[0]*sx, rawCenter[1]*sy, Math.max(3,ctx.lineWidth+1), 0, Math.PI*2);
+        ctx.fillStyle='#ef4444';
+        ctx.fill();
+      }
+    });
+  }
+
   if(cppPreviewEmpty) cppPreviewEmpty.classList.remove('active');
   renderCppPreviewSide(latest,{width:naturalW,height:naturalH});
 }
@@ -1229,8 +1500,9 @@ async function refreshCppPreviewFrame(showToastOnSuccess=false){
     if(cppPreviewLastObjectUrl) URL.revokeObjectURL(cppPreviewLastObjectUrl);
     cppPreviewLastObjectUrl=url;
     drawCppPreviewFrame(img,latest || {});
-    const count=Array.isArray(latest.predictions) ? latest.predictions.length : (latest.count || 0);
-    setCppPreviewStatus(`已刷新：${count} 个目标，${new Date().toLocaleTimeString()}`);
+    const count=getCppPreviewResultCount(latest || {});
+    const taskLabel=latest && latest.task ? taskDisplayName(latest.task) : '预览';
+    setCppPreviewStatus(`已刷新：${taskLabel} · ${count} 个结果，${new Date().toLocaleTimeString()}`);
     if(showToastOnSuccess) showToast('C++ 预览已刷新');
   }catch(err){
     clearCppPreviewCanvas(err.message || '预览刷新失败');
@@ -1291,10 +1563,12 @@ function updateSelectedModelUI(){
     const taskText=item.task_label || item.task || '未知任务';
     const clsText=item.num_classes ? ` · ${item.num_classes}类` : '';
     const pipelineText=item.is_pipeline ? ' · 双模型推理' : '';
-    selectedModelNameEl.textContent=`${selectedModel}（${taskText}${clsText}${pipelineText}）`;
+    const cppText=item.cpp_runtime_loaded ? ' · C++当前加载' : (item.cpp_configured ? ' · cpp.env当前配置' : '');
+    selectedModelNameEl.textContent=`${selectedModel}（${taskText}${clsText}${pipelineText}${cppText}）`;
   }else{
     selectedModelNameEl.textContent=`${selectedModel}（配置缺失）`;
   }
+  updateCppModelSwitchButton();
 }
 function setResultIdle(message='等待检测'){
   if(!classificationResult) return;
@@ -1308,6 +1582,50 @@ function setResultIdle(message='等待检测'){
 }
 function getSelectedModelItem(){
   return modelItems.find((item)=>item.name===selectedModel) || null;
+}
+function updateCppModelSwitchButton(){
+  if(!switchCppModelBtn) return;
+  const item=getSelectedModelItem();
+  if(cppModelSwitchBusy){
+    switchCppModelBtn.disabled=true;
+    switchCppModelBtn.textContent='正在切换 C++ 模型...';
+    switchCppModelBtn.title='正在写入 cpp.env、重启 C++ 推理服务并校验 /health';
+    return;
+  }
+  switchCppModelBtn.textContent='切换为 C++ 当前模型';
+  if(modelListSource!=='cpp'){
+    switchCppModelBtn.disabled=true;
+    switchCppModelBtn.title='当前模型列表来自旧版 /api/models，请先点击刷新模型以读取 /api/cpp/models';
+    return;
+  }
+  if(!selectedModel || !item){
+    switchCppModelBtn.disabled=true;
+    switchCppModelBtn.title='请先选择一个模型';
+    return;
+  }
+  if(item.has_meta===false){
+    switchCppModelBtn.disabled=true;
+    switchCppModelBtn.title='该模型缺少同名 yaml，不能切换到 C++ 服务';
+    return;
+  }
+  if(item.is_pipeline && item.task!=='roi_classification'){
+    switchCppModelBtn.disabled=true;
+    switchCppModelBtn.title='当前仅支持 roi_classification 类型的双模型 pipeline 切换';
+    return;
+  }
+  if(item.cpp_runtime_loaded){
+    switchCppModelBtn.disabled=true;
+    switchCppModelBtn.textContent='已是 C++ 当前模型';
+    switchCppModelBtn.title='该模型已经是 C++ 服务当前加载模型';
+    return;
+  }
+  if(item.cpp_switch_ready===false){
+    switchCppModelBtn.disabled=true;
+    switchCppModelBtn.title=item.cpp_note || '当前 C++ 单模型切换接口暂不支持该任务类型';
+    return;
+  }
+  switchCppModelBtn.disabled=false;
+  switchCppModelBtn.title='点击后直接写入 cpp.env，并重启 C++ 推理服务';
 }
 function renderModelList(){
   const modelList=document.getElementById('modelList');
@@ -1325,10 +1643,14 @@ function renderModelList(){
     const classText=item.has_meta && item.num_classes ? `${item.num_classes}类` : '';
     const customerText=item.customer_id ? item.customer_id : '';
     const pipelineText=item.is_pipeline ? '双模型推理' : '';
-    const sub=[item.label || taskText, pipelineText, classText, customerText, sizeText].filter(Boolean).join(' · ');
+    const cppLoadedText=item.cpp_runtime_loaded ? 'C++当前加载' : '';
+    const cppConfiguredText=(!item.cpp_runtime_loaded && item.cpp_configured) ? 'cpp.env当前配置' : '';
+    const cppReadyText=(modelListSource==='cpp' && item.cpp_switch_ready===false && item.is_pipeline) ? 'C++双模型待接入' : (item.is_pipeline && item.cpp_switch_ready ? 'C++双模型可切换' : '');
+    const cppUnsupportedText=(modelListSource==='cpp' && item.cpp_supported===false) ? 'C++暂未识别' : '';
+    const sub=[item.label || taskText, pipelineText, cppLoadedText, cppConfiguredText, cppReadyText, cppUnsupportedText, classText, customerText, sizeText].filter(Boolean).join(' · ');
     const disabled=item.has_meta===false ? ' data-missing-meta="1"' : '';
     const extraClass=item.is_pipeline ? ' pipeline-model-card' : '';
-    return `<button class="model-card ${active}${extraClass}" data-model-name="${escapeHtml(item.name)}" title="${escapeHtml(item.pipeline_config || item.meta_path || item.path || item.name)}"${disabled}><b>${escapeHtml(item.name)}</b><span>${escapeHtml(sub)}</span></button>`;
+    return `<button class="model-card ${active}${extraClass}" data-model-name="${escapeHtml(item.name)}" title="${escapeHtml(item.cpp_note || item.pipeline_config || item.meta_path || item.path || item.name)}"${disabled}><b>${escapeHtml(item.name)}</b><span>${escapeHtml(sub)}</span></button>`;
   }).join('');
   modelList.querySelectorAll('.model-card').forEach((btn)=>{
     btn.addEventListener('click',()=>{
@@ -1348,21 +1670,81 @@ function renderModelList(){
   updateSelectedModelUI();
 }
 function pickDefaultModel(){
+  const cppRuntimeLoaded=modelItems.find((item)=>item.cpp_runtime_loaded && item.has_meta!==false);
+  const cppConfigured=modelItems.find((item)=>item.cpp_configured && item.has_meta!==false);
   const usable=modelItems.find((item)=>item.has_meta!==false);
-  selectedModel=usable ? usable.name : (modelItems[0] ? modelItems[0].name : '');
+  selectedModel=cppRuntimeLoaded ? cppRuntimeLoaded.name : (cppConfigured ? cppConfigured.name : (usable ? usable.name : (modelItems[0] ? modelItems[0].name : '')));
   updateSelectedModelUI();
+}
+async function fetchModelList(preferCpp=true, refresh=false){
+  if(preferCpp){
+    try{
+      const data=refresh ? await apiPost('/api/cpp/refresh_models') : await apiGet('/api/cpp/models');
+      modelListSource='cpp';
+      cppCurrentModel=data.current_cpp || null;
+      return data;
+    }catch(_err){
+      // C++ proxy disabled or C++ model endpoint unavailable: keep legacy Python model list usable.
+    }
+  }
+  const data=refresh ? await apiPost('/api/refresh_models') : await apiGet('/api/models');
+  modelListSource='legacy';
+  cppCurrentModel=null;
+  return data;
 }
 async function loadModels(){
   const modelList=document.getElementById('modelList');
   if(!modelList) return;
   modelList.innerHTML='<div class="empty-models">正在读取模型...</div>';
   try{
-    const data=await apiGet('/api/models');
+    const data=await fetchModelList(true, false);
     modelItems=data.items || [];
     pickDefaultModel();
     renderModelList();
   }catch(err){
     modelList.innerHTML=`<div class="empty-models">模型读取失败<br><small>${escapeHtml(err.message || err)}</small></div>`;
+    updateCppModelSwitchButton();
+  }
+}
+async function switchSelectedCppModel(){
+  if(cppModelSwitchBusy) return;
+  const item=getSelectedModelItem();
+  if(!selectedModel || !item){showToast('请先选择一个模型');updateCppModelSwitchButton();return;}
+  if(modelListSource!=='cpp'){showToast('当前模型列表不是 C++ 模型列表，请先刷新模型');updateCppModelSwitchButton();return;}
+  if(item.has_meta===false){showToast('该模型缺少同名 yaml，不能切换');updateCppModelSwitchButton();return;}
+  if(item.is_pipeline && item.task!=='roi_classification'){
+    showToast('当前仅支持 roi_classification 类型的双模型 pipeline 切换');
+    updateCppModelSwitchButton();
+    return;
+  }
+  if(item.cpp_runtime_loaded){showToast('该模型已经是 C++ 当前加载模型');updateCppModelSwitchButton();return;}
+  if(item.cpp_switch_ready===false){showToast(item.cpp_note || '当前 C++ 单模型切换接口暂不支持该任务类型');updateCppModelSwitchButton();return;}
+
+  stopRealtimeClassification();
+  cppModelSwitchBusy=true;
+  updateCppModelSwitchButton();
+  setResultIdle('正在切换 C++ 模型');
+  showToast(`正在切换 C++ 模型：${selectedModel}`);
+  try{
+    const data=await apiPost('/api/cpp/model/switch',{
+      model_name:item.name || selectedModel,
+      restart:true,
+      stop_stream:true
+    });
+    const selected=(data.selected_model && data.selected_model.name) || item.name || selectedModel;
+    const refreshed=await fetchModelList(true, false);
+    modelItems=refreshed.items || [];
+    selectedModel=selected;
+    renderModelList();
+    await refreshCppInferenceStatus(false);
+    setResultIdle('等待检测');
+    showToast(data.message || 'C++ 模型切换成功');
+  }catch(err){
+    setResultIdle('C++ 模型切换失败');
+    showToast(err.message || 'C++ 模型切换失败');
+  }finally{
+    cppModelSwitchBusy=false;
+    updateCppModelSwitchButton();
   }
 }
 
@@ -1946,7 +2328,7 @@ async function captureAndRunClassification(){
 document.getElementById('refreshModels').addEventListener('click',async()=>{
   stopRealtimeClassification();
   try{
-    const data=await apiPost('/api/refresh_models');
+    const data=await fetchModelList(true, true);
     modelItems=data.items || [];
     pickDefaultModel();
     renderModelList();
@@ -1954,6 +2336,7 @@ document.getElementById('refreshModels').addEventListener('click',async()=>{
     showToast(data.message || `已刷新模型列表，共找到 ${modelItems.length} 个模型`);
   }catch(err){showToast(err.message || '刷新模型失败')}
 });
+if(switchCppModelBtn){switchCppModelBtn.addEventListener('click',switchSelectedCppModel);}
 document.getElementById('refreshValidationImages').addEventListener('click',async()=>{selectedImage=null;await loadValidationImages();showToast('已刷新测试图片')});
 document.getElementById('runSingleImageInfer').addEventListener('click',runSingleImageClassification);
 document.getElementById('captureAndInfer').addEventListener('click',captureAndRunClassification);

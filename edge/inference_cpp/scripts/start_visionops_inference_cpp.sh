@@ -18,12 +18,14 @@ fi
 : "${VISIONOPS_CPP_MODEL_PATH:=/opt/visionops/models/rk3588-001_CUST-000_det_20260427_105932.rknn}"
 : "${VISIONOPS_CPP_CLASS_NAMES_FILE:=/opt/visionops/models/rk3588-001_CUST-000_det_20260427_105932.yaml}"
 : "${VISIONOPS_CPP_TASK:=detection}"
+: "${VISIONOPS_CPP_PIPELINE_CONFIG:=}"
 : "${VISIONOPS_CPP_PORT:=18080}"
 : "${VISIONOPS_CPP_NPU_CORE:=auto}"
 : "${VISIONOPS_CPP_NUM_CLASSES:=80}"
 : "${VISIONOPS_CPP_INPUT_SIZE:=640,640}"
 : "${VISIONOPS_CPP_CONF_THRESHOLD:=0.25}"
 : "${VISIONOPS_CPP_NMS_THRESHOLD:=0.45}"
+: "${VISIONOPS_CPP_MASK_THRESHOLD:=0.5}"
 : "${VISIONOPS_CPP_TOPK:=5}"
 : "${VISIONOPS_CPP_MAX_DET:=100}"
 : "${VISIONOPS_CPP_OUTPUT_MODE:=float}"
@@ -62,6 +64,7 @@ cmd=(
   --input-size "$VISIONOPS_CPP_INPUT_SIZE"
   --conf-threshold "$VISIONOPS_CPP_CONF_THRESHOLD"
   --nms-threshold "$VISIONOPS_CPP_NMS_THRESHOLD"
+  --mask-threshold "$VISIONOPS_CPP_MASK_THRESHOLD"
   --topk "$VISIONOPS_CPP_TOPK"
   --max-det "$VISIONOPS_CPP_MAX_DET"
   --output-mode "$VISIONOPS_CPP_OUTPUT_MODE"
@@ -86,6 +89,10 @@ cmd=(
   --camera-fps "$VISIONOPS_CPP_CAMERA_FPS"
   --camera-buffer-size "$VISIONOPS_CPP_CAMERA_BUFFER_SIZE"
 )
+
+if [[ "$VISIONOPS_CPP_TASK" == "roi_classification" && -n "${VISIONOPS_CPP_PIPELINE_CONFIG:-}" ]]; then
+  cmd+=(--pipeline-config "$VISIONOPS_CPP_PIPELINE_CONFIG")
+fi
 
 if [[ -n "${VISIONOPS_CPP_CAMERA_FOURCC:-}" ]]; then
   cmd+=(--camera-fourcc "$VISIONOPS_CPP_CAMERA_FOURCC")

@@ -21,10 +21,13 @@ CPP_PORT="${CPP_PORT:-18080}"
 MODEL_PATH="${MODEL_PATH:-/opt/visionops/models/rk3588-001_COCO128_det_20260511_155057.rknn}"
 CLASS_NAMES_FILE="${CLASS_NAMES_FILE:-/opt/visionops/models/rk3588-001_COCO128_det_20260511_155057.yaml}"
 TASK="${TASK:-detection}"
+PIPELINE_CONFIG="${PIPELINE_CONFIG:-}"
 INPUT_SIZE="${INPUT_SIZE:-640,640}"
 NUM_CLASSES="${NUM_CLASSES:-80}"
 CONF_THRESHOLD="${CONF_THRESHOLD:-0.25}"
 NMS_THRESHOLD="${NMS_THRESHOLD:-0.45}"
+MASK_THRESHOLD="${MASK_THRESHOLD:-0.5}"
+TOPK="${TOPK:-5}"
 NPU_CORE="${NPU_CORE:-auto}"
 OUTPUT_MODE="${OUTPUT_MODE:-float}"
 PREPROCESS_BACKEND="${PREPROCESS_BACKEND:-auto}"
@@ -84,9 +87,12 @@ Options:
   --cpp-port PORT             C++ service HTTP port, default: ${CPP_PORT}
   --model PATH                Remote RKNN path, default: ${MODEL_PATH}
   --class-names-file PATH     Remote class_names yaml, default: ${CLASS_NAMES_FILE}
-  --task TASK                 detection/classification/etc., default: ${TASK}
+  --task TASK                 detection/classification/obb_detection/segmentation/roi_classification, default: ${TASK}
+  --pipeline-config PATH       ROI classification pipeline.yaml path, default: ${PIPELINE_CONFIG}
   --input-size H,W            default: ${INPUT_SIZE}
   --num-classes N             default: 80 for current RKNN test model
+  --mask-threshold X           Segmentation mask threshold, default: ${MASK_THRESHOLD}
+  --topk N                    Classification top-k, default: ${TOPK}
   --preprocess-backend MODE    cpu|rga|auto, default: ${PREPROCESS_BACKEND}
   --rga-mode MODE              off|resize_color|resize_only, default: ${RGA_MODE}
   --camera-source URL_OR_IDX  Optional RTSP URL, USB camera index, or /dev/videoX
@@ -124,8 +130,11 @@ while [[ $# -gt 0 ]]; do
     --model) MODEL_PATH="$2"; shift 2 ;;
     --class-names-file) CLASS_NAMES_FILE="$2"; shift 2 ;;
     --task) TASK="$2"; shift 2 ;;
+    --pipeline-config) PIPELINE_CONFIG="$2"; shift 2 ;;
     --input-size) INPUT_SIZE="$2"; shift 2 ;;
     --num-classes) NUM_CLASSES="$2"; shift 2 ;;
+    --mask-threshold) MASK_THRESHOLD="$2"; shift 2 ;;
+    --topk) TOPK="$2"; shift 2 ;;
     --preprocess-backend) PREPROCESS_BACKEND="$2"; shift 2 ;;
     --rga-mode) RGA_MODE="$2"; shift 2 ;;
     --camera-source) CAMERA_SOURCE="$2"; shift 2 ;;
@@ -188,12 +197,15 @@ write_remote_cpp_env() {
     printf 'VISIONOPS_CPP_MODEL_PATH=%q\n' "${MODEL_PATH}"
     printf 'VISIONOPS_CPP_CLASS_NAMES_FILE=%q\n' "${CLASS_NAMES_FILE}"
     printf 'VISIONOPS_CPP_TASK=%q\n' "${TASK}"
+    printf 'VISIONOPS_CPP_PIPELINE_CONFIG=%q\n' "${PIPELINE_CONFIG}"
     printf 'VISIONOPS_CPP_PORT=%q\n' "${CPP_PORT}"
     printf 'VISIONOPS_CPP_NPU_CORE=%q\n' "${NPU_CORE}"
     printf 'VISIONOPS_CPP_NUM_CLASSES=%q\n' "${num_classes_final}"
     printf 'VISIONOPS_CPP_INPUT_SIZE=%q\n' "${INPUT_SIZE}"
     printf 'VISIONOPS_CPP_CONF_THRESHOLD=%q\n' "${CONF_THRESHOLD}"
     printf 'VISIONOPS_CPP_NMS_THRESHOLD=%q\n' "${NMS_THRESHOLD}"
+    printf 'VISIONOPS_CPP_MASK_THRESHOLD=%q\n' "${MASK_THRESHOLD}"
+    printf 'VISIONOPS_CPP_TOPK=%q\n' "${TOPK}"
     printf 'VISIONOPS_CPP_MAX_DET=%q\n' "${MAX_DET}"
     printf 'VISIONOPS_CPP_OUTPUT_MODE=%q\n' "${OUTPUT_MODE}"
     printf 'VISIONOPS_CPP_PREPROCESS_BACKEND=%q\n' "${PREPROCESS_BACKEND}"
@@ -361,7 +373,7 @@ main() {
 
   log_info "Target: ${EDGE_USER}@${EDGE_HOST}:${EDGE_PORT}"
   log_info "Install dir: ${INSTALL_DIR}"
-  log_info "C++ port: ${CPP_PORT}, task=${TASK}, num_classes=${num_classes_final}, input_size=${INPUT_SIZE}, preprocess_backend=${PREPROCESS_BACKEND}, rga_mode=${RGA_MODE}, snapshot=${ENABLE_SNAPSHOT}, annotated=${ENABLE_ANNOTATED}"
+  log_info "C++ port: ${CPP_PORT}, task=${TASK}, num_classes=${num_classes_final}, input_size=${INPUT_SIZE}, topk=${TOPK}, preprocess_backend=${PREPROCESS_BACKEND}, rga_mode=${RGA_MODE}, snapshot=${ENABLE_SNAPSHOT}, annotated=${ENABLE_ANNOTATED}"
   log_info "Camera: type=${CAMERA_TYPE}, source=${CAMERA_SOURCE}, width=${CAMERA_WIDTH}, height=${CAMERA_HEIGHT}, fps=${CAMERA_FPS}, fourcc=${CAMERA_FOURCC}, buffer_size=${CAMERA_BUFFER_SIZE}, stream_backend=${STREAM_BACKEND}"
 
   remote "echo connected >/dev/null"

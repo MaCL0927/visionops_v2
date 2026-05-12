@@ -57,6 +57,7 @@
 }
 
 .model-select .section-title,
+#switchCppModel,
 #refreshModels {
   flex-shrink: 0;
 }
@@ -893,9 +894,10 @@
 .cpp-preview-side-card b{display:block;color:#0f172a;font-size:17px;font-weight:1000;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .cpp-preview-side-card.wide{flex:1;min-height:160px}
 .cpp-preview-predictions{display:flex;flex-direction:column;gap:8px;color:#334155;font-weight:800;font-size:14px}
-.cpp-preview-pred{display:flex;align-items:center;justify-content:space-between;gap:8px;border:1px solid #e2e8f0;border-radius:14px;padding:8px 10px;background:#f8fafc}
-.cpp-preview-pred b{font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cpp-preview-pred{display:flex;align-items:center;justify-content:space-between;gap:8px;border:1px solid #e2e8f0;border-radius:14px;padding:8px 10px;background:#f8fafc;flex-wrap:wrap}
+.cpp-preview-pred b{font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
 .cpp-preview-pred span{font-size:13px;color:#166534;font-weight:1000;flex-shrink:0}
+.cpp-preview-pred span:nth-child(n+3){color:#64748b;font-weight:800;font-size:12px;flex-basis:100%}
 .cpp-preview-actions{padding-top:0}
 @media (max-width:980px){.cpp-preview-body{grid-template-columns:1fr}.cpp-preview-side{max-height:240px}.cpp-preview-status{margin-left:0;width:100%}}
 .cpp-service-badge{display:inline-flex;align-items:center;justify-content:center;min-width:92px;border-radius:999px;padding:9px 13px;font-size:14px;font-weight:1000;border:2px solid #dce6f0;background:#fff;color:#475569;white-space:nowrap}
