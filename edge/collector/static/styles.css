@@ -921,3 +921,7 @@
 .cpp-settings-card .setting-field small{display:block;margin-top:6px;color:#64748b;font-size:12px;font-weight:800;line-height:1.35}
 .cpp-settings-actions{flex-wrap:wrap}
 .cpp-settings-actions .primary.small{background:#0f172a!important;border-color:#0f172a!important;color:#fff!important}
+
+/* v0.9.1: hide legacy standalone C++ status card; C++ realtime results are merged into original validation preview/result cards. */
+#cppInferenceStatusCard{display:none !important;}
+.cpp-runtime-line{background:rgba(15,23,42,.04);border:1px dashed rgba(100,116,139,.28);margin-bottom:8px;}

@@ -183,6 +183,11 @@ function restartCppPreviewLoopsAfterFpsChange(){
   if(typeof startCppPreviewAutoLoop==='function' && cppPreviewTimer && cppPreviewModal && cppPreviewModal.classList.contains('active') && cppPreviewAuto){
     startCppPreviewAutoLoop();
   }
+  // v0.9.2：模型验证页的 C++ 实时检测也使用 Snapshot FPS 控制前端轮询频率。
+  // 旧逻辑复用了 Python realtimeIntervalMs，默认 1000ms，会导致后端 10fps 但前端仍 1fps。
+  if(typeof restartCppRealtimeLoopAfterFpsChange==='function'){
+    restartCppRealtimeLoopAfterFpsChange();
+  }
 }
 function applyCppPreviewFpsFromSettings(settings, restartLoops=false){
   const snapshotFps=getCppSnapshotFpsFromSettings(settings);
@@ -197,6 +202,18 @@ function applyCppPreviewFpsFromSettings(settings, restartLoops=false){
   }
   if(restartLoops) restartCppPreviewLoopsAfterFpsChange();
   return intervalMs;
+}
+async function refreshCppPreviewFpsFromBackendSettings(restartLoops=false){
+  // v0.9.2：页面初始化或启动 C++ 实时检测时，主动读取 /api/cpp/settings。
+  // 这样即使用户没有打开 C++ 设置弹窗，前端也能跟随 cpp.env 中的 Snapshot FPS。
+  try{
+    const data=await apiGet('/api/cpp/settings');
+    const settings=data.settings || data.effective_settings || data.saved_settings || {};
+    return applyCppPreviewFpsFromSettings(settings, restartLoops);
+  }catch(err){
+    console.warn('读取 C++ Snapshot FPS 设置失败，继续使用当前前端刷新间隔', err);
+    return getCppPreviewIntervalMs();
+  }
 }
 let dataStore={all:[],positive:[],negative:[]};
 let currentDataset='local_dataset';
@@ -799,6 +816,34 @@ function formatPoint(point){
   if(!Array.isArray(point) || point.length<2) return '--';
   return `[${Number(point[0]).toFixed(2)}, ${Number(point[1]).toFixed(2)}]`;
 }
+
+function formatConfidencePercent(value, fallback='--'){
+  if(typeof fallback==='string' && fallback.trim()){
+    const f=fallback.trim();
+    if(f!=='--') return f;
+  }
+  const n=Number(value);
+  if(!Number.isFinite(n)) return fallback || '--';
+  // C++ 输出通常是 0~1；如果后端已给 0~100，也兼容。
+  const pct=Math.abs(n)<=1.000001 ? n*100 : n;
+  return `${pct.toFixed(1)}%`;
+}
+function normalizeCppInferForResult(raw={}){
+  const data={...(raw || {})};
+  data.task=normalizeTaskName(data.task || data.model_task || data.runtime_task || 'detection');
+  data.updated_at=new Date().toLocaleTimeString();
+  if(!Array.isArray(data.predictions)) data.predictions=[];
+  if(data.task==='classification'){
+    const pred=data.prediction || data.result || (Array.isArray(data.topk) && data.topk.length ? data.topk[0] : null);
+    if(pred){
+      data.result={...pred};
+      if(data.result.confidence_percent===undefined){
+        data.result.confidence_percent=formatConfidencePercent(data.result.confidence ?? data.result.score, '--');
+      }
+    }
+  }
+  return data;
+}
 function getPredictionCenter(pred, fallbackBox=null){
   if(Array.isArray(pred.center) && pred.center.length>=2){
     return [Number(pred.center[0]), Number(pred.center[1])];
@@ -833,6 +878,17 @@ let productionPollIntervalMs=1000;
 let realtimeRunning=false;
 let realtimeTimer=null;
 let realtimeBusy=false;
+function getCppRealtimeIntervalMs(){
+  // C++ 实时检测前端刷新频率跟随 C++ Snapshot FPS，不再使用旧 Python realtimeIntervalMs。
+  // 10fps -> 100ms；设置过高时受 CPP_PREVIEW_MIN_INTERVAL_MS 保护。
+  return Math.max(CPP_PREVIEW_MIN_INTERVAL_MS, Math.min(CPP_PREVIEW_MAX_INTERVAL_MS, getCppPreviewIntervalMs()));
+}
+function restartCppRealtimeLoopAfterFpsChange(){
+  if(realtimeRunning && realtimeTimer){
+    clearInterval(realtimeTimer);
+    realtimeTimer=setInterval(realtimeClassifyOnce, getCppRealtimeIntervalMs());
+  }
+}
 
 const cppStatusCard=document.getElementById('cppInferenceStatusCard');
 const cppServiceBadge=document.getElementById('cppServiceBadge');
@@ -1055,7 +1111,7 @@ async function refreshCppInferenceStatus(showMessage=false){
   }
 }
 async function startCppStreamMode(mode='detect', showOkToast=true){
-  if(!cppStatusCard || cppActionBusy) return false;
+  if(cppActionBusy) return false;
   const normalized=mode==='preview' ? 'preview' : 'detect';
   setCppStreamActionBusy(true);
   try{
@@ -1086,7 +1142,7 @@ async function ensureCppStreamForPreview(){
   return await startCppStreamMode('preview', false);
 }
 async function stopCppStream(){
-  if(!cppStatusCard || cppActionBusy) return;
+  if(cppActionBusy) return;
   setCppStreamActionBusy(true);
   try{
     await apiPost('/api/cpp/stream/stop');
@@ -1571,11 +1627,10 @@ function updateSelectedModelUI(){
   updateCppModelSwitchButton();
 }
 function setResultIdle(message='等待检测'){
-  if(!classificationResult) return;
-  classificationResult.className='classification-result idle';
-  resultClassName.textContent=message;
-  resultConfidence.textContent='结果 --';
-  resultLatency.textContent='耗时 --';
+  if(classificationResult) classificationResult.className='classification-result idle';
+  if(resultClassName) resultClassName.textContent=message;
+  if(resultConfidence) resultConfidence.textContent='结果 --';
+  if(resultLatency) resultLatency.textContent='耗时 --';
   if(topkResult) topkResult.innerHTML='';
   window.__lastDetectionPredictions=[];
   clearDetectionOverlay();
@@ -1584,7 +1639,10 @@ function getSelectedModelItem(){
   return modelItems.find((item)=>item.name===selectedModel) || null;
 }
 function updateCppModelSwitchButton(){
+  // v0.9.3：Python Web 侧模型切换已隐藏，模型卡片点击后自动切换到 C++ 当前模型。
+  // 保留按钮 DOM 但隐藏，避免旧模板/旧 CSS 依赖该元素时报错。
   if(!switchCppModelBtn) return;
+  switchCppModelBtn.style.display='none';
   const item=getSelectedModelItem();
   if(cppModelSwitchBusy){
     switchCppModelBtn.disabled=true;
@@ -1653,18 +1711,28 @@ function renderModelList(){
     return `<button class="model-card ${active}${extraClass}" data-model-name="${escapeHtml(item.name)}" title="${escapeHtml(item.cpp_note || item.pipeline_config || item.meta_path || item.path || item.name)}"${disabled}><b>${escapeHtml(item.name)}</b><span>${escapeHtml(sub)}</span></button>`;
   }).join('');
   modelList.querySelectorAll('.model-card').forEach((btn)=>{
-    btn.addEventListener('click',()=>{
+    btn.addEventListener('click',async()=>{
       stopRealtimeClassification();
       selectedModel=btn.dataset.modelName || '';
       renderModelList();
       const item=getSelectedModelItem();
       if(item && item.has_meta===false){
         setResultIdle('模型配置缺失');
-        showToast('该模型缺少同名 yaml，无法验证');
-      }else{
-        setResultIdle('等待检测');
-        showToast(selectedModel ? `已选择模型：${selectedModel}` : '请选择模型');
+        showToast('该模型缺少同名 yaml，无法切换');
+        return;
       }
+      if(!selectedModel){
+        setResultIdle('等待检测');
+        showToast('请选择模型');
+        return;
+      }
+      if(item && item.cpp_runtime_loaded){
+        setResultIdle('等待检测');
+        showToast(`当前 C++ 模型：${selectedModel}`);
+        return;
+      }
+      setResultIdle('正在切换 C++ 模型');
+      await switchSelectedCppModel({silentAuto:true});
     });
   });
   updateSelectedModelUI();
@@ -1706,25 +1774,26 @@ async function loadModels(){
     updateCppModelSwitchButton();
   }
 }
-async function switchSelectedCppModel(){
-  if(cppModelSwitchBusy) return;
+async function switchSelectedCppModel(options={}){
+  const silentAuto=!!(options && options.silentAuto);
+  if(cppModelSwitchBusy) return false;
   const item=getSelectedModelItem();
-  if(!selectedModel || !item){showToast('请先选择一个模型');updateCppModelSwitchButton();return;}
-  if(modelListSource!=='cpp'){showToast('当前模型列表不是 C++ 模型列表，请先刷新模型');updateCppModelSwitchButton();return;}
-  if(item.has_meta===false){showToast('该模型缺少同名 yaml，不能切换');updateCppModelSwitchButton();return;}
+  if(!selectedModel || !item){if(!silentAuto) showToast('请先选择一个模型');updateCppModelSwitchButton();return false;}
+  if(modelListSource!=='cpp'){if(!silentAuto) showToast('当前模型列表不是 C++ 模型列表，请先刷新模型');updateCppModelSwitchButton();return false;}
+  if(item.has_meta===false){if(!silentAuto) showToast('该模型缺少同名 yaml，不能切换');updateCppModelSwitchButton();return false;}
   if(item.is_pipeline && item.task!=='roi_classification'){
-    showToast('当前仅支持 roi_classification 类型的双模型 pipeline 切换');
+    if(!silentAuto) showToast('当前仅支持 roi_classification 类型的双模型 pipeline 切换');
     updateCppModelSwitchButton();
-    return;
+    return false;
   }
-  if(item.cpp_runtime_loaded){showToast('该模型已经是 C++ 当前加载模型');updateCppModelSwitchButton();return;}
-  if(item.cpp_switch_ready===false){showToast(item.cpp_note || '当前 C++ 单模型切换接口暂不支持该任务类型');updateCppModelSwitchButton();return;}
+  if(item.cpp_runtime_loaded){if(!silentAuto) showToast('该模型已经是 C++ 当前加载模型');updateCppModelSwitchButton();return true;}
+  if(item.cpp_switch_ready===false){if(!silentAuto) showToast(item.cpp_note || '当前 C++ 单模型切换接口暂不支持该任务类型');updateCppModelSwitchButton();return false;}
 
-  stopRealtimeClassification();
+  stopRealtimeClassification(false, false);
   cppModelSwitchBusy=true;
   updateCppModelSwitchButton();
-  setResultIdle('正在切换 C++ 模型');
-  showToast(`正在切换 C++ 模型：${selectedModel}`);
+  try{ setResultIdle('正在切换 C++ 模型'); }catch(_){/* ignore UI-only errors */}
+  if(!silentAuto) showToast(`正在切换 C++ 模型：${selectedModel}`);
   try{
     const data=await apiPost('/api/cpp/model/switch',{
       model_name:item.name || selectedModel,
@@ -1736,16 +1805,86 @@ async function switchSelectedCppModel(){
     modelItems=refreshed.items || [];
     selectedModel=selected;
     renderModelList();
-    await refreshCppInferenceStatus(false);
+    await refreshCppInferenceStatus(false).catch(()=>{});
     setResultIdle('等待检测');
-    showToast(data.message || 'C++ 模型切换成功');
+    showToast(silentAuto ? `已切换到 C++ 模型：${selected}` : (data.message || 'C++ 模型切换成功'));
+    return true;
   }catch(err){
     setResultIdle('C++ 模型切换失败');
     showToast(err.message || 'C++ 模型切换失败');
+    return false;
   }finally{
     cppModelSwitchBusy=false;
     updateCppModelSwitchButton();
   }
+}
+
+async function ensureSelectedCppModelReady(){
+  if(!selectedModel) throw new Error('未找到模型，请先刷新模型列表');
+  let item=getSelectedModelItem();
+  if(!item) throw new Error('当前模型不在模型列表中，请刷新模型列表');
+  if(item.has_meta===false) throw new Error('该模型缺少同名 yaml，不能用于 C++ 推理');
+  if(item.cpp_runtime_loaded) return true;
+  const ok=await switchSelectedCppModel({silentAuto:true});
+  if(!ok) throw new Error('C++ 模型切换失败，无法执行推理');
+  item=getSelectedModelItem();
+  return true;
+}
+async function blobFromDataUrl(dataUrl){
+  const res=await fetch(dataUrl);
+  return await res.blob();
+}
+async function fetchBlobNoCache(url){
+  const res=await fetch(appendCacheBuster(url),{cache:'no-store'});
+  if(!res.ok) throw new Error(`读取图片失败：HTTP ${res.status}`);
+  return await res.blob();
+}
+async function runCppInferBlob(blob, filename='image.jpg'){
+  const form=new FormData();
+  form.append('file', blob, filename);
+  const res=await fetch('/api/cpp/infer',{method:'POST',body:form});
+  const data=await parseApiResponse(res);
+  return normalizeCppInferForResult(data);
+}
+async function getCppSnapshotBlobForCapture(options={}){
+  // v0.9.3.1：C++ stream 刚启动或刚切换模型后，snapshot.jpg 可能短时间返回 502。
+  // 拍照检测不能只请求一次；应等待 C++ capture thread 产生第一帧快照。
+  const attempts=Number(options.attempts || 16);
+  const delayMs=Number(options.delayMs || 220);
+  let lastStatus=0;
+  let lastMessage='';
+  for(let i=0;i<attempts;i++){
+    try{
+      const res=await fetch('/api/cpp/stream/snapshot.jpg?t='+Date.now(),{cache:'no-store'});
+      lastStatus=res.status;
+      if(res.ok){
+        const blob=await res.blob();
+        if(blob && blob.size>0) return blob;
+        lastMessage='快照为空';
+      }else{
+        try{
+          const text=await res.text();
+          lastMessage=text ? text.slice(0,180) : '';
+        }catch(_){
+          lastMessage='';
+        }
+      }
+    }catch(err){
+      lastMessage=err && err.message ? err.message : String(err);
+    }
+    await sleepMs(delayMs);
+  }
+  let hint='';
+  try{
+    const status=await apiGet('/api/cpp/stream/status');
+    const running=status && status.running;
+    const snapshotAvailable=status && status.snapshot_available;
+    const latestAge=status && status.latest_snapshot_age_ms;
+    hint=`；stream=${running?'running':'stopped'}，snapshot_available=${snapshotAvailable?'true':'false'}，latest_snapshot_age_ms=${latestAge ?? '--'}`;
+  }catch(_){
+    hint='';
+  }
+  throw new Error(`读取 C++ 快照失败：HTTP ${lastStatus || '--'}${lastMessage ? '，'+lastMessage : ''}${hint}`);
 }
 
 function setSelectedValidationImage(item, resetResult=true){
@@ -1797,6 +1936,9 @@ async function loadValidationImages(){
 function appendCacheBuster(url){
   const raw=String(url || '');
   if(!raw) return raw;
+  // blob:/data: URL 是浏览器本地对象地址，给它追加 ?_= 会导致图像加载失败。
+  // C++ 拍照检测使用 URL.createObjectURL(blob) 生成预览图，因此这里必须原样返回。
+  if(raw.startsWith('blob:') || raw.startsWith('data:')) return raw;
   const sep=raw.includes('?') ? '&' : '?';
   return `${raw}${sep}_=${Date.now()}`;
 }
@@ -2167,16 +2309,17 @@ window.addEventListener('resize',()=>{
 });
 
 function setResultRunning(message='检测中...'){
-  classificationResult.className='classification-result running';
-  resultClassName.textContent=message;
-  resultConfidence.textContent='正在加载模型并推理';
-  resultLatency.textContent='请稍候';
+  if(classificationResult) classificationResult.className='classification-result running';
+  if(resultClassName) resultClassName.textContent=message;
+  if(resultConfidence) resultConfidence.textContent='正在加载模型并推理';
+  if(resultLatency) resultLatency.textContent='请稍候';
   if(topkResult) topkResult.innerHTML='';
 }
 function renderClassificationResult(data, options={}){
+  data=data || {};
   const task=data.task || 'classification';
   const r=data.result || {};
-  classificationResult.className='classification-result done';
+  if(classificationResult) classificationResult.className='classification-result done';
   if(isDetectionLikeTask(task)){
     const predictions=Array.isArray(data.predictions) ? data.predictions : [];
     window.__lastDetectionPredictions=predictions;
@@ -2263,7 +2406,8 @@ function renderClassificationResult(data, options={}){
   window.__lastDetectionPredictions=[];
   clearDetectionOverlay();
   resultClassName.textContent=r.class_name || '未识别';
-  resultConfidence.textContent=`置信度 ${r.confidence_percent || '--'}`;
+  const clsConfText=formatConfidencePercent(r.confidence ?? r.score, r.confidence_percent || '--');
+  resultConfidence.textContent=`置信度 ${clsConfText}`;
   resultLatency.textContent=`耗时 ${data.latency_ms ?? '--'} ms`;
   if(Array.isArray(data.topk) && data.topk.length && topkResult){
     topkResult.innerHTML='<b>Top 结果</b>'+data.topk.map((x)=>{
@@ -2274,55 +2418,59 @@ function renderClassificationResult(data, options={}){
   }else if(topkResult){
     topkResult.innerHTML='';
   }
-  if(!options.silent) showToast(`检测完成：${r.class_name || '未识别'} ${r.confidence_percent || ''}`);
+  if(!options.silent) showToast(`检测完成：${r.class_name || '未识别'} ${clsConfText !== '--' ? clsConfText : ''}`);
 }
 function renderClassificationError(err){
-  classificationResult.className='classification-result error';
-  resultClassName.textContent='检测失败';
-  resultConfidence.textContent=err.message || '请检查模型或图片';
-  resultLatency.textContent='耗时 --';
-  showToast(err.message || '检测失败');
+  if(classificationResult) classificationResult.className='classification-result error';
+  if(resultClassName) resultClassName.textContent='检测失败';
+  if(resultConfidence) resultConfidence.textContent=(err && err.message) || '请检查模型或图片';
+  if(resultLatency) resultLatency.textContent='耗时 --';
+  showToast((err && err.message) || '检测失败');
 }
 async function runSingleImageClassification(){
   if(!selectedModel){showToast('未找到模型，请先刷新模型列表');return;}
-  const item=getSelectedModelItem();
-  if(item && item.has_meta===false){showToast('该模型缺少同名 yaml，无法验证');return;}
   if(!selectedImage){showToast('请先选择一张测试图片，或点击拍照检测');return;}
-  setResultRunning('检测中...');
+  setResultRunning('C++ 选图检测中...');
   try{
-    const data=await apiPost('/api/validation/classify_image',{dataset:currentDataset,model_name:selectedModel,image_id:selectedImage.id});
-    renderClassificationResult(data,{mode:'image'});
+    await ensureSelectedCppModelReady();
+    const blob=await fetchBlobNoCache(selectedImage.url);
+    const data=await runCppInferBlob(blob, selectedImage.name || 'selected.jpg');
+    renderPreviewImage(selectedImage.url, selectedImage.name || '测试图片', data.predictions || []);
+    renderClassificationResult(data,{mode:'cpp_image'});
   }catch(err){
     renderClassificationError(err);
   }
 }
 
 async function captureAndRunClassification(){
-  // v6.7：分类/检测模型都复用该接口；检测模型会在结果图上叠加检测框。
   if(!selectedModel){showToast('未找到模型，请先刷新模型列表');return;}
-  const item=getSelectedModelItem();
-  if(item && item.has_meta===false){showToast('该模型缺少同名 yaml，无法验证');return;}
-  setResultRunning('拍照检测中...');
+  setResultRunning('C++ 拍照检测中...');
+  let startedForCapture=false;
   try{
-    await startCamera();
-    await new Promise(resolve=>setTimeout(resolve, 250));
-    const payload={dataset:currentDataset,model_name:selectedModel,device_id:deviceId,user_id:userId};
-    if(!useBackendCamera){
-      payload.image_data=captureFrameAsJpeg();
+    await ensureSelectedCppModelReady();
+    let status=null;
+    try{status=await apiGet('/api/cpp/stream/status');}catch(_){status=null;}
+    if(!status || !status.running){
+      const ok=await startCppStreamMode('preview', false);
+      if(!ok) throw new Error('启动 C++ 拍照预览失败');
+      startedForCapture=true;
+      // C++ preview 启动后需要等待 capture thread 读到首帧并生成 snapshot。
+      await sleepMs(900);
+    }else if(status && status.running && !status.snapshot_available){
+      // 运行中但还没有 snapshot，通常发生在刚重启/刚切换模型后。
+      await sleepMs(600);
     }
-    const data=await apiPost('/api/validation/capture_classify',payload);
-    if(data.captured){
-      const captured={...data.captured, url:data.captured.url || `/api/validation/image/${encodeURIComponent(data.captured.id)}`};
-      validationImages=[captured, ...validationImages.filter((item)=>item.id!==captured.id)];
-      setSelectedValidationImage(captured, false);
-      renderValidationImages();
-      await refreshDatasetSummary();
-    }
-    renderClassificationResult(data,{mode:'image'});
+    const blob=await getCppSnapshotBlobForCapture({attempts:18, delayMs:220});
+    const data=await runCppInferBlob(blob, `cpp_capture_${Date.now()}.jpg`);
+    const previewUrl=URL.createObjectURL(blob);
+    renderPreviewImage(previewUrl, 'C++ 拍照检测画面', data.predictions || []);
+    renderClassificationResult(data,{mode:'cpp_capture'});
   }catch(err){
     renderClassificationError(err);
   }finally{
-    if(!shouldKeepCameraRunning()) stopCamera();
+    if(startedForCapture && !realtimeRunning && !productionRunning){
+      apiPost('/api/cpp/stream/stop',{}).catch(()=>{});
+    }
   }
 }
 document.getElementById('refreshModels').addEventListener('click',async()=>{
@@ -2360,33 +2508,69 @@ function setRealtimeButtonState(running){
   realtimeInferToggle.textContent=running ? '停止实时' : '实时检测';
 }
 
-async function realtimeClassifyOnce(){
-  // v6.7：检测模型实时检测，前端按返回 bbox 持续更新叠加框。
-  if(!realtimeRunning || realtimeBusy) return;
-  if(!selectedModel){stopRealtimeClassification();showToast('未找到模型，请先刷新模型列表');return;}
-  realtimeBusy=true;
-  try{
-    const payload={dataset:currentDataset,model_name:selectedModel};
-    // RTSP/后端摄像头模式下，后端直接使用 latest_frame；浏览器摄像头/模拟模式上传当前 canvas 截图。
-    if(!useBackendCamera){
-      payload.image_data=captureFrameAsJpeg();
-    }
-    const data=await apiPost('/api/validation/realtime_classify_once',payload);
-    if(data.realtime){
-      const url=data.realtime.url || '/api/validation/realtime_image/realtime_latest.jpg';
-      renderPreviewImage(url, '实时检测画面', data.predictions || []);
-      if(selectedImageNameEl){
-        selectedImageNameEl.textContent='实时画面';
+
+function normalizeCppRealtimeForResult(latest={}){
+  const data={...(latest || {})};
+  data.task=normalizeTaskName(data.task || data.model_task || data.runtime_task || 'detection');
+  data.updated_at=new Date().toLocaleTimeString();
+  if(!Array.isArray(data.predictions)) data.predictions=[];
+  if(data.task==='classification'){
+    const pred=data.prediction || data.result || (Array.isArray(data.topk) && data.topk.length ? data.topk[0] : null);
+    if(pred){
+      data.result={...pred};
+      if(data.result.confidence_percent===undefined){
+        data.result.confidence_percent=formatConfidencePercent(data.result.confidence ?? data.result.score, '--');
       }
     }
-    renderClassificationResult(data,{silent:true,mode:'realtime'});
+  }
+  return data;
+}
+function renderCppRealtimeMetrics(status={}, latest={}){
+  const timing=latest.timing || {};
+  const rknn=timing.rknn || {};
+  const streamDetail=(timing.stream_detail || (status.diagnostics || {}));
+  const cameraFps=formatMetricNumber(status.camera_fps ?? status.stream_fps,1);
+  const detectFps=formatMetricNumber(status.detect_fps,1);
+  const total=formatMetricMs(latest.latency_ms ?? status.latest_latency_ms ?? timing.total_ms);
+  const capture=formatMetricMs(streamDetail.capture_read_ms ?? streamDetail.last_capture_read_ms);
+  const prep=formatMetricMs(timing.preprocess_ms);
+  const rk=formatMetricMs(rknn.total_ms);
+  const post=formatMetricMs(timing.postprocess_ms);
+  const task=taskDisplayName(latest.task || status.task || '');
+  const lines=[];
+  lines.push(`<b>C++ 实时状态</b>`);
+  lines.push(`<div class="target-row target-row-inline cpp-runtime-line"><span>任务：${escapeHtml(task)}</span><span>camera/detect FPS：${escapeHtml(cameraFps)} / ${escapeHtml(detectFps)}</span><span>总耗时：${escapeHtml(total)}</span><span>取流：${escapeHtml(capture)}</span><span>预处理：${escapeHtml(prep)}</span><span>RKNN：${escapeHtml(rk)}</span><span>后处理：${escapeHtml(post)}</span></div>`);
+  return lines.join('');
+}
+async function realtimeClassifyOnce(){
+  // v0.9.1：模型验证页“实时检测”改为 C++ detect 流，结果复用原 Python 结果卡片显示。
+  if(!realtimeRunning || realtimeBusy) return;
+  realtimeBusy=true;
+  try{
+    const [statusRes, latestRes]=await Promise.allSettled([
+      apiGet('/api/cpp/stream/status'),
+      apiGet('/api/cpp/stream/latest_result')
+    ]);
+    const status=statusRes.status==='fulfilled' ? statusRes.value : {};
+    const latestRaw=latestRes.status==='fulfilled' ? latestRes.value : {};
+    if(!status.running || !status.inference_enabled){
+      throw new Error('C++ 实时推理流未运行');
+    }
+    const data=normalizeCppRealtimeForResult(latestRaw);
+    renderPreviewImage('/api/cpp/stream/snapshot.jpg', 'C++ 实时检测画面', data.predictions || []);
+    if(selectedImageNameEl) selectedImageNameEl.textContent='C++ 实时画面';
+    renderClassificationResult(data,{silent:true,mode:'cpp_realtime'});
+    const metricHtml=renderCppRealtimeMetrics(status,data);
+    if(topkResult && metricHtml){
+      topkResult.insertAdjacentHTML('afterbegin', metricHtml);
+    }
     if(resultLatency){
       const now=new Date().toLocaleTimeString();
-      resultLatency.textContent=`耗时 ${data.latency_ms ?? '--'} ms · 更新 ${now}`;
+      resultLatency.textContent=`耗时 ${data.latency_ms ?? status.latest_latency_ms ?? '--'} ms · 更新 ${now}`;
     }
   }catch(err){
     renderClassificationError(err);
-    stopRealtimeClassification(false);
+    stopRealtimeClassification(false, false);
   }finally{
     realtimeBusy=false;
   }
@@ -2394,30 +2578,41 @@ async function realtimeClassifyOnce(){
 
 async function startRealtimeClassification(){
   if(realtimeRunning) return;
-  if(!selectedModel){showToast('未找到模型，请先刷新模型列表');return;}
-  const item=getSelectedModelItem();
-  if(item && item.has_meta===false){showToast('该模型缺少同名 yaml，无法验证');return;}
-  realtimeRunning=true;
-  await startCamera();
-  setRealtimeButtonState(true);
-  setResultRunning('实时检测中...');
-  showToast('实时检测已开始');
-  realtimeClassifyOnce();
-  realtimeTimer=setInterval(realtimeClassifyOnce, realtimeIntervalMs);
+  setResultRunning('正在启动 C++ 实时检测...');
+  setRealtimeButtonState(false);
+  try{
+    // v0.9.2：启动实时检测前主动读取 C++ Snapshot FPS，避免前端仍按旧 1fps 轮询。
+    await refreshCppPreviewFpsFromBackendSettings(false);
+    const ok=await startCppStreamMode('detect', false);
+    if(!ok) throw new Error('启动 C++ 实时推理失败');
+    realtimeRunning=true;
+    setRealtimeButtonState(true);
+    setResultRunning('C++ 实时检测中...');
+    showToast(`C++ 实时检测已开始，前端刷新约 ${(1000/getCppRealtimeIntervalMs()).toFixed(1)}fps`);
+    realtimeClassifyOnce();
+    realtimeTimer=setInterval(realtimeClassifyOnce, getCppRealtimeIntervalMs());
+  }catch(err){
+    realtimeRunning=false;
+    setRealtimeButtonState(false);
+    renderClassificationError(err);
+  }
 }
 
-function stopRealtimeClassification(show=true){
+function stopRealtimeClassification(show=true, callBackend=true){
   if(realtimeTimer){clearInterval(realtimeTimer);realtimeTimer=null;}
   const wasRunning=realtimeRunning;
   realtimeRunning=false;
   realtimeBusy=false;
   setRealtimeButtonState(false);
+  if(callBackend){
+    apiPost('/api/cpp/stream/stop',{}).catch((err)=>console.warn('stop C++ stream failed',err));
+  }
   updateCameraLifecycle();
-  if(show && wasRunning) showToast('实时检测已停止');
+  if(show && wasRunning) showToast('C++ 实时检测已停止');
 }
 
 function toggleRealtimeInferUI(){
-  if(realtimeRunning) stopRealtimeClassification();
+  if(realtimeRunning) stopRealtimeClassification(true, true);
   else startRealtimeClassification();
 }
 
@@ -2550,68 +2745,53 @@ function drawProductionOverlay(predictions=[]){
 
 async function refreshProductionPushStatus(){
   if(!productionRunning) return;
-
   try{
-    const status=await apiGet('/api/production/push/status');
-    const latest=status.latest_result || null;
-
-    if(productionModelName) productionModelName.textContent=status.model_name || getProductionModelName() || '--';
-
-    if(!status.running){
-      if(productionStatus) productionStatus.textContent='已停止';
+    const [statusRes, latestRes]=await Promise.allSettled([
+      apiGet('/api/cpp/stream/status'),
+      apiGet('/api/cpp/stream/latest_result')
+    ]);
+    const status=statusRes.status==='fulfilled' ? statusRes.value : {};
+    const latestRaw=latestRes.status==='fulfilled' ? latestRes.value : {};
+    if(!status.running || !status.inference_enabled){
+      if(productionStatus) productionStatus.textContent='C++ 推理流未运行';
+      if(productionResultSummary) productionResultSummary.textContent='等待 C++ 推理流启动';
       return;
     }
-
-    const pushed=status.latest_push_response && Number.isFinite(Number(status.latest_push_response.pushed_clients))
-      ? Number(status.latest_push_response.pushed_clients)
-      : null;
-
-    if(productionStatus){
-      productionStatus.textContent=pushed===null
-        ? '连续检测中'
-        : `连续检测中 / 已连接上位机 ${pushed}`;
-    }
-
-    if(status.latest_error){
-      if(productionResultSummary) productionResultSummary.textContent=status.latest_error;
-      return;
-    }
-
-    if(!latest){
-      if(productionResultSummary) productionResultSummary.textContent='等待第一帧检测结果';
-      return;
-    }
-
+    const latest=normalizeCppRealtimeForResult(latestRaw);
     const task=normalizeTaskName(latest.task || '');
     const preds=Array.isArray(latest.predictions) ? latest.predictions : [];
 
-    if(productionModelName) productionModelName.textContent=status.model_name || getProductionModelName() || '--';
-    if(productionLatency) productionLatency.textContent=`${latest.latency_ms ?? '--'} ms`;
+    if(productionModelName){
+      const current=getSelectedModelItem();
+      productionModelName.textContent=(current && current.name) || selectedModel || shortPathName(latest.model) || '--';
+    }
+    if(productionStatus) productionStatus.textContent='C++ 连续推理中';
+    if(productionLatency) productionLatency.textContent=`${latest.latency_ms ?? status.latest_latency_ms ?? '--'} ms`;
     if(productionUpdatedAt) productionUpdatedAt.textContent=new Date().toLocaleTimeString();
 
-    if(latest.realtime){
-      const url=latest.realtime.url || '/api/validation/realtime_image/realtime_latest.jpg';
-      renderProductionPreview(url, preds);
-    }
+    renderProductionPreview('/api/cpp/stream/snapshot.jpg', preds);
 
     if(isDetectionLikeTask(task)){
       const taskText=taskDisplayName(task);
       if(task==='roi_classification'){
-        const r=latest.result || {};
         const firstPred=preds[0] || {};
         const roi=firstPred.roi || latest.roi || {};
         const roiMode=formatRoiMode(roi);
-        if(productionResultSummary) productionResultSummary.textContent=`${taskText}：${r.class_name || '未识别'} ${r.confidence_percent || ''} · ROI ${roiMode}`;
+        const finalName=latest.final_label || latest.final_decision || firstPred.class_name || '未识别';
+        const finalConf=formatConfidencePercent(latest.final_confidence ?? firstPred.confidence ?? firstPred.score, '--');
+        if(productionResultSummary) productionResultSummary.textContent=`${taskText}：${finalName} ${finalConf} · ROI ${roiMode}`;
       }else{
         if(productionResultSummary) productionResultSummary.textContent=`${taskText}到 ${preds.length} 个目标`;
       }
     }else{
-      const r=latest.result || {};
-      if(productionResultSummary) productionResultSummary.textContent=`${r.class_name || '未识别'} ${r.confidence_percent || ''}`;
+      const r=latest.result || latest.prediction || {};
+      const cls=r.class_name || '未识别';
+      const conf=formatConfidencePercent(r.confidence ?? r.score, r.confidence_percent || '--');
+      if(productionResultSummary) productionResultSummary.textContent=`${cls} ${conf}`;
     }
   }catch(err){
     if(productionStatus) productionStatus.textContent='状态读取异常';
-    if(productionResultSummary) productionResultSummary.textContent=err.message || '读取生产检测状态失败';
+    if(productionResultSummary) productionResultSummary.textContent=err.message || '读取 C++ 生产检测状态失败';
   }
 }
 
@@ -2632,29 +2812,25 @@ async function startProductionMonitor(){
   productionBusy=false;
   productionLastPredictions=[];
   if(productionModelName) productionModelName.textContent=modelName;
-  if(productionStatus) productionStatus.textContent='启动连续检测中';
+  if(productionStatus) productionStatus.textContent='启动 C++ 连续推理中';
   if(productionResultSummary) productionResultSummary.textContent='等待检测';
   if(productionLatency) productionLatency.textContent='--';
   if(productionUpdatedAt) productionUpdatedAt.textContent='--';
 
   try{
-    await startCamera();
-    await apiPost('/api/production/push/start',{
-      dataset:currentDataset,
-      model_name:modelName,
-      interval_ms:productionDetectIntervalMs,
-      camera_id:1
-    });
-
-    if(productionStatus) productionStatus.textContent='连续检测中';
+    await ensureSelectedCppModelReady().catch(()=>{});
+    await refreshCppPreviewFpsFromBackendSettings(false).catch(()=>{});
+    const ok=await startCppStreamMode('detect', false);
+    if(!ok) throw new Error('启动 C++ 生产推理失败');
+    if(productionStatus) productionStatus.textContent='C++ 连续推理中';
     await refreshProductionPushStatus();
 
     if(productionTimer){clearInterval(productionTimer);}
-    productionTimer=setInterval(refreshProductionPushStatus, productionPollIntervalMs);
+    productionTimer=setInterval(refreshProductionPushStatus, Math.max(100, getCppRealtimeIntervalMs()));
   }catch(err){
     productionRunning=false;
     if(productionStatus) productionStatus.textContent='启动失败';
-    if(productionResultSummary) productionResultSummary.textContent=err.message || '生产连续检测启动失败';
+    if(productionResultSummary) productionResultSummary.textContent=err.message || 'C++ 生产连续检测启动失败';
     updateCameraLifecycle();
   }
 }
@@ -2670,14 +2846,21 @@ function stopProductionMonitor(){
   productionBusy=false;
   productionLastPredictions=[];
 
-  apiPost('/api/production/push/stop').catch(()=>{});
+  apiPost('/api/cpp/stream/stop',{}).catch(()=>{});
 
   if(productionStatus && wasRunning) productionStatus.textContent='已停止';
   updateCameraLifecycle();
 }
 
 async function initApp(){
-  try{await loadCollectorState();await loadModels();await loadValidationImages();await refreshVisionBoxEffectiveStatus();showToast('本地采集目录已就绪');}catch(err){showToast(err.message)}
+  try{
+    await loadCollectorState();
+    await loadModels();
+    await loadValidationImages();
+    await refreshVisionBoxEffectiveStatus();
+    await refreshCppPreviewFpsFromBackendSettings(false);
+    showToast('本地采集目录已就绪');
+  }catch(err){showToast(err.message)}
   updateCameraLifecycle();
   startCppStatusPolling();
 }
@@ -2817,8 +3000,8 @@ function applyRuntimeSettingsToClient(settings){
   productionPollIntervalMs=Math.max(300, Math.min(5000, productionDetectIntervalMs));
 
   if(realtimeRunning && realtimeTimer){
-    clearInterval(realtimeTimer);
-    realtimeTimer=setInterval(realtimeClassifyOnce,realtimeIntervalMs);
+    // v0.9.2：模型验证页实时检测已经切到 C++，刷新频率跟随 C++ Snapshot FPS。
+    restartCppRealtimeLoopAfterFpsChange();
   }
   if(productionRunning && productionTimer){
     clearInterval(productionTimer);

@@ -7,10 +7,17 @@ old Python camera settings path untouched.
 """
 from __future__ import annotations
 
+import json
+import mimetypes
+import urllib.error
+import urllib.request
+import uuid
+
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi import File, UploadFile
 from fastapi.responses import Response
 
 from backend.config import CPP_INFERENCE_ENABLED
@@ -559,6 +566,62 @@ def cpp_health() -> Dict[str, Any]:
 @router.get("/stats")
 def cpp_stats() -> Dict[str, Any]:
     return _json_or_502(get_json, "/stats")
+
+
+
+
+@router.post("/infer")
+async def cpp_infer_proxy(file: UploadFile = File(...)) -> Dict[str, Any]:
+    """Proxy single-image multipart inference to the C++ /infer endpoint.
+
+    v0.9.3: Web selected-image inference and snapshot inference use this endpoint
+    so the browser does not need direct cross-origin access to port 18080.
+    """
+    _ensure_enabled()
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="上传图片为空")
+
+    filename = file.filename or "image.jpg"
+    content_type = file.content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    boundary = "----VisionOpsCppInferBoundary" + uuid.uuid4().hex
+    head = (
+        f"--{boundary}\r\n"
+        f"Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n"
+        f"Content-Type: {content_type}\r\n\r\n"
+    ).encode("utf-8")
+    tail = f"\r\n--{boundary}--\r\n".encode("utf-8")
+    body = head + content + tail
+
+    base_url = str(service_summary().get("cpp_service_url") or "http://127.0.0.1:18080").rstrip("/")
+    req = urllib.request.Request(
+        base_url + "/infer",
+        data=body,
+        method="POST",
+        headers={
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Content-Length": str(len(body)),
+            "Accept": "application/json",
+            "User-Agent": "VisionOps-Collector-CppInferProxy/0.9.3",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20.0) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            data = json.loads(raw) if raw.strip() else {}
+            return data if isinstance(data, dict) else {"data": data}
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            detail = str(exc.reason)
+        raise HTTPException(status_code=502, detail=f"C++ /infer HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise HTTPException(status_code=502, detail=f"C++ /infer 不可用: {exc.reason}") from exc
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=502, detail=f"C++ /infer 返回非 JSON: {exc}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"C++ /infer 代理失败: {exc}") from exc
 
 
 @router.post("/stream/start")
