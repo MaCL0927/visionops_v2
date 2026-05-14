@@ -311,7 +311,6 @@
 
       <div class="settings-tab-row">
         <button class="settings-main-tab active" data-settings-tab="cameraSettingsPanel">相机设置</button>
-        <button class="settings-main-tab" data-settings-tab="cppSettingsPanel">C++推理设置</button>
         <button class="settings-main-tab" data-settings-tab="boardSettingsPanel">视觉盒子设置</button>
         <button class="settings-main-tab" data-settings-tab="algorithmSettingsPanel">算法设置</button>
       </div>
@@ -321,170 +320,24 @@
           <div class="settings-panel-head">
             <div>
               <h3>相机设置</h3>
-              <p>支持 USB/常规相机、RTSP 网络相机、工业相机和模拟相机。不同相机类型显示不同的参数区域。</p>
+              <p>v0.9.4 起主流程使用 C++ 取流与预览配置；原 Python 相机参数保留为预留界面，暂不作为主流程入口。</p>
             </div>
-            <span class="settings-status-badge">已接入保存/回显</span>
+            <span class="settings-status-badge cpp-implemented-badge">C++ 已接入</span>
           </div>
 
-          <div class="settings-section camera-source-setting-block">
-            <div class="settings-section-title camera-source-title">
-              <b>相机类型与专属参数</b>
-              <select id="settingCameraType" class="camera-type-title-select" aria-label="相机类型" data-setting="camera.type">
-                <option value="usb">USB / 常规相机</option>
-                <option value="rtsp" selected>RTSP 网络相机</option>
-                <option value="industrial">工业相机</option>
-                <option value="mock">模拟相机</option>
-              </select>
-              <span>先选择相机类型，再配置该类型的连接和采集参数</span>
-            </div>
 
-            <div id="cameraTypeUsb" class="camera-type-panel camera-inline-panel">
-              <div class="settings-section-title"><b>USB / 常规相机参数</b><span>自动扫描 /dev/video*，优先推荐 Orbbec RGB 节点；也可手动选择其他节点</span></div>
-              <div class="settings-grid three">
-                <label class="setting-field">设备节点
-                  <select id="usbDeviceNodeSelect" data-setting="camera.usb.device_node">
-                    <option value="/dev/video0">/dev/video0</option>
-                  </select>
-                  <small id="usbDeviceHint">点击“刷新 USB 设备”后会列出可读取的 video 节点。</small>
-                </label>
-                <label class="setting-field">采集后端<select data-setting="camera.usb.backend"><option value="opencv">OpenCV</option><option value="v4l2">V4L2</option><option value="browser">浏览器 getUserMedia</option></select></label>
-                <label class="setting-field">缓冲帧数<input data-setting="camera.usb.buffer_size" type="number" value="1" min="1" /></label>
-                <div class="setting-field">USB 设备扫描<button id="refreshUsbDevicesBtn" class="secondary small" type="button">刷新 USB 设备</button><small>建议选择带“推荐 / Orbbec / RGB”的节点。若自动识别失败，可选择任意能测试通过的 /dev/videoX。</small></div>
-              </div>
-            </div>
-
-            <div id="cameraTypeRtsp" class="camera-type-panel camera-inline-panel implemented-setting-block active">
-              <div class="settings-section-title"><b>RTSP 网络相机参数</b><span>适合海康、大华等 IP 相机</span></div>
-              <div class="settings-grid three">
-                <label class="setting-field">相机 IP<input data-setting="camera.rtsp.ip" value="192.168.2.64" /></label>
-                <label class="setting-field">端口<input data-setting="camera.rtsp.port" type="number" value="554" /></label>
-                <label class="setting-field">通道<select data-setting="camera.rtsp.channel"><option value="101">主码流 101</option><option value="102" selected>子码流 102</option></select></label>
-                <label class="setting-field">用户名<input data-setting="camera.rtsp.username" value="admin" /></label>
-                <label class="setting-field">密码<input data-setting="camera.rtsp.password" type="password" value="password" /></label>
-                <label class="setting-field">RTSP 传输<select data-setting="camera.rtsp.transport"><option value="tcp" selected>TCP</option><option value="udp">UDP</option></select></label>
-                <label class="setting-field full">RTSP URL<input data-setting="camera.rtsp.url" value="rtsp://admin:password@192.168.2.64:554/Streaming/Channels/102" /></label>
-              </div>
-            </div>
-
-            <div id="cameraTypeIndustrial" class="camera-type-panel camera-inline-panel">
-              <div class="settings-section-title"><b>工业相机参数</b><span>预留 GigE / USB3 Vision / SDK 接入</span></div>
-              <div class="settings-grid three">
-                <label class="setting-field">厂家<select data-setting="camera.industrial.vendor"><option value="hikrobot">海康机器人</option><option value="daheng">大恒</option><option value="basler">Basler</option><option value="other">其他</option></select></label>
-                <label class="setting-field">触发模式<select data-setting="camera.industrial.trigger_mode"><option value="continuous">连续采集</option><option value="software">软触发</option><option value="hardware">硬触发</option></select></label>
-                <label class="setting-field">触发源<select data-setting="camera.industrial.trigger_source"><option value="Line0">Line0</option><option value="Line1">Line1</option><option value="Software">Software</option></select></label>
-                <label class="setting-field">ROI X<input data-setting="camera.industrial.roi_x" type="number" value="0" /></label>
-                <label class="setting-field">ROI Y<input data-setting="camera.industrial.roi_y" type="number" value="0" /></label>
-                <label class="setting-field">ROI W/H<input data-setting="camera.industrial.roi_wh" value="1280x720" /></label>
-              </div>
-            </div>
-
-            <div id="cameraTypeMock" class="camera-type-panel camera-inline-panel">
-              <div class="settings-section-title"><b>模拟相机参数</b><span>用于无摄像头调试和演示</span></div>
-              <div class="settings-grid three">
-                <label class="setting-field">模拟图案<select data-setting="camera.mock.pattern"><option value="detection_scene">检测框场景</option><option value="checkerboard">棋盘格</option><option value="plain">纯色背景</option></select></label>
-                <label class="setting-field">模拟帧率<input data-setting="camera.mock.fps" type="number" value="10" /></label>
-                <label class="setting-field">是否叠加时间戳<select data-setting="camera.mock.timestamp"><option value="true" selected>是</option><option value="false">否</option></select></label>
-              </div>
-            </div>
-          </div>
-
-          <div class="settings-section">
-            <div class="settings-section-title"><b>通用图像参数</b><span>适用于大部分相机</span></div>
-            <div class="settings-grid three">
-              <label class="setting-field">分辨率
-                <select data-setting="camera.common.resolution">
-                  <option value="640x480">640 × 480</option>
-                  <option value="1280x720" selected>1280 × 720</option>
-                  <option value="1920x1080">1920 × 1080</option>
-                  <option value="custom">自定义</option>
-                </select>
-              </label>
-              <label class="setting-field implemented-setting-field">帧率 FPS
-                <input data-setting="camera.common.fps" type="number" value="6" min="1" max="60" />
-              </label>
-              <label class="setting-field">图像旋转
-                <select data-setting="camera.common.rotation">
-                  <option value="0" selected>0°</option>
-                  <option value="90">90°</option>
-                  <option value="180">180°</option>
-                  <option value="270">270°</option>
-                </select>
-              </label>
-              <label class="setting-field">曝光模式
-                <select data-setting="camera.common.exposure_mode">
-                  <option value="auto" selected>自动曝光</option>
-                  <option value="manual">手动曝光</option>
-                </select>
-              </label>
-              <label class="setting-field">曝光值
-                <input data-setting="camera.common.exposure" type="number" value="0" placeholder="例如 0 / 10000" />
-              </label>
-              <label class="setting-field">增益
-                <input data-setting="camera.common.gain" type="number" value="0" min="0" />
-              </label>
-              <label class="setting-field">白平衡
-                <select data-setting="camera.common.white_balance">
-                  <option value="auto" selected>自动白平衡</option>
-                  <option value="manual">手动白平衡</option>
-                  <option value="daylight">日光</option>
-                  <option value="fluorescent">荧光灯</option>
-                </select>
-              </label>
-              <label class="setting-field">亮度
-                <input data-setting="camera.common.brightness" type="number" value="50" min="0" max="100" />
-              </label>
-              <label class="setting-field">对比度
-                <input data-setting="camera.common.contrast" type="number" value="50" min="0" max="100" />
-              </label>
-              <label class="setting-field implemented-setting-field">预览宽度
-                <input data-setting="camera.common.preview_width" type="number" value="960" min="320" />
-              </label>
-              <label class="setting-field implemented-setting-field">JPEG 质量
-                <input data-setting="camera.common.jpeg_quality" type="number" value="75" min="10" max="100" />
-              </label>
-            </div>
-          </div>
-
-          <div class="settings-section calibration-setting-block">
-            <div class="settings-section-title"><b>相机标定设置</b><span>预留 U 盘导入标定数据、标准图和内外参文件</span></div>
-            <div class="calibration-import-card">
-              <div class="usb-icon">USB</div>
-              <div>
-                <b>从外部 U 盘导入标定数据</b>
-                <p>支持导入 checkerboard 图片、camera_matrix.yaml、dist_coeffs.yaml、标准图 reference.jpg。</p>
-              </div>
-              <button class="mini-btn" type="button">选择 U 盘目录</button>
-            </div>
-            <div class="settings-grid three">
-              <label class="setting-field">标定类型<select data-setting="camera.calibration.calibration_type"><option value="mono">单目相机标定</option><option value="camera_lidar">相机-雷达外参</option><option value="stereo">双目相机标定</option></select></label>
-              <label class="setting-field">棋盘格规格<input data-setting="camera.calibration.checkerboard" value="9x6" /></label>
-              <label class="setting-field">方格尺寸 mm<input data-setting="camera.calibration.square_size_mm" type="number" value="25" /></label>
-            </div>
-          </div>
-        </section>
-
-
-        <section id="cppSettingsPanel" class="settings-panel">
-          <div class="settings-panel-head">
-            <div>
-              <h3>C++ 实时推理设置</h3>
-              <p>独立配置 C++ 服务使用的相机来源。当前 Python 相机设置仍保留，后续 C++ 架构成熟后再逐步替换旧链路。</p>
-            </div>
-            <span id="cppSettingsBadge" class="settings-status-badge">独立 C++ 配置</span>
-          </div>
-
-          <div class="settings-section cpp-settings-card implemented-setting-block">
+          <div class="settings-section cpp-settings-card cpp-implemented-setting-block">
             <div class="settings-section-title cpp-settings-title">
               <b>C++ 相机类型与输入源</b>
               <select id="cppSettingCameraType" class="camera-type-title-select" aria-label="C++ 相机类型" data-cpp-setting="camera_type">
                 <option value="rtsp">RTSP 网络相机</option>
                 <option value="usb">USB / Orbbec RGB 相机</option>
               </select>
-              <span>C++ 服务会根据这里的配置写入 cpp.env，并重启 visionops-inference-cpp 生效。</span>
+              <span><em class="settings-mini-badge cpp">C++已接入</em> 这里的配置会写入 cpp.env，并由 visionops-inference-cpp 取流。</span>
             </div>
 
-            <div id="cppCameraTypeRtsp" class="cpp-camera-type-panel camera-inline-panel active">
-              <div class="settings-section-title"><b>C++ RTSP 参数</b><span>适合海康/大华网络相机；stream backend 可选 OpenCV 或后续 gst-mpp。</span></div>
+            <div id="cppCameraTypeRtsp" class="cpp-camera-type-panel camera-inline-panel active cpp-implemented-setting-block inner-cpp-panel">
+              <div class="settings-section-title"><b>C++ RTSP 参数</b><span>适合海康/大华网络相机；stream backend 可选 OpenCV 或 gst-mpp。</span></div>
               <div class="settings-grid three">
                 <label class="setting-field full">RTSP URL
                   <input id="cppSettingRtspUrl" value="rtsp://admin:Abcd123_@192.168.2.64:554/Streaming/channels/101" />
@@ -501,7 +354,7 @@
               </div>
             </div>
 
-            <div id="cppCameraTypeUsb" class="cpp-camera-type-panel camera-inline-panel">
+            <div id="cppCameraTypeUsb" class="cpp-camera-type-panel camera-inline-panel cpp-implemented-setting-block inner-cpp-panel">
               <div class="settings-section-title"><b>C++ USB / Orbbec RGB 参数</b><span>复用 USB 设备扫描，建议 Orbbec 第一版使用 1280×800、YUYV、10fps。</span></div>
               <div class="settings-grid three">
                 <label class="setting-field">设备节点
@@ -538,14 +391,11 @@
             </div>
           </div>
 
-          <div class="settings-section cpp-settings-card implemented-setting-block">
-            <div class="settings-section-title"><b>C++ 运行参数</b><span>影响 C++ 服务启动和前端 preview/detect 控制，不影响旧 Python 相机设置。</span></div>
+          <div class="settings-section cpp-settings-card cpp-implemented-setting-block">
+            <div class="settings-section-title"><b>C++ 取流与前端预览频率</b><span><em class="settings-mini-badge cpp">C++已接入</em> 这些参数影响相机读取和 Web snapshot 刷新，不再走旧 Python MJPEG 逻辑。</span></div>
             <div class="settings-grid three">
               <label class="setting-field">相机读取 FPS
                 <input data-cpp-setting="camera_read_fps" type="number" value="10" min="1" max="60" />
-              </label>
-              <label class="setting-field">检测 FPS
-                <input data-cpp-setting="detect_fps" type="number" value="10" min="1" max="60" />
               </label>
               <label class="setting-field">Snapshot FPS
                 <input data-cpp-setting="snapshot_fps" type="number" value="5" min="1" max="30" />
@@ -553,17 +403,11 @@
               <label class="setting-field">服务启动自动取流
                 <select data-cpp-setting="stream_auto_start"><option value="false" selected>否，前端按钮启动</option><option value="true">是，服务启动即取流</option></select>
               </label>
-              <label class="setting-field">预处理后端
-                <select data-cpp-setting="preprocess_backend"><option value="auto" selected>auto</option><option value="rga">rga</option><option value="cpu">cpu</option></select>
-              </label>
-              <label class="setting-field">RGA 模式
-                <select data-cpp-setting="rga_mode"><option value="resize_color" selected>resize_color</option><option value="resize_only">resize_only</option><option value="off">off</option></select>
-              </label>
             </div>
           </div>
 
-          <div class="settings-section cpp-settings-card">
-            <div class="settings-section-title"><b>C++ 设置状态</b><span>保存只写 runtime_overrides.yaml；应用会写 cpp.env 并重启 C++ 服务。</span></div>
+          <div class="settings-section cpp-settings-card cpp-implemented-setting-block">
+            <div class="settings-section-title"><b>C++ 设置状态与应用</b><span>保存只写配置；应用会写 cpp.env 并重启 C++ 服务。按钮继续复用现有 C++ 设置接口。</span></div>
             <div id="cppSettingsStatus" class="settings-inline-status">尚未读取 C++ 设置。</div>
             <div class="settings-actions compact-actions cpp-settings-actions">
               <button id="loadCppSettingsBtn" class="secondary small" type="button">读取 C++ 设置</button>
@@ -572,7 +416,144 @@
               <button id="testCppSettingsPreviewBtn" class="secondary small" type="button">测试 C++ 预览</button>
             </div>
           </div>
+
+          <div class="settings-section camera-source-setting-block reserved-setting-block">
+            <div class="settings-section-title camera-source-title">
+              <b>相机类型与专属参数</b><em class="settings-mini-badge reserved">预留界面</em>
+              <select id="settingCameraType" class="camera-type-title-select" aria-label="相机类型" data-setting="camera.type">
+                <option value="usb">USB / 常规相机</option>
+                <option value="rtsp" selected>RTSP 网络相机</option>
+                <option value="industrial">工业相机</option>
+                <option value="mock">模拟相机</option>
+              </select>
+              <span>原 Python 相机设置界面保留展示；v0.9.4.1 暂不作为主流程保存入口</span>
+            </div>
+
+            <div id="cameraTypeUsb" class="camera-type-panel camera-inline-panel">
+              <div class="settings-section-title"><b>USB / 常规相机参数</b><span>自动扫描 /dev/video*，优先推荐 Orbbec RGB 节点；也可手动选择其他节点</span></div>
+              <div class="settings-grid three">
+                <label class="setting-field">设备节点
+                  <select id="usbDeviceNodeSelect" data-setting="camera.usb.device_node">
+                    <option value="/dev/video0">/dev/video0</option>
+                  </select>
+                  <small id="usbDeviceHint">点击“刷新 USB 设备”后会列出可读取的 video 节点。</small>
+                </label>
+                <label class="setting-field">采集后端<select data-setting="camera.usb.backend"><option value="opencv">OpenCV</option><option value="v4l2">V4L2</option><option value="browser">浏览器 getUserMedia</option></select></label>
+                <label class="setting-field">缓冲帧数<input data-setting="camera.usb.buffer_size" type="number" value="1" min="1" /></label>
+                <div class="setting-field">USB 设备扫描<button id="refreshUsbDevicesBtn" class="secondary small" type="button">刷新 USB 设备</button><small>建议选择带“推荐 / Orbbec / RGB”的节点。若自动识别失败，可选择任意能测试通过的 /dev/videoX。</small></div>
+              </div>
+            </div>
+
+            <div id="cameraTypeRtsp" class="camera-type-panel camera-inline-panel active">
+              <div class="settings-section-title"><b>RTSP 网络相机参数</b><span>适合海康、大华等 IP 相机</span></div>
+              <div class="settings-grid three">
+                <label class="setting-field">相机 IP<input data-setting="camera.rtsp.ip" value="192.168.2.64" /></label>
+                <label class="setting-field">端口<input data-setting="camera.rtsp.port" type="number" value="554" /></label>
+                <label class="setting-field">通道<select data-setting="camera.rtsp.channel"><option value="101">主码流 101</option><option value="102" selected>子码流 102</option></select></label>
+                <label class="setting-field">用户名<input data-setting="camera.rtsp.username" value="admin" /></label>
+                <label class="setting-field">密码<input data-setting="camera.rtsp.password" type="password" value="password" /></label>
+                <label class="setting-field">RTSP 传输<select data-setting="camera.rtsp.transport"><option value="tcp" selected>TCP</option><option value="udp">UDP</option></select></label>
+                <label class="setting-field full">RTSP URL<input data-setting="camera.rtsp.url" value="rtsp://admin:password@192.168.2.64:554/Streaming/Channels/102" /></label>
+              </div>
+            </div>
+
+            <div id="cameraTypeIndustrial" class="camera-type-panel camera-inline-panel">
+              <div class="settings-section-title"><b>工业相机参数</b><span>预留 GigE / USB3 Vision / SDK 接入</span></div>
+              <div class="settings-grid three">
+                <label class="setting-field">厂家<select data-setting="camera.industrial.vendor"><option value="hikrobot">海康机器人</option><option value="daheng">大恒</option><option value="basler">Basler</option><option value="other">其他</option></select></label>
+                <label class="setting-field">触发模式<select data-setting="camera.industrial.trigger_mode"><option value="continuous">连续采集</option><option value="software">软触发</option><option value="hardware">硬触发</option></select></label>
+                <label class="setting-field">触发源<select data-setting="camera.industrial.trigger_source"><option value="Line0">Line0</option><option value="Line1">Line1</option><option value="Software">Software</option></select></label>
+                <label class="setting-field">ROI X<input data-setting="camera.industrial.roi_x" type="number" value="0" /></label>
+                <label class="setting-field">ROI Y<input data-setting="camera.industrial.roi_y" type="number" value="0" /></label>
+                <label class="setting-field">ROI W/H<input data-setting="camera.industrial.roi_wh" value="1280x720" /></label>
+              </div>
+            </div>
+
+            <div id="cameraTypeMock" class="camera-type-panel camera-inline-panel">
+              <div class="settings-section-title"><b>模拟相机参数</b><span>用于无摄像头调试和演示</span></div>
+              <div class="settings-grid three">
+                <label class="setting-field">模拟图案<select data-setting="camera.mock.pattern"><option value="detection_scene">检测框场景</option><option value="checkerboard">棋盘格</option><option value="plain">纯色背景</option></select></label>
+                <label class="setting-field">模拟帧率<input data-setting="camera.mock.fps" type="number" value="10" /></label>
+                <label class="setting-field">是否叠加时间戳<select data-setting="camera.mock.timestamp"><option value="true" selected>是</option><option value="false">否</option></select></label>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-section reserved-setting-block">
+            <div class="settings-section-title"><b>通用图像参数</b><em class="settings-mini-badge reserved">预留界面</em><span>适用于大部分相机</span></div>
+            <div class="settings-grid three">
+              <label class="setting-field">分辨率
+                <select data-setting="camera.common.resolution">
+                  <option value="640x480">640 × 480</option>
+                  <option value="1280x720" selected>1280 × 720</option>
+                  <option value="1920x1080">1920 × 1080</option>
+                  <option value="custom">自定义</option>
+                </select>
+              </label>
+              <label class="setting-field">帧率 FPS
+                <input data-setting="camera.common.fps" type="number" value="6" min="1" max="60" />
+              </label>
+              <label class="setting-field">图像旋转
+                <select data-setting="camera.common.rotation">
+                  <option value="0" selected>0°</option>
+                  <option value="90">90°</option>
+                  <option value="180">180°</option>
+                  <option value="270">270°</option>
+                </select>
+              </label>
+              <label class="setting-field">曝光模式
+                <select data-setting="camera.common.exposure_mode">
+                  <option value="auto" selected>自动曝光</option>
+                  <option value="manual">手动曝光</option>
+                </select>
+              </label>
+              <label class="setting-field">曝光值
+                <input data-setting="camera.common.exposure" type="number" value="0" placeholder="例如 0 / 10000" />
+              </label>
+              <label class="setting-field">增益
+                <input data-setting="camera.common.gain" type="number" value="0" min="0" />
+              </label>
+              <label class="setting-field">白平衡
+                <select data-setting="camera.common.white_balance">
+                  <option value="auto" selected>自动白平衡</option>
+                  <option value="manual">手动白平衡</option>
+                  <option value="daylight">日光</option>
+                  <option value="fluorescent">荧光灯</option>
+                </select>
+              </label>
+              <label class="setting-field">亮度
+                <input data-setting="camera.common.brightness" type="number" value="50" min="0" max="100" />
+              </label>
+              <label class="setting-field">对比度
+                <input data-setting="camera.common.contrast" type="number" value="50" min="0" max="100" />
+              </label>
+              <label class="setting-field">预览宽度
+                <input data-setting="camera.common.preview_width" type="number" value="960" min="320" />
+              </label>
+              <label class="setting-field">JPEG 质量
+                <input data-setting="camera.common.jpeg_quality" type="number" value="75" min="10" max="100" />
+              </label>
+            </div>
+          </div>
+
+          <div class="settings-section calibration-setting-block reserved-setting-block">
+            <div class="settings-section-title"><b>相机标定设置</b><em class="settings-mini-badge reserved">预留界面</em><span>预留 U 盘导入标定数据、标准图和内外参文件</span></div>
+            <div class="calibration-import-card">
+              <div class="usb-icon">USB</div>
+              <div>
+                <b>从外部 U 盘导入标定数据</b>
+                <p>支持导入 checkerboard 图片、camera_matrix.yaml、dist_coeffs.yaml、标准图 reference.jpg。</p>
+              </div>
+              <button class="mini-btn" type="button">选择 U 盘目录</button>
+            </div>
+            <div class="settings-grid three">
+              <label class="setting-field">标定类型<select data-setting="camera.calibration.calibration_type"><option value="mono">单目相机标定</option><option value="camera_lidar">相机-雷达外参</option><option value="stereo">双目相机标定</option></select></label>
+              <label class="setting-field">棋盘格规格<input data-setting="camera.calibration.checkerboard" value="9x6" /></label>
+              <label class="setting-field">方格尺寸 mm<input data-setting="camera.calibration.square_size_mm" type="number" value="25" /></label>
+            </div>
+          </div>
         </section>
+
 
         <section id="boardSettingsPanel" class="settings-panel">
           <div class="settings-panel-head">
@@ -610,15 +591,15 @@
           <div class="settings-section implemented-setting-block">
             <div class="settings-section-title"><b>视觉盒子参数</b><span>设备身份、端口说明和基础运行参数</span></div>
             <div class="settings-grid three">
-              <label class="setting-field implemented-setting-field">设备 ID<input data-setting="vision_box.device_id" value="rk3588-001" /></label>
-              <label class="setting-field implemented-setting-field">客户 ID<input data-setting="vision_box.customer_id" value="CUST-001" /></label>
-              <label class="setting-field implemented-setting-field">默认启动模式<select data-setting="vision_box.default_mode"><option value="production">生产模式</option><option value="factory" selected>工厂模式</option></select></label>
+              <label class="setting-field">设备 ID<input data-setting="vision_box.device_id" value="rk3588-001" /></label>
+              <label class="setting-field">客户 ID<input data-setting="vision_box.customer_id" value="CUST-001" /></label>
+              <label class="setting-field">默认启动模式<select data-setting="vision_box.default_mode"><option value="production">生产模式</option><option value="factory" selected>工厂模式</option></select></label>
               <label class="setting-field readonly-setting-field">Collector 端口<input type="number" value="8090" readonly aria-readonly="true" /><small>开发阶段手动 app.py 启动，暂不开放修改。</small></label>
               <label class="setting-field readonly-setting-field">生产推理端口<input type="number" value="8082" readonly aria-readonly="true" /><small>当前与模型验证共用同一个推理服务。</small></label>
               <label class="setting-field readonly-setting-field">模型验证端口<input type="number" value="8082" readonly aria-readonly="true" /><small>切换模型会重启该端口上的推理服务。</small></label>
-              <label class="setting-field implemented-setting-field">模型目录<input data-setting="vision_box.models_dir" value="/opt/visionops/models" /></label>
-              <label class="setting-field implemented-setting-field">采集数据目录<input data-setting="vision_box.data_dir" value="/opt/visionops/edge/collector/data" /><small>保存后下一次采集、刷新图片列表、打包上传生效；不会迁移旧数据。</small></label>
-              <label class="setting-field implemented-setting-field">磁盘告警阈值<input data-setting="vision_box.disk_warn_percent" type="number" value="80" /></label>
+              <label class="setting-field">模型目录<input data-setting="vision_box.models_dir" value="/opt/visionops/models" /></label>
+              <label class="setting-field">采集数据目录<input data-setting="vision_box.data_dir" value="/opt/visionops/edge/collector/data" /><small>保存后下一次采集、刷新图片列表、打包上传生效；不会迁移旧数据。</small></label>
+              <label class="setting-field">磁盘告警阈值<input data-setting="vision_box.disk_warn_percent" type="number" value="80" /></label>
             </div>
             <div id="visionBoxEffectiveStatus" class="settings-inline-status">已实现：设备 ID、客户 ID、默认启动模式、模型目录、采集数据目录、磁盘告警阈值。端口为只读说明项。</div>
           </div>
@@ -626,7 +607,7 @@
           <div class="settings-section implemented-setting-block ntp-setting-block">
             <div class="settings-section-title"><b>时间同步</b><span>读取 chrony 状态，检查 RK3588 是否同步到上位机 NTP</span></div>
             <div class="settings-grid three">
-              <label class="setting-field implemented-setting-field">同步模式
+              <label class="setting-field">同步模式
                 <select data-setting="vision_box.time_sync.mode">
                   <option value="upper_host_ntp" selected>上位机 NTP</option>
                   <option value="public_ntp">公网 NTP</option>
@@ -684,13 +665,47 @@
           <div class="settings-panel-head">
             <div>
               <h3>算法设置</h3>
-              <p>先抽出四类任务的公共参数，再分别展示分类、检测、OBB、分割的独有参数。</p>
+              <p>主流程使用 C++ 推理参数；原 Python 算法参数保留为预留界面，后续再逐项映射。</p>
             </div>
-            <span class="settings-status-badge">分类 / 检测 / OBB / 分割</span>
+            <span class="settings-status-badge cpp-implemented-badge">C++ 推理参数</span>
           </div>
 
-          <div class="settings-section implemented-setting-block">
-            <div class="settings-section-title"><b>公共参数</b><span>四类任务通用</span></div>
+
+          <div class="settings-section cpp-settings-card cpp-implemented-setting-block">
+            <div class="settings-section-title"><b>C++ 推理与预处理参数</b><span><em class="settings-mini-badge cpp">C++已接入</em> 保存并应用后写入 cpp.env，影响当前 C++ detection / classification / OBB / segmentation / ROI pipeline。</span></div>
+            <div class="settings-grid three">
+              <label class="setting-field">检测 FPS
+                <input data-cpp-setting="detect_fps" type="number" value="10" min="1" max="60" />
+              </label>
+              <label class="setting-field">最多结果数 MaxDet
+                <input data-cpp-setting="max_det" type="number" value="100" min="1" max="1000" />
+              </label>
+              <label class="setting-field">分类 TopK
+                <input data-cpp-setting="topk" type="number" value="5" min="1" max="20" />
+              </label>
+              <label class="setting-field">检测置信度阈值
+                <input data-cpp-setting="conf_threshold" type="number" value="0.25" step="0.01" min="0" max="1" />
+              </label>
+              <label class="setting-field">NMS 阈值
+                <input data-cpp-setting="nms_threshold" type="number" value="0.45" step="0.01" min="0" max="1" />
+              </label>
+              <label class="setting-field">Mask 阈值
+                <input data-cpp-setting="mask_threshold" type="number" value="0.50" step="0.01" min="0" max="1" />
+              </label>
+              <label class="setting-field">预处理后端
+                <select data-cpp-setting="preprocess_backend"><option value="auto" selected>auto</option><option value="rga">rga</option><option value="cpu">cpu</option></select>
+              </label>
+              <label class="setting-field">RGA 模式
+                <select data-cpp-setting="rga_mode"><option value="resize_color" selected>resize_color</option><option value="resize_only">resize_only</option><option value="off">off</option></select>
+              </label>
+              <label class="setting-field readonly-setting-field">说明
+                <input value="输入尺寸跟随模型 YAML，不建议手动修改" readonly aria-readonly="true" />
+              </label>
+            </div>
+          </div>
+
+          <div class="settings-section reserved-setting-block">
+            <div class="settings-section-title"><b>公共参数</b><em class="settings-mini-badge reserved">预留界面</em><span>四类任务通用</span></div>
             <div class="settings-grid three">
               <label class="setting-field">当前模型<select data-setting="algorithm.common.model_mode"><option value="auto">自动选择最新模型</option><option value="manual">手动选择模型</option></select></label>
               <label class="setting-field">输入尺寸<select data-setting="algorithm.common.input_size"><option value="224x224">224 × 224</option><option value="640x640" selected>640 × 640</option><option value="custom">自定义</option></select></label>
@@ -704,22 +719,22 @@
             </div>
           </div>
 
-          <div class="algorithm-task-grid">
-            <article class="algorithm-task-card implemented-setting-block">
+          <div class="algorithm-task-grid reserved-algorithm-grid">
+            <article class="algorithm-task-card reserved-setting-block">
               <h4>分类 Classification</h4>
               <p>适合合格/不合格、产品类别判断。</p>
               <label>TopK <input data-setting="algorithm.classification.topk" type="number" value="5" /></label>
               <label>分类阈值 <input data-setting="algorithm.classification.score_threshold" type="number" value="0.50" step="0.01" /></label>
               <label>低置信度策略 <select data-setting="algorithm.classification.low_confidence_policy"><option value="review">提示人工复核</option><option value="top1">直接输出最高类别</option><option value="unknown">判定为未知</option></select></label>
             </article>
-            <article class="algorithm-task-card implemented-setting-block">
+            <article class="algorithm-task-card reserved-setting-block">
               <h4>检测 Detection</h4>
               <p>适合水平框目标检测。</p>
               <label>置信度阈值 <input data-setting="algorithm.detection.conf_threshold" type="number" value="0.25" step="0.01" /></label>
               <label>NMS 阈值 <input data-setting="algorithm.detection.nms_threshold" type="number" value="0.45" step="0.01" /></label>
               <label>显示中心点 <select data-setting="algorithm.detection.show_center"><option value="true" selected>开启</option><option value="false">关闭</option></select></label>
             </article>
-            <article class="algorithm-task-card implemented-setting-block">
+            <article class="algorithm-task-card reserved-setting-block">
               <h4>旋转框 OBB</h4>
               <p>适合倾斜目标、长条形零件检测。</p>
               <label>OBB 置信度 <input data-setting="algorithm.obb_detection.conf_threshold" type="number" value="0.25" step="0.01" /></label>
@@ -727,7 +742,7 @@
               <label>NMS 类型 <select data-setting="algorithm.obb_detection.nms_mode"><option value="horizontal">水平外接框 NMS</option><option value="rotated" selected>Rotated NMS</option></select></label>
               <label>角度显示 <select data-setting="algorithm.obb_detection.show_angle"><option value="true" selected>显示角度</option><option value="false">隐藏角度</option></select></label>
             </article>
-            <article class="algorithm-task-card implemented-setting-block">
+            <article class="algorithm-task-card reserved-setting-block">
               <h4>分割 Segmentation</h4>
               <p>适合缺陷区域、轮廓面积和形状判断。</p>
               <label>分割置信度 <input data-setting="algorithm.segmentation.conf_threshold" type="number" value="0.25" step="0.01" /></label>
@@ -742,10 +757,11 @@
 
       </div>
 
-      <div class="dialog-actions settings-actions">
-        <button id="testRtspCameraBtn" class="big-action secondary compact">测试相机连接</button>
-        <button id="resetSettingsMock" class="big-action secondary compact">恢复默认</button>
-        <button id="saveSettingsMock" class="big-action primary compact">保存设置</button>
+      <div class="dialog-actions settings-actions settings-actions-v0941">
+        <span class="settings-footer-note">v0.9.4.1：主流程已切到 C++。相机/算法请使用上方蓝色 C++ 区块的“保存并应用重启”；视觉盒子参数的统一保存将在 v0.9.4.2 接入。</span>
+        <button class="big-action secondary compact disabled-action" type="button" disabled>测试相机连接（旧入口隐藏）</button>
+        <button class="big-action secondary compact disabled-action" type="button" disabled>恢复默认（后续接入）</button>
+        <button class="big-action primary compact disabled-action" type="button" disabled>统一保存（v0.9.4.2）</button>
       </div>
     </div>
   </div>

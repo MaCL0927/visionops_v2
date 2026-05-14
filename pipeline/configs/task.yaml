@@ -8,8 +8,11 @@ dataset:
   processed_yaml: data/processed_obb/data.yaml
 classes:
   names:
-  - bottle
-  num_classes: 1
+  - green
+  - yellow
+  - blue
+  - red
+  num_classes: 4
 model:
   architecture: yolov8n-obb
   pretrained_weights: models/pretrained/yolov8n-obb.pt
@@ -17,7 +20,7 @@ model:
   - 640
   - 640
 train:
-  epochs: 100
+  epochs: 20
   batch_size: 4
   lr0: 0.001
   device: cuda
@@ -36,7 +39,7 @@ export:
   yolo_exec: /home/pc/anaconda3/envs/pt2onnx/bin/yolo
 rknn:
   python_exec: /home/pc/anaconda3/envs/rknn311/bin/python
-  target_platform: rk3588
+  target_platform: rk3576
   onnx_model: models/export_obb/model.onnx
   rknn_model: models/export_obb/model.rknn
   perf_report: models/export_obb/rknn_report.json

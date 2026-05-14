@@ -925,3 +925,83 @@
 /* v0.9.1: hide legacy standalone C++ status card; C++ realtime results are merged into original validation preview/result cards. */
 #cppInferenceStatusCard{display:none !important;}
 .cpp-runtime-line{background:rgba(15,23,42,.04);border:1px dashed rgba(100,116,139,.28);margin-bottom:8px;}
+
+
+/* v0.9.4.1：设置界面重排。蓝色表示 C++ 主流程已接入；黄色/灰色表示旧 Python/预留界面，仅保留展示。 */
+:root{
+  --cpp-setting-bg:#eff6ff;
+  --cpp-setting-border:#2563eb;
+  --cpp-setting-title-bg:rgba(37,99,235,.11);
+  --cpp-field-bg:rgba(37,99,235,.08);
+  --reserved-setting-bg:#fffbeb;
+  --reserved-setting-border:#f59e0b;
+  --reserved-setting-title-bg:rgba(245,158,11,.12);
+  --reserved-field-bg:rgba(245,158,11,.07);
+}
+.cpp-implemented-badge{background:#dbeafe!important;border-color:#60a5fa!important;color:#1d4ed8!important;}
+.settings-section.cpp-implemented-setting-block,
+.camera-type-panel.cpp-implemented-setting-block,
+.algorithm-task-card.cpp-implemented-setting-block{
+  background:var(--cpp-setting-bg);
+  border-color:var(--cpp-setting-border);
+  box-shadow:0 10px 24px rgba(37,99,235,.10);
+}
+.cpp-implemented-setting-block > .settings-section-title,
+.cpp-implemented-setting-block h4{
+  background:var(--cpp-setting-title-bg);
+  border-radius:18px;
+  padding:8px 10px;
+}
+.cpp-implemented-setting-block .setting-field{
+  background:var(--cpp-field-bg);
+  border:1px solid rgba(37,99,235,.25);
+  border-radius:18px;
+  padding:8px;
+}
+.cpp-implemented-setting-block input,
+.cpp-implemented-setting-block select{
+  border-color:rgba(37,99,235,.45);
+  background:#fff;
+}
+.inner-cpp-panel{box-shadow:none!important;margin-top:14px;}
+.settings-section.reserved-setting-block,
+.camera-type-panel.reserved-setting-block,
+.algorithm-task-card.reserved-setting-block{
+  background:var(--reserved-setting-bg);
+  border-color:var(--reserved-setting-border);
+  border-style:dashed;
+  box-shadow:none;
+}
+.reserved-setting-block > .settings-section-title,
+.reserved-setting-block h4{
+  background:var(--reserved-setting-title-bg);
+  border-radius:18px;
+  padding:8px 10px;
+}
+.reserved-setting-block .setting-field,
+.reserved-setting-block label{
+  background:var(--reserved-field-bg);
+  border:1px dashed rgba(245,158,11,.35);
+  border-radius:18px;
+  padding:8px;
+}
+.settings-mini-badge{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  margin-left:8px;
+  margin-right:6px;
+  padding:3px 8px;
+  border-radius:999px;
+  font-size:12px;
+  font-style:normal;
+  font-weight:1000;
+  border:1px solid transparent;
+  white-space:nowrap;
+}
+.settings-mini-badge.cpp{background:#dbeafe;border-color:#93c5fd;color:#1d4ed8;}
+.settings-mini-badge.reserved{background:#fef3c7;border-color:#fbbf24;color:#92400e;}
+.settings-footer-note{flex:1 1 420px;color:#64748b;font-size:13px;font-weight:900;line-height:1.45;text-align:left;}
+.settings-actions-v0941{align-items:center;}
+.disabled-action{opacity:.55;cursor:not-allowed!important;}
+.reserved-algorithm-grid .algorithm-task-card h4::after{content:'预留';display:inline-flex;margin-left:8px;padding:2px 7px;border-radius:999px;background:#fef3c7;border:1px solid #fbbf24;color:#92400e;font-size:11px;font-weight:1000;vertical-align:middle;}
