@@ -2897,6 +2897,7 @@ const loadCppSettingsBtn=document.getElementById('loadCppSettingsBtn');
 const saveCppSettingsBtn=document.getElementById('saveCppSettingsBtn');
 const applyCppSettingsBtn=document.getElementById('applyCppSettingsBtn');
 const testCppSettingsPreviewBtn=document.getElementById('testCppSettingsPreviewBtn');
+const testCppUnifiedPreviewBtn=document.getElementById('testCppUnifiedPreviewBtn');
 let usbDevicesLoaded=false;
 let usbDevicesLoading=false;
 let cppUsbDevicesLoaded=false;
@@ -2916,12 +2917,7 @@ function closeSettingsModal(){
 function switchSettingsTab(tabId){
   settingTabs.forEach(btn=>btn.classList.toggle('active',btn.dataset.settingsTab===tabId));
   settingPanels.forEach(panel=>panel.classList.toggle('active',panel.id===tabId));
-  if(tabId==='cppSettingsPanel'){
-    loadCppSettingsToForm().catch(()=>{});
-    if((cppSettingCameraType && cppSettingCameraType.value)==='usb' && !cppUsbDevicesLoaded){
-      refreshCppUsbCameraDevices().catch(()=>{});
-    }
-  }
+  // v0.9.4.2：设置界面只保留三栏，C++ 设置已经迁移到相机/算法设置；切换标签不再触发旧 Python 或 USB 自动扫描逻辑。
 }
 function updateCameraTypePanel(){
   const type=(settingCameraType && settingCameraType.value) || 'rtsp';
@@ -3084,9 +3080,8 @@ function updateCppCameraTypePanel(){
   Object.entries(cppCameraTypePanels).forEach(([key,panel])=>{
     if(panel) panel.classList.toggle('active', key===type);
   });
-  if(type==='usb' && !cppUsbDevicesLoaded){
-    refreshCppUsbCameraDevices().catch(()=>{});
-  }
+  // v0.9.4.2：USB 设备节点固定为 /dev/video0-7，不再进入设置页时自动扫描。
+  if(type==='usb') ensureFixedCppVideoOptions(cppUsbDeviceNodeSelect && cppUsbDeviceNodeSelect.value);
 }
 function setCppSettingsStatus(message, isWarn=false){
   if(!cppSettingsStatus) return;
@@ -3117,6 +3112,22 @@ function normalizeCppSettingsPayload(raw){
   out.rga_mode=String(out.rga_mode || 'resize_color');
   return out;
 }
+function ensureFixedCppVideoOptions(preferredValue){
+  if(!cppUsbDeviceNodeSelect) return '';
+  const fixed=Array.from({length:8},(_,idx)=>`/dev/video${idx}`);
+  const current=String(preferredValue || cppUsbDeviceNodeSelect.value || '/dev/video7');
+  cppUsbDeviceNodeSelect.innerHTML='';
+  fixed.forEach((value)=>{
+    cppUsbDeviceNodeSelect.appendChild(new Option(value,value));
+  });
+  cppUsbDeviceNodeSelect.value=fixed.includes(current) ? current : '/dev/video7';
+  if(cppUsbDeviceHint){
+    cppUsbDeviceHint.textContent='固定候选 /dev/video0 - /dev/video7；请根据实际 RGB 节点手动选择。';
+  }
+  cppUsbDevicesLoaded=true;
+  return cppUsbDeviceNodeSelect.value;
+}
+
 function setCppSelectOrAppend(select,value){
   if(!select) return;
   const text=String(value ?? '');
@@ -3146,16 +3157,14 @@ function fillCppSettingsForm(settings){
     document.getElementById('cppSettingRtspUrl').value=cfg.camera_source || '';
   }
   if(cppUsbDeviceNodeSelect && cfg.camera_type==='usb'){
-    setCppSelectOrAppend(cppUsbDeviceNodeSelect,cfg.camera_source || '/dev/video7');
+    ensureFixedCppVideoOptions(cfg.camera_source || '/dev/video7');
   }
   if(cppSettingResolution){
     const res=(cfg.camera_width && cfg.camera_height) ? `${cfg.camera_width}x${cfg.camera_height}` : '1280x800';
     setCppSelectOrAppend(cppSettingResolution,res);
   }
   updateCppCameraTypePanel();
-  if(cfg.camera_type==='usb'){
-    refreshCppUsbCameraDevices(cfg.camera_source).catch(()=>{});
-  }
+
   const intervalMs=getCppPreviewIntervalMs();
   setCppSettingsStatus(`已读取 C++ 设置：${cfg.camera_type} · ${cfg.camera_source || '--'} · ${cfg.camera_width || 0}×${cfg.camera_height || 0} · ${cfg.camera_fourcc || '--'}；前端预览约 ${(1000/intervalMs).toFixed(1)}fps`);
 }
@@ -3242,49 +3251,9 @@ async function testCppSettingsPreview(){
   }
 }
 async function refreshCppUsbCameraDevices(preferredValue){
-  if(!cppUsbDeviceNodeSelect || cppUsbDevicesLoading) return;
-  cppUsbDevicesLoading=true;
-  if(cppUsbDeviceHint) cppUsbDeviceHint.textContent='正在扫描 USB 摄像头节点...';
-  try{
-    const data=await apiGet('/api/settings/camera/devices');
-    const devices=(data && data.items) || [];
-    const current=preferredValue || cppUsbDeviceNodeSelect.value || (cppSettingsCache && cppSettingsCache.camera_source) || '';
-    cppUsbDeviceNodeSelect.innerHTML='';
-    if(!devices.length){
-      const fallback=current || '/dev/video7';
-      cppUsbDeviceNodeSelect.appendChild(new Option(`${fallback}（未扫描到设备，请手动确认）`, fallback));
-      cppUsbDeviceNodeSelect.value=fallback;
-      if(cppUsbDeviceHint) cppUsbDeviceHint.textContent='未扫描到 /dev/video*，请确认相机连接和 v4l-utils。';
-      return;
-    }
-    let recommendedValue='';
-    devices.forEach(item=>{
-      const opt=formatUsbDeviceOption(item);
-      if(!opt.value) return;
-      const option=new Option(opt.label,opt.value);
-      option.dataset.path=item.path || '';
-      option.dataset.recommended=item.recommended ? '1' : '0';
-      cppUsbDeviceNodeSelect.appendChild(option);
-      if(item.recommended && !recommendedValue) recommendedValue=opt.value;
-    });
-    const values=Array.from(cppUsbDeviceNodeSelect.options).map(opt=>opt.value);
-    if(current && !values.includes(current)){
-      cppUsbDeviceNodeSelect.appendChild(new Option(`${current}（当前配置）`, current));
-    }
-    const shouldAutoPick=!current || current==='/dev/video0' || !values.includes(current);
-    cppUsbDeviceNodeSelect.value=(shouldAutoPick && recommendedValue) ? recommendedValue : (current || recommendedValue || cppUsbDeviceNodeSelect.options[0].value);
-    const recommended=devices.find(item=>item.recommended);
-    if(cppUsbDeviceHint){
-      cppUsbDeviceHint.textContent=recommended
-        ? `已推荐：${recommended.preferred_path || recommended.stable_path || recommended.path}；如测试失败，可改选其他节点。`
-        : '已列出所有 /dev/video* 节点，未能自动判断 RGB 节点，请逐个测试可读项。';
-    }
-    cppUsbDevicesLoaded=true;
-  }catch(err){
-    if(cppUsbDeviceHint) cppUsbDeviceHint.textContent=`扫描失败：${err.message || err}`;
-  }finally{
-    cppUsbDevicesLoading=false;
-  }
+  // v0.9.4.2：不再扫描设备，固定提供 /dev/video0 - /dev/video7。
+  ensureFixedCppVideoOptions(preferredValue || (cppSettingsCache && cppSettingsCache.camera_source) || '/dev/video7');
+  return {ok:true, items:Array.from({length:8},(_,idx)=>({path:`/dev/video${idx}`})), message:'已使用固定 /dev/video0-7 候选列表'};
 }
 
 function fillSettingsForm(settings){
@@ -3351,6 +3320,46 @@ function refreshBackendCameraPreview(){
   }
   if(cameraVideo) cameraVideo.classList.remove('active');
   if(simulatedCamera) simulatedCamera.classList.remove('active');
+}
+
+async function saveUnifiedSettingsFromForm(){
+  const btn=document.getElementById('saveSettingsMock');
+  const oldText=btn ? btn.textContent : '';
+  if(btn){btn.disabled=true;btn.textContent='保存并应用中...';}
+  try{
+    if(settingCameraType && settingCameraType.value === 'rtsp') syncRtspUrlFromFields();
+    const cppPayload=collectCppSettingsFromForm();
+    setCppSettingsStatus('正在保存 C++ 相机/算法设置，写入 cpp.env 并重启 C++ 服务...');
+    const cppData=await apiPost('/api/cpp/settings/apply', cppPayload);
+    const cppSettings=cppData.settings || cppPayload;
+    fillCppSettingsForm(cppSettings);
+
+    const settings=collectSettingsFromForm();
+    const saved=await apiPost('/api/settings', settings);
+    runtimeSettingsCache=saved.settings || settings;
+    fillSettingsForm(runtimeSettingsCache);
+
+    const vbResult=await apiPost('/api/settings/vision-box/apply',{});
+    updateVisionBoxEffectiveStatus(vbResult);
+    await refreshTimeSyncStatus();
+    if(vbResult && vbResult.vision_box){
+      deviceId=vbResult.vision_box.device_id || deviceId;
+      const uploadDevice=document.getElementById('uploadDeviceId');
+      const uploadCustomer=document.getElementById('uploadCustomerId');
+      if(uploadDevice) uploadDevice.value=deviceId;
+      if(uploadCustomer && vbResult.vision_box.customer_id) uploadCustomer.value=vbResult.vision_box.customer_id;
+    }
+
+    await refreshCppInferenceStatus(false).catch(()=>{});
+    setCppSettingsStatus('已统一保存：C++ 相机/算法设置已应用，视觉盒子基础参数已生效。');
+    showToast('设置已统一保存并应用');
+  }catch(err){
+    const msg=err.message || '统一保存失败';
+    setCppSettingsStatus(`统一保存失败：${msg}`, true);
+    showToast(msg);
+  }finally{
+    if(btn){btn.disabled=false;btn.textContent=oldText || '统一保存并应用';}
+  }
 }
 
 async function saveRuntimeSettingsFromForm(){
@@ -3442,9 +3451,10 @@ const resetSettingsBtn=document.getElementById('resetSettingsMock');
 const testRtspCameraBtn=document.getElementById('testRtspCameraBtn');
 const refreshTimeSyncStatusBtn=document.getElementById('refreshTimeSyncStatusBtn');
 const testTimeSyncBtn=document.getElementById('testTimeSyncBtn');
-if(saveSettingsBtn) saveSettingsBtn.addEventListener('click',saveRuntimeSettingsFromForm);
+if(saveSettingsBtn) saveSettingsBtn.addEventListener('click',saveUnifiedSettingsFromForm);
 if(resetSettingsBtn) resetSettingsBtn.addEventListener('click',resetRuntimeSettings);
 if(testRtspCameraBtn) testRtspCameraBtn.addEventListener('click',testCameraConnection);
+if(testCppUnifiedPreviewBtn) testCppUnifiedPreviewBtn.addEventListener('click',testCppSettingsPreview);
 if(refreshUsbDevicesBtn) refreshUsbDevicesBtn.addEventListener('click',()=>refreshUsbCameraDevices().catch(err=>showToast(err.message || 'USB 设备扫描失败')));
 if(cppSettingCameraType) cppSettingCameraType.addEventListener('change',updateCppCameraTypePanel);
 if(refreshCppUsbDevicesBtn) refreshCppUsbDevicesBtn.addEventListener('click',()=>refreshCppUsbCameraDevices().catch(err=>showToast(err.message || 'C++ USB 设备扫描失败')));

@@ -576,7 +576,8 @@
 .settings-tab-row{
   flex-shrink:0;
   display:grid;
-  grid-template-columns:repeat(4,1fr);
+  grid-template-columns:repeat(3,minmax(220px,320px));
+  justify-content:center;
   gap:14px;
   padding:12px 22px;
   background:#f8fbff;
@@ -664,7 +665,7 @@
 .algorithm-task-card input,.algorithm-task-card select{min-height:46px;border:2px solid #dce6f0;background:#f8fbff;border-radius:16px;padding:9px 12px;font-size:16px;font-weight:800;color:#0f172a}
 .network-card-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.network-card h4{margin-bottom:14px}.board-action-strip{display:flex;gap:12px;flex-wrap:wrap;margin:0 0 16px}.board-action-strip .mini-btn{min-height:48px;background:#fff}
 .settings-actions{flex-shrink:0;border-top:1px solid #dce6f0;background:#fff;padding:12px 22px!important}.settings-actions .big-action{min-width:150px}
-@media (max-width:1300px){.settings-dialog{height:calc(100vh - 12px);width:calc(100vw - 12px)}.settings-grid.three,.algorithm-task-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.settings-tab-row{grid-template-columns:1fr 1fr}.settings-main-tab{font-size:24px}.settings-toggle{min-width:120px}}
+@media (max-width:1300px){.settings-dialog{height:calc(100vh - 12px);width:calc(100vw - 12px)}.settings-grid.three,.algorithm-task-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.settings-tab-row{grid-template-columns:repeat(3,minmax(180px,1fr));justify-content:center}.settings-main-tab{font-size:24px}.settings-toggle{min-width:120px}}
 @media (max-width:760px){.settings-tab-row,.settings-grid.two,.settings-grid.three,.algorithm-task-grid,.network-card-grid{grid-template-columns:1fr}.settings-main-tab{font-size:22px;min-height:60px}.settings-panel-head,.settings-section-title,.calibration-import-card{grid-template-columns:1fr;display:block}.settings-status-badge{display:inline-block;margin-top:12px}.calibration-import-card .mini-btn{margin-top:12px;width:100%}.settings-toggle{width:100%;min-height:64px}.settings-actions{flex-direction:column}.settings-actions .big-action{width:100%}}
 
 /* setting_v1.3: 相机类型选择压缩到标题右侧 */
@@ -1005,3 +1006,11 @@
 .settings-actions-v0941{align-items:center;}
 .disabled-action{opacity:.55;cursor:not-allowed!important;}
 .reserved-algorithm-grid .algorithm-task-card h4::after{content:'预留';display:inline-flex;margin-left:8px;padding:2px 7px;border-radius:999px;background:#fef3c7;border:1px solid #fbbf24;color:#92400e;font-size:11px;font-weight:1000;vertical-align:middle;}
+
+
+/* v0.9.4.2：设置保存逻辑切到 C++，三栏按钮居中，底部统一保存。 */
+.settings-actions-v0942{align-items:center;gap:12px;}
+.settings-actions-v0942 .big-action:not(.disabled-action){cursor:pointer;}
+.settings-actions-v0942 .primary{background:#0f172a!important;border-color:#0f172a!important;color:#fff!important;}
+#cppSettingsStatus.warn{background:#fff7ed;border-color:#fdba74;color:#9a3412;}
+#cppSettingsStatus{border:1px dashed rgba(37,99,235,.35);border-radius:18px;background:#f8fbff;padding:10px 12px;color:#334155;font-size:14px;font-weight:900;line-height:1.45;}

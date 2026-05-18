@@ -65,6 +65,14 @@ _CPP_ENV_TO_SETTING = {
     "VISIONOPS_CPP_RTSP_TIMEOUT_MS": "rtsp_timeout_ms",
     "VISIONOPS_CPP_GST_LATENCY_MS": "gst_latency_ms",
     "VISIONOPS_CPP_QUIET_FFMPEG_LOG": "quiet_ffmpeg_log",
+    "VISIONOPS_CPP_CONF_THRESHOLD": "conf_threshold",
+    "VISIONOPS_CPP_NMS_THRESHOLD": "nms_threshold",
+    "VISIONOPS_CPP_MASK_THRESHOLD": "mask_threshold",
+    "VISIONOPS_CPP_TOPK": "topk",
+    "VISIONOPS_CPP_MAX_DET": "max_det",
+    "VISIONOPS_CPP_OUTPUT_MODE": "output_mode",
+    "VISIONOPS_CPP_PREPROCESS_BACKEND": "preprocess_backend",
+    "VISIONOPS_CPP_RGA_MODE": "rga_mode",
 }
 
 _SETTING_TO_CPP_ENV = {
@@ -87,6 +95,14 @@ _SETTING_TO_CPP_ENV = {
     "rtsp_timeout_ms": "VISIONOPS_CPP_RTSP_TIMEOUT_MS",
     "gst_latency_ms": "VISIONOPS_CPP_GST_LATENCY_MS",
     "quiet_ffmpeg_log": "VISIONOPS_CPP_QUIET_FFMPEG_LOG",
+    "conf_threshold": "VISIONOPS_CPP_CONF_THRESHOLD",
+    "nms_threshold": "VISIONOPS_CPP_NMS_THRESHOLD",
+    "mask_threshold": "VISIONOPS_CPP_MASK_THRESHOLD",
+    "topk": "VISIONOPS_CPP_TOPK",
+    "max_det": "VISIONOPS_CPP_MAX_DET",
+    "output_mode": "VISIONOPS_CPP_OUTPUT_MODE",
+    "preprocess_backend": "VISIONOPS_CPP_PREPROCESS_BACKEND",
+    "rga_mode": "VISIONOPS_CPP_RGA_MODE",
 }
 
 _NUMERIC_KEYS = {
@@ -99,7 +115,15 @@ _NUMERIC_KEYS = {
     "snapshot_fps",
     "rtsp_timeout_ms",
     "gst_latency_ms",
+    "topk",
+    "max_det",
 }
+_FLOAT_KEYS = {
+    "conf_threshold",
+    "nms_threshold",
+    "mask_threshold",
+}
+
 _BOOL_KEYS = {
     "stream_auto_start",
     "enable_snapshot",
@@ -127,6 +151,14 @@ _DEFAULT_SETTINGS: Dict[str, Any] = {
     "rtsp_timeout_ms": 5000,
     "gst_latency_ms": 100,
     "quiet_ffmpeg_log": True,
+    "conf_threshold": 0.25,
+    "nms_threshold": 0.45,
+    "mask_threshold": 0.5,
+    "topk": 5,
+    "max_det": 100,
+    "output_mode": "float",
+    "preprocess_backend": "auto",
+    "rga_mode": "resize_color",
 }
 
 
@@ -189,10 +221,22 @@ def _normalize_settings(raw: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
     if data["rtsp_transport"] not in {"tcp", "udp"}:
         data["rtsp_transport"] = "tcp"
     data["camera_fourcc"] = _normalize_fourcc(data.get("camera_fourcc"))
+    data["output_mode"] = str(data.get("output_mode") or "float").strip().lower() or "float"
+    data["preprocess_backend"] = str(data.get("preprocess_backend") or "auto").strip().lower() or "auto"
+    if data["preprocess_backend"] not in {"auto", "rga", "cpu"}:
+        data["preprocess_backend"] = "auto"
+    data["rga_mode"] = str(data.get("rga_mode") or "resize_color").strip().lower() or "resize_color"
+    if data["rga_mode"] not in {"resize_color", "resize_only", "off"}:
+        data["rga_mode"] = "resize_color"
 
     for key in _NUMERIC_KEYS:
         default = int(_DEFAULT_SETTINGS.get(key, 0))
         data[key] = _as_int(data.get(key), default)
+
+    for key in _FLOAT_KEYS:
+        default = float(_DEFAULT_SETTINGS.get(key, 0.0))
+        value = _as_float_or_none(data.get(key))
+        data[key] = default if value is None else float(value)
 
     if data["camera_buffer_size"] <= 0:
         data["camera_buffer_size"] = 1
@@ -672,7 +716,7 @@ def apply_cpp_camera_settings(settings: Optional[Mapping[str, Any]] = None) -> D
     health = wait_cpp_health()
     return {
         "ok": True,
-        "message": "C++ 相机设置已写入 cpp.env，并已重启 C++ 推理服务",
+        "message": "C++ 相机/算法设置已写入 cpp.env，并已重启 C++ 推理服务",
         "settings": normalized,
         "cpp_env_path": str(env_path),
         "restart": restart_info,

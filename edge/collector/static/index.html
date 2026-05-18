@@ -355,18 +355,21 @@
             </div>
 
             <div id="cppCameraTypeUsb" class="cpp-camera-type-panel camera-inline-panel cpp-implemented-setting-block inner-cpp-panel">
-              <div class="settings-section-title"><b>C++ USB / Orbbec RGB 参数</b><span>复用 USB 设备扫描，建议 Orbbec 第一版使用 1280×800、YUYV、10fps。</span></div>
+              <div class="settings-section-title"><b>C++ USB / Orbbec RGB 参数</b><span>固定从 /dev/video0 - /dev/video7 中选择，建议 Orbbec 第一版使用 1280×800、YUYV、10fps。</span></div>
               <div class="settings-grid three">
                 <label class="setting-field">设备节点
                   <select id="cppUsbDeviceNodeSelect">
-                    <option value="/dev/video7">/dev/video7</option>
+                    <option value="/dev/video0">/dev/video0</option>
+                    <option value="/dev/video1">/dev/video1</option>
+                    <option value="/dev/video2">/dev/video2</option>
+                    <option value="/dev/video3">/dev/video3</option>
+                    <option value="/dev/video4">/dev/video4</option>
+                    <option value="/dev/video5">/dev/video5</option>
+                    <option value="/dev/video6">/dev/video6</option>
+                    <option value="/dev/video7" selected>/dev/video7</option>
                   </select>
-                  <small id="cppUsbDeviceHint">点击“刷新 USB 设备”后会列出可读取的 video 节点。</small>
+                  <small id="cppUsbDeviceHint">固定候选 /dev/video0 - /dev/video7；不再自动扫描，避免频繁探测 USB 节点。</small>
                 </label>
-                <div class="setting-field">USB 设备扫描
-                  <button id="refreshCppUsbDevicesBtn" class="secondary small" type="button">刷新 USB 设备</button>
-                  <small>优先选择带“推荐 / Orbbec / 可读”的节点，建议后续改用 /dev/v4l/by-id 稳定路径。</small>
-                </div>
                 <label class="setting-field">取流后端
                   <select id="cppSettingUsbBackend" data-cpp-setting="stream_backend"><option value="opencv" selected>OpenCV / V4L2</option></select>
                 </label>
@@ -407,79 +410,10 @@
           </div>
 
           <div class="settings-section cpp-settings-card cpp-implemented-setting-block">
-            <div class="settings-section-title"><b>C++ 设置状态与应用</b><span>保存只写配置；应用会写 cpp.env 并重启 C++ 服务。按钮继续复用现有 C++ 设置接口。</span></div>
+            <div class="settings-section-title"><b>C++ 设置状态</b><span>读取、保存、应用和测试预览已合并到底部统一按钮区。</span></div>
             <div id="cppSettingsStatus" class="settings-inline-status">尚未读取 C++ 设置。</div>
-            <div class="settings-actions compact-actions cpp-settings-actions">
-              <button id="loadCppSettingsBtn" class="secondary small" type="button">读取 C++ 设置</button>
-              <button id="saveCppSettingsBtn" class="secondary small" type="button">保存 C++ 设置</button>
-              <button id="applyCppSettingsBtn" class="primary small" type="button">保存并应用重启</button>
-              <button id="testCppSettingsPreviewBtn" class="secondary small" type="button">测试 C++ 预览</button>
-            </div>
           </div>
-
-          <div class="settings-section camera-source-setting-block reserved-setting-block">
-            <div class="settings-section-title camera-source-title">
-              <b>相机类型与专属参数</b><em class="settings-mini-badge reserved">预留界面</em>
-              <select id="settingCameraType" class="camera-type-title-select" aria-label="相机类型" data-setting="camera.type">
-                <option value="usb">USB / 常规相机</option>
-                <option value="rtsp" selected>RTSP 网络相机</option>
-                <option value="industrial">工业相机</option>
-                <option value="mock">模拟相机</option>
-              </select>
-              <span>原 Python 相机设置界面保留展示；v0.9.4.1 暂不作为主流程保存入口</span>
-            </div>
-
-            <div id="cameraTypeUsb" class="camera-type-panel camera-inline-panel">
-              <div class="settings-section-title"><b>USB / 常规相机参数</b><span>自动扫描 /dev/video*，优先推荐 Orbbec RGB 节点；也可手动选择其他节点</span></div>
-              <div class="settings-grid three">
-                <label class="setting-field">设备节点
-                  <select id="usbDeviceNodeSelect" data-setting="camera.usb.device_node">
-                    <option value="/dev/video0">/dev/video0</option>
-                  </select>
-                  <small id="usbDeviceHint">点击“刷新 USB 设备”后会列出可读取的 video 节点。</small>
-                </label>
-                <label class="setting-field">采集后端<select data-setting="camera.usb.backend"><option value="opencv">OpenCV</option><option value="v4l2">V4L2</option><option value="browser">浏览器 getUserMedia</option></select></label>
-                <label class="setting-field">缓冲帧数<input data-setting="camera.usb.buffer_size" type="number" value="1" min="1" /></label>
-                <div class="setting-field">USB 设备扫描<button id="refreshUsbDevicesBtn" class="secondary small" type="button">刷新 USB 设备</button><small>建议选择带“推荐 / Orbbec / RGB”的节点。若自动识别失败，可选择任意能测试通过的 /dev/videoX。</small></div>
-              </div>
-            </div>
-
-            <div id="cameraTypeRtsp" class="camera-type-panel camera-inline-panel active">
-              <div class="settings-section-title"><b>RTSP 网络相机参数</b><span>适合海康、大华等 IP 相机</span></div>
-              <div class="settings-grid three">
-                <label class="setting-field">相机 IP<input data-setting="camera.rtsp.ip" value="192.168.2.64" /></label>
-                <label class="setting-field">端口<input data-setting="camera.rtsp.port" type="number" value="554" /></label>
-                <label class="setting-field">通道<select data-setting="camera.rtsp.channel"><option value="101">主码流 101</option><option value="102" selected>子码流 102</option></select></label>
-                <label class="setting-field">用户名<input data-setting="camera.rtsp.username" value="admin" /></label>
-                <label class="setting-field">密码<input data-setting="camera.rtsp.password" type="password" value="password" /></label>
-                <label class="setting-field">RTSP 传输<select data-setting="camera.rtsp.transport"><option value="tcp" selected>TCP</option><option value="udp">UDP</option></select></label>
-                <label class="setting-field full">RTSP URL<input data-setting="camera.rtsp.url" value="rtsp://admin:password@192.168.2.64:554/Streaming/Channels/102" /></label>
-              </div>
-            </div>
-
-            <div id="cameraTypeIndustrial" class="camera-type-panel camera-inline-panel">
-              <div class="settings-section-title"><b>工业相机参数</b><span>预留 GigE / USB3 Vision / SDK 接入</span></div>
-              <div class="settings-grid three">
-                <label class="setting-field">厂家<select data-setting="camera.industrial.vendor"><option value="hikrobot">海康机器人</option><option value="daheng">大恒</option><option value="basler">Basler</option><option value="other">其他</option></select></label>
-                <label class="setting-field">触发模式<select data-setting="camera.industrial.trigger_mode"><option value="continuous">连续采集</option><option value="software">软触发</option><option value="hardware">硬触发</option></select></label>
-                <label class="setting-field">触发源<select data-setting="camera.industrial.trigger_source"><option value="Line0">Line0</option><option value="Line1">Line1</option><option value="Software">Software</option></select></label>
-                <label class="setting-field">ROI X<input data-setting="camera.industrial.roi_x" type="number" value="0" /></label>
-                <label class="setting-field">ROI Y<input data-setting="camera.industrial.roi_y" type="number" value="0" /></label>
-                <label class="setting-field">ROI W/H<input data-setting="camera.industrial.roi_wh" value="1280x720" /></label>
-              </div>
-            </div>
-
-            <div id="cameraTypeMock" class="camera-type-panel camera-inline-panel">
-              <div class="settings-section-title"><b>模拟相机参数</b><span>用于无摄像头调试和演示</span></div>
-              <div class="settings-grid three">
-                <label class="setting-field">模拟图案<select data-setting="camera.mock.pattern"><option value="detection_scene">检测框场景</option><option value="checkerboard">棋盘格</option><option value="plain">纯色背景</option></select></label>
-                <label class="setting-field">模拟帧率<input data-setting="camera.mock.fps" type="number" value="10" /></label>
-                <label class="setting-field">是否叠加时间戳<select data-setting="camera.mock.timestamp"><option value="true" selected>是</option><option value="false">否</option></select></label>
-              </div>
-            </div>
-          </div>
-
-          <div class="settings-section reserved-setting-block">
+<div class="settings-section reserved-setting-block">
             <div class="settings-section-title"><b>通用图像参数</b><em class="settings-mini-badge reserved">预留界面</em><span>适用于大部分相机</span></div>
             <div class="settings-grid three">
               <label class="setting-field">分辨率
@@ -757,11 +691,11 @@
 
       </div>
 
-      <div class="dialog-actions settings-actions settings-actions-v0941">
-        <span class="settings-footer-note">v0.9.4.1：主流程已切到 C++。相机/算法请使用上方蓝色 C++ 区块的“保存并应用重启”；视觉盒子参数的统一保存将在 v0.9.4.2 接入。</span>
-        <button class="big-action secondary compact disabled-action" type="button" disabled>测试相机连接（旧入口隐藏）</button>
+      <div class="dialog-actions settings-actions settings-actions-v0942">
+        <span class="settings-footer-note">v0.9.4.2：相机设置和算法设置写入 C++ cpp.env 并重启 C++ 服务；视觉盒子设置继续保存到 runtime_overrides.yaml。</span>
+        <button id="testCppUnifiedPreviewBtn" class="big-action secondary compact" type="button">测试 C++ 预览</button>
         <button class="big-action secondary compact disabled-action" type="button" disabled>恢复默认（后续接入）</button>
-        <button class="big-action primary compact disabled-action" type="button" disabled>统一保存（v0.9.4.2）</button>
+        <button id="saveSettingsMock" class="big-action primary compact" type="button">统一保存并应用</button>
       </div>
     </div>
   </div>

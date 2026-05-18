@@ -8,11 +8,8 @@ dataset:
   processed_yaml: data/processed_obb/data.yaml
 classes:
   names:
-  - green
-  - yellow
-  - blue
-  - red
-  num_classes: 4
+  - bottle
+  num_classes: 1
 model:
   architecture: yolov8n-obb
   pretrained_weights: models/pretrained/yolov8n-obb.pt
@@ -20,7 +17,7 @@ model:
   - 640
   - 640
 train:
-  epochs: 20
+  epochs: 50
   batch_size: 4
   lr0: 0.001
   device: cuda

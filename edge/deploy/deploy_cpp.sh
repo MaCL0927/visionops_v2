@@ -56,6 +56,14 @@ GST_LATENCY_MS="${GST_LATENCY_MS:-100}"
 QUIET_FFMPEG_LOG="${QUIET_FFMPEG_LOG:-true}"
 INSTALL_GST="${INSTALL_GST:-0}"
 
+# Deployment mode:
+#   all        : sync code, write cpp.env, compile/install C++ service, restart and health check (default)
+#   code-only  : only sync the local edge/ directory to the board; no compile, no env rewrite, no restart
+#   model-only : only copy a local .rknn + .yaml pair into models/share_models for Syncthing; no SSH
+DEPLOY_MODE="${DEPLOY_MODE:-all}"
+SHARE_MODEL_DIR="${SHARE_MODEL_DIR:-models/share_models}"
+MODEL_VERSION="${MODEL_VERSION:-}"
+
 # v0.5.0 optional Collector proxy deployment.
 # v0.7.2 default syncs Collector so the C++ preview/detect buttons are deployed together.
 # Set SYNC_COLLECTOR=0 if you only want to deploy the C++ service.
@@ -108,6 +116,14 @@ Options:
   --stream-backend opencv|gst-mpp, default: ${STREAM_BACKEND}
   --install-gst 0|1           Install common GStreamer packages, default: ${INSTALL_GST}
 
+  # Deployment modes:
+  --all                       Full deploy: sync code, write cpp.env, compile, install, restart and health check (default)
+  --code-only                 Only sync local edge/ to remote ${INSTALL_DIR}/edge; no compile/env/restart
+  --model-only                Only copy local .rknn + .yaml into ${SHARE_MODEL_DIR}; no SSH/SCP/restart
+  --mode MODE                 all|code-only|model-only, default: ${DEPLOY_MODE}
+  --share-model-dir DIR       Local Syncthing model share dir, default: ${SHARE_MODEL_DIR}
+  --model-version NAME        Target basename for --model-only output: NAME.rknn + NAME.yaml
+
   # v0.5.0 optional Collector proxy deployment:
   --sync-collector true|false    Sync edge/collector and tools, default: ${SYNC_COLLECTOR} (v0.7.2 defaults to true)
   --restart-collector true|false Restart Collector service after sync, default: ${RESTART_COLLECTOR}
@@ -122,6 +138,12 @@ USAGE
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --all) DEPLOY_MODE="all"; shift ;;
+    --code-only) DEPLOY_MODE="code-only"; shift ;;
+    --model-only) DEPLOY_MODE="model-only"; shift ;;
+    --mode) DEPLOY_MODE="$2"; shift 2 ;;
+    --share-model-dir) SHARE_MODEL_DIR="$2"; shift 2 ;;
+    --model-version) MODEL_VERSION="$2"; shift 2 ;;
     --host) EDGE_HOST="$2"; shift 2 ;;
     --user) EDGE_USER="$2"; shift 2 ;;
     --port) EDGE_PORT="$2"; shift 2 ;;
@@ -354,7 +376,126 @@ EOF"
 }
 
 
+validate_deploy_mode() {
+  case "${DEPLOY_MODE}" in
+    all|code-only|model-only) ;;
+    *) log_error "DEPLOY_MODE must be one of: all, code-only, model-only. Current: ${DEPLOY_MODE}"; exit 1 ;;
+  esac
+}
+
+safe_model_stem() {
+  local value="$1"
+  value="${value##*/}"
+  value="${value%.rknn}"
+  value="${value%.yaml}"
+  value="${value%.yml}"
+  value="$(echo "${value}" | sed -E 's/[^A-Za-z0-9_-]+/-/g; s/^-+//; s/-+$//')"
+  [[ -n "${value}" ]] || value="visionops_model_$(date +%Y%m%d_%H%M%S)"
+  echo "${value}"
+}
+
+sync_model_pair_to_share_dir() {
+  local src_model="$1"
+  local src_meta="$2"
+  local stem="${3:-}"
+  local share_dir="$4"
+
+  if [[ ! -f "${src_model}" ]]; then
+    local auto_model=""
+    for candidate in       "${REPO_ROOT}/models/export_detection/model.rknn"       "${REPO_ROOT}/models/export_classification/model.rknn"       "${REPO_ROOT}/models/export_obb/model.rknn"       "${REPO_ROOT}/models/export_segmentation/model.rknn"       "${REPO_ROOT}/models/export/model.rknn"; do
+      if [[ -f "${candidate}" ]]; then auto_model="${candidate}"; break; fi
+    done
+    if [[ -n "${auto_model}" ]]; then
+      log_warn "Local --model not found (${src_model}); auto use ${auto_model}"
+      src_model="${auto_model}"
+    fi
+  fi
+
+  if [[ ! -f "${src_meta}" ]]; then
+    local auto_meta=""
+    for candidate in       "${REPO_ROOT}/edge/runtime/class_names.yaml"       "${REPO_ROOT}/models/export_detection/model.yaml"       "${REPO_ROOT}/models/export_classification/model.yaml"       "${REPO_ROOT}/models/export_obb/model.yaml"       "${REPO_ROOT}/models/export_segmentation/model.yaml"       "${REPO_ROOT}/models/export/model.yaml"; do
+      if [[ -f "${candidate}" ]]; then auto_meta="${candidate}"; break; fi
+    done
+    if [[ -n "${auto_meta}" ]]; then
+      log_warn "Local --class-names-file not found (${src_meta}); auto use ${auto_meta}"
+      src_meta="${auto_meta}"
+    fi
+  fi
+
+  [[ -f "${src_model}" ]] || { log_error "Local RKNN file not found for --model-only: ${src_model}"; exit 1; }
+  [[ -f "${src_meta}" ]] || { log_error "Local YAML file not found for --model-only: ${src_meta}"; exit 1; }
+
+  if [[ -z "${stem}" ]]; then
+    stem="$(safe_model_stem "${src_model}")"
+  else
+    stem="$(safe_model_stem "${stem}")"
+  fi
+
+  mkdir -p "${share_dir}"
+  local target_model="${share_dir}/${stem}.rknn"
+  local target_meta="${share_dir}/${stem}.yaml"
+  local tmp_model="${share_dir}/.${stem}.rknn.$$.tmp"
+  local tmp_meta="${share_dir}/.${stem}.yaml.$$.tmp"
+
+  cp "${src_model}" "${tmp_model}"
+  cp "${src_meta}" "${tmp_meta}"
+  mv "${tmp_model}" "${target_model}"
+  mv "${tmp_meta}" "${target_meta}"
+
+  log_ok "Model-only deploy wrote Syncthing share files"
+  log_ok "model=${target_model}"
+  log_ok "meta=${target_meta}"
+  log_warn "Only .rknn and .yaml are written. No .sha256 and no .READY file are generated."
+}
+
+sync_edge_code_only() {
+  if [[ ! -d "${REPO_ROOT}/edge" ]]; then
+    log_error "Missing ${REPO_ROOT}/edge. Run this script from the VisionOps repository."
+    exit 1
+  fi
+  require_cmd ssh
+  require_cmd rsync
+
+  log_info "Target: ${EDGE_USER}@${EDGE_HOST}:${EDGE_PORT}"
+  remote "echo connected >/dev/null"
+  if ! remote "sudo -n true"; then
+    log_error "Remote sudo requires password. Please configure NOPASSWD sudo for ${EDGE_USER}."
+    exit 1
+  fi
+
+  log_info "Sync local edge/ to ${INSTALL_DIR}/edge only"
+  remote_sudo mkdir -p "${INSTALL_DIR}/edge"
+  remote_sudo chown -R "${EDGE_USER}:${EDGE_USER}" "${INSTALL_DIR}/edge" || true
+  remote "sudo -n find '${INSTALL_DIR}/edge' -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true"
+  remote "sudo -n find '${INSTALL_DIR}/edge' -type f -name '*.pyc' -delete 2>/dev/null || true"
+
+  rsync -az --delete -e "${RSYNC_SSH}" \
+    --exclude '__pycache__/' \
+    --exclude '*.pyc' \
+    --exclude 'runtime/cpp.env' \
+    --exclude 'runtime/edge.env' \
+    --exclude 'runtime/cpp_proxy.env' \
+    --exclude 'runtime/runtime_overrides.yaml' \
+    "${REPO_ROOT}/edge/" \
+    "${EDGE_USER}@${EDGE_HOST}:${INSTALL_DIR}/edge/"
+
+  log_ok "edge/ code sync completed. No compile, env rewrite, service restart, or health check was performed."
+}
+
+
 main() {
+  validate_deploy_mode
+
+  if [[ "${DEPLOY_MODE}" == "model-only" ]]; then
+    sync_model_pair_to_share_dir "${MODEL_PATH}" "${CLASS_NAMES_FILE}" "${MODEL_VERSION}" "${SHARE_MODEL_DIR}"
+    exit 0
+  fi
+
+  if [[ "${DEPLOY_MODE}" == "code-only" ]]; then
+    sync_edge_code_only
+    exit 0
+  fi
+
   require_cmd ssh
   require_cmd scp
   require_cmd rsync
