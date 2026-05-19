@@ -1,0 +1,16 @@
+[Unit]
+Description=VisionOps Modbus TCP Server Service
+After=network-online.target visionops-inference-cpp.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/visionops/edge/robot_gateway/modbus_tcp
+EnvironmentFile=/opt/visionops/edge/robot_gateway/modbus_tcp/modbus_tcp.env
+ExecStart=/opt/visionops/venv/bin/python /opt/visionops/edge/robot_gateway/modbus_tcp/modbus_tcp_server.py
+Restart=always
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target

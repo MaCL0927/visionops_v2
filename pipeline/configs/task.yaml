@@ -1,73 +1,53 @@
 task:
-  name: obb_detection
-  type: obb_detection
+  name: classification
+  type: classification
 dataset:
-  raw_root: data/raw_obb
-  raw_yaml: data/raw_obb/data.yaml
-  processed_root: data/processed_obb
-  processed_yaml: data/processed_obb/data.yaml
+  raw_root: data/raw_classification
+  processed_root: data/processed_classification
+  val_split: 0.2
 classes:
   names:
-  - bottle
-  num_classes: 1
+  - ng
+  - ok
+  num_classes: 2
 model:
-  architecture: yolov8n-obb
-  pretrained_weights: models/pretrained/yolov8n-obb.pt
+  architecture: mobilenetv3
+  pretrained: true
   input_size:
-  - 640
-  - 640
+  - 224
+  - 224
 train:
-  epochs: 50
+  epochs: 30
   batch_size: 4
-  lr0: 0.001
+  lr: 0.001
   device: cuda
   workers: 4
-  project: models/runs/obb
-  name: visionops_obb
-  exist_ok: true
 export:
-  mode: rockchip
-  checkpoint_path: models/checkpoints_obb/best.pt
-  output_path: models/export_obb/model.onnx
-  imgsz: 640
+  output_path: models/export_classification/model.onnx
   opset: 12
-  simplify: true
-  dynamic: false
-  yolo_exec: /home/pc/anaconda3/envs/pt2onnx/bin/yolo
+  simplify: false
 rknn:
   python_exec: /home/pc/anaconda3/envs/rknn311/bin/python
   target_platform: rk3576
-  onnx_model: models/export_obb/model.onnx
-  rknn_model: models/export_obb/model.rknn
-  perf_report: models/export_obb/rknn_report.json
+  onnx_model: models/export_classification/model.onnx
+  rknn_model: models/export_classification/model.rknn
+  perf_report: models/export_classification/rknn_report.json
   build:
-    do_quantization: true
-    optimization_level: 3
+    do_quantization: false
   quantization:
-    dataset: data/processed_obb/images/val
+    dataset: data/processed_classification/val
     dataset_size: 100
     quantized_dtype: asymmetric_quantized-8
-  input:
-    mean_values:
-    - - 0
-      - 0
-      - 0
-    std_values:
-    - - 255
-      - 255
-      - 255
 mlflow:
-  experiment_name: visionops-obb
-  registered_model_name: visionops-obb-rk3588
+  experiment_name: visionops-classification
+  registered_model_name: visionops-classification-rk3588
   tracking_uri: http://localhost:5000
   promotion_threshold:
-    map50: 0.5
-    map50_95: 0.3
-    latency_ms: 150.0
+    accuracy: 0.8
+    latency_ms: 999999
 edge:
   port: 8082
   metrics_port: 9091
   npu_core: auto
-  conf_threshold: 0.25
-  nms_threshold: 0.45
+  topk: 5
   warmup_runs: 3

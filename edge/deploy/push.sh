@@ -13,14 +13,13 @@ set -euo pipefail
 #   edge/runtime/class_names.yaml
 #   data/model_context/manifest.json（不存在时生成临时 manifest）
 #
-# 默认输出：
-#   默认模型分支不再通过 SSH/SCP 上传到边缘端，
-#   而是写入本地 Syncthing 共享目录 models/share_models/：
-#     {device_id}_{customer_id}_{cls|det|obb|seg}_{timestamp}.rknn
-#     {device_id}_{customer_id}_{cls|det|obb|seg}_{timestamp}.yaml
-#   不再生成 sha256 和 READY 文件。
+# 默认输出到边缘端：
+#   /opt/visionops/models/{device_id}_{customer_id}_{cls|det|obb|seg}_{timestamp}.rknn
+#   /opt/visionops/models/{device_id}_{customer_id}_{cls|det|obb|seg}_{timestamp}.yaml
 #
-#   如果仍需同步 edge/ 代码并走原 SSH 部署流程，使用 --code。
+# systemd 仍读取 /opt/visionops/.env，但 MODEL_PATH / CLASS_NAMES_FILE
+# 指向具体版本化模型，不再使用 current.rknn / backup_*.rknn，
+# 也不再上传 class_names.yaml 或 runtime/class_names.yaml。
 # ============================================================
 
 MODEL_PATH="auto"
@@ -83,8 +82,8 @@ usage() {
   数据集信息: data/model_context/manifest.json；不存在时自动生成临时 manifest
 
 常用：
-  bash edge/deploy/push.sh                 # 仅生成版本化模型/YAML 到 models/share_models，交给 Syncthing 同步
-  bash edge/deploy/push.sh --code          # 保留原 SSH 部署流程：同步代码、模型、env、service 并重启
+  bash edge/deploy/push.sh
+  bash edge/deploy/push.sh --code
   bash edge/deploy/push.sh --code-only
 
 可选参数：
@@ -1325,7 +1324,10 @@ deploy_roi_classification_bundle() {
   require_file "$det_metrics"
   require_file "$cls_metrics"
   require_file "$DATASET_MANIFEST"
-  require_file "$CONFIG_FILE"
+  # Syncthing 模式不需要解析目标设备 SSH 配置；只有 --code 远程部署时才要求 CONFIG_FILE 存在。
+  if [[ "$SYNC_EDGE_CODE" == "true" ]]; then
+    require_file "$CONFIG_FILE"
+  fi
   if [[ -n "$ROI_SESSION_MANIFEST" && -f "$ROI_SESSION_MANIFEST" ]]; then
     log_info "ROI session: ${ROI_SESSION_MANIFEST}"
   else
@@ -1386,6 +1388,39 @@ PY
   log_info "目标设备 ID: ${device_id}"
   log_info "客户 ID: ${customer_id}"
   log_info "bundle 名称: ${version_name}"
+
+  # 默认 ROI 分支：不再通过 SSH/SCP 上传到边缘端。
+  # 仅把双模型 bundle 写入本地 Syncthing 共享目录：
+  #   models/share_models/${version_name}/
+  #     detector.rknn / detector.yaml / classifier.rknn / classifier.yaml / pipeline.yaml
+  # 后续由 Syncthing 同步到 RK3576，再由边缘端 Web 或本地安装脚本切换。
+  if [[ "$SYNC_EDGE_CODE" != "true" ]]; then
+    local share_root share_bundle_dir share_tmp_bundle
+    share_root="${SHARE_MODEL_DIR}"
+    share_bundle_dir="${share_root}/${version_name}"
+    share_tmp_bundle="${share_root}/.${version_name}.$$.tmp"
+
+    mkdir -p "${share_root}"
+    rm -rf "${share_tmp_bundle}"
+    mkdir -p "${share_tmp_bundle}"
+    cp -a "${local_bundle_dir}/." "${share_tmp_bundle}/"
+
+    rm -rf "${share_bundle_dir}"
+    mv "${share_tmp_bundle}" "${share_bundle_dir}"
+
+    log_info "本地 ROI bundle 内容:"
+    ls -lh "${share_bundle_dir}" | sed 's/^/[INFO]   /'
+
+    log_ok "已写入 Syncthing ROI bundle 共享目录: ${share_bundle_dir}"
+    log_ok "detector=${share_bundle_dir}/detector.rknn"
+    log_ok "classifier=${share_bundle_dir}/classifier.rknn"
+    log_ok "pipeline=${share_bundle_dir}/pipeline.yaml"
+    log_warn "未通过 SSH 安装到 /opt/visionops/models，也未重启边缘端服务；等待 Syncthing 同步后，再在 RK3576 端执行安装/切换。"
+
+    rm -f "$context_file"
+    rm -rf "$local_bundle_dir"
+    exit 0
+  fi
 
   local parsed host port user deploy_path service_name health_url
   if [[ -n "$TARGET_HOST_OVERRIDE" ]]; then
@@ -1536,9 +1571,9 @@ PY
 main() {
   require_cmd md5sum
   require_cmd python3
-  # 默认模型同步分支只写入本地 Syncthing 目录，不再依赖 SSH/SCP。
-  # 只有 ROI bundle、--code、--code-only 仍使用原来的 SSH 部署链路。
-  if [[ "$ROI_CLASSIFICATION" == "true" || "$SYNC_EDGE_CODE" == "true" || "$CODE_ONLY" == "true" ]]; then
+  # 默认模型同步分支、默认 ROI bundle 分支都只写入本地 Syncthing 目录，不再依赖 SSH/SCP。
+  # 只有显式使用 --code / --code-only 时，才保留原来的 SSH 部署链路。
+  if [[ "$SYNC_EDGE_CODE" == "true" || "$CODE_ONLY" == "true" ]]; then
     require_cmd ssh
     require_cmd scp
     require_cmd rsync
@@ -1653,36 +1688,6 @@ PY
   log_info "输入尺寸: ${input_size_env}, 类别数: ${num_classes}"
   log_info "模型 MD5: ${model_md5}, size=${model_size_bytes} bytes"
 
-  # 默认模型分支：不再通过 SSH/SCP 上传模型和 YAML。
-  # 这里仅把版本化 .rknn 和同名 .yaml 写入本地 Syncthing 共享目录，
-  # 由 Syncthing 同步到边缘端。原 SSH 部署流程保留给 --code。
-  # 注意：只写入 rknn 和 yaml，不再生成 sha256 和 READY 文件。
-  if [[ "$SYNC_EDGE_CODE" != "true" ]]; then
-    local share_dir share_tmp_model share_tmp_meta local_meta_file
-    share_dir="${SHARE_MODEL_DIR}"
-    mkdir -p "${share_dir}"
-
-    local_meta_file="$(mktemp /tmp/visionops_meta_XXXXXX.yaml)"
-    write_meta_yaml "$context_file" "$local_meta_file"
-
-    share_tmp_model="${share_dir}/.${version_model_file}.$$.tmp"
-    share_tmp_meta="${share_dir}/.${version_meta_file}.$$.tmp"
-
-    cp "$MODEL_PATH" "$share_tmp_model"
-    cp "$local_meta_file" "$share_tmp_meta"
-    mv "$share_tmp_model" "${share_dir}/${version_model_file}"
-    mv "$share_tmp_meta" "${share_dir}/${version_meta_file}"
-
-    log_ok "已写入 Syncthing 模型共享目录: ${share_dir}"
-    log_ok "model=${share_dir}/${version_model_file}"
-    log_ok "meta=${share_dir}/${version_meta_file}"
-    log_warn "只同步 .rknn 和 .yaml；不再生成 .sha256 或 .READY。"
-    log_warn "未通过 SSH 安装到 /opt/visionops/models，也未重启边缘端服务；等待 Syncthing 同步后，再在边缘端 Web 中切换模型。"
-
-    rm -f "$context_file" "$local_meta_file"
-    exit 0
-  fi
-
   local parsed host port user deploy_path service_name health_url
   if [[ -n "$TARGET_HOST_OVERRIDE" ]]; then
     log_warn "使用临时目标设备参数部署到其他设备: device_id=${device_id}, host=${TARGET_HOST_OVERRIDE}"
@@ -1755,7 +1760,7 @@ PY
   backup_service="${REMOTE_TMP_DIR}/visionops_service_backup_${ts}.service"
   remote_run "$user" "$host" "$port" "if [ -f '${REMOTE_ROOT_ENV}' ]; then sudo -n cp '${REMOTE_ROOT_ENV}' '${backup_env}'; fi; if [ -f '${REMOTE_INFERENCE_SERVICE}' ]; then sudo -n cp '${REMOTE_INFERENCE_SERVICE}' '${backup_service}'; fi" || true
 
-  log_info "--code 已启用，使用原 SSH 流程上传版本化模型、同名 meta、env、service..."
+  log_info "上传版本化模型、同名 meta、env、service..."
   scp ${SSH_OPTS} -P "$port" "$MODEL_PATH" "${user}@${host}:${remote_tmp_model}"
   scp ${SSH_OPTS} -P "$port" "$local_meta_file" "${user}@${host}:${remote_tmp_meta}"
   scp ${SSH_OPTS} -P "$port" "$local_deploy_env" "${user}@${host}:${remote_tmp_edge_env}"

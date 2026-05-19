@@ -1,0 +1,16 @@
+[Unit]
+Description=VisionOps Modbus RTU Slave Service
+After=network-online.target visionops-inference-cpp.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/visionops/edge/robot_gateway/modbus_rtu
+EnvironmentFile=/opt/visionops/edge/robot_gateway/modbus_rtu/modbus_rtu.env
+ExecStart=/opt/visionops/venv/bin/python /opt/visionops/edge/robot_gateway/modbus_rtu/modbus_rtu_slave.py
+Restart=always
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target
