@@ -2,8 +2,8 @@
 
 适用版本：
 
-- Modbus RTU v1.2.1：`/dev/ttyS5` + RS485 + GPIO136 方向控制
-- Modbus TCP v1.2.1：`0.0.0.0:1502`
+- Modbus RTU v1.2.2：`/dev/ttyS5` + RS485 + GPIO136 方向控制
+- Modbus TCP v1.2.2：`0.0.0.0:1502`
 
 RTU 和 TCP **共用同一套寄存器定义**。区别只在通信通道：
 
@@ -13,7 +13,8 @@ RTU 和 TCP **共用同一套寄存器定义**。区别只在通信通道：
 ## 基本规则
 
 - Holding Register 为 16-bit unsigned integer。
-- 协议地址从 0 开始。部分上位机软件会显示为 40001，对应协议地址 0。
+- 默认协议地址从 0 开始。可通过 `VISIONOPS_MODBUS_ADDRESS_BASE` 配置对外基址，例如设置为 `4096` 时，VisionOps 内部 `reg[0]` 对应 PLC 表中的 Holding Register `404097`。
+- 部分上位机软件会显示为 40001/404097 这类 4 区地址；实际 Modbus PDU 里发送的是去掉 400001 偏移后的协议地址，例如 `404097 -> 4096`。
 - 浮点数统一放大成整数，例如 `confidence_x10000 = confidence * 10000`。
 - 角度等可能为负数的字段按 int16 编码，上位机读取后需要按 int16 还原。
 - 32-bit 数值拆成高 16 位和低 16 位。
@@ -45,12 +46,55 @@ RTU 和 TCP **共用同一套寄存器定义**。区别只在通信通道：
 
 ---
 
+## 地址基址 VISIONOPS_MODBUS_ADDRESS_BASE
+
+为了适配部分 PLC 的 D 区 / HR 地址表，RTU 和 TCP 都支持地址基址参数：
+
+```bash
+VISIONOPS_MODBUS_ADDRESS_BASE=0
+```
+
+含义：VisionOps 内部 `reg[0]` 对外映射到哪个 **Modbus 协议地址**。
+
+常见配置：
+
+| 场景 | 参数值 | PLC/HMI 显示地址 | 实际协议地址 | VisionOps 内部寄存器 |
+|---|---:|---:|---:|---:|
+| 默认从 0 开始 | `0` | 400001 / 40001 / 0 | 0 | `reg[0]` |
+| PLC 要求从 404097 起读 | `4096` | 404097 | 4096 | `reg[0]` |
+
+当 `VISIONOPS_MODBUS_ADDRESS_BASE=4096` 时，对应关系为：
+
+| PLC 表里的 Modbus 地址 | 实际协议地址 | VisionOps 内部寄存器 | 含义 |
+|---:|---:|---:|---|
+| 404097 | 4096 | `reg[0]` | magic |
+| 404098 | 4097 | `reg[1]` | protocol_version |
+| 404099 | 4098 | `reg[2]` | heartbeat |
+| 404102 | 4101 | `reg[5]` | task_type |
+| 404103 | 4102 | `reg[6]` | result_schema |
+| 404197 | 4196 | `reg[100]` | 第一条结果起始字段 |
+
+mbpoll 测试示例：
+
+```bash
+# mbpoll 默认 -r 使用 1-based reference，所以协议地址 4096 用 -r 4097
+mbpoll -m tcp -a 1 -r 4097 -c 120 192.168.1.202 -p 1502
+mbpoll -m rtu -a 1 -b 9600 -P none -s 1 -t 4 -r 4097 -c 120 /dev/ttyUSB0
+```
+
+若使用支持 0-based 的 `-0`：
+
+```bash
+mbpoll -0 -m tcp -a 1 -r 4096 -c 120 192.168.1.202 -p 1502
+mbpoll -0 -m rtu -a 1 -b 9600 -P none -s 1 -t 4 -r 4096 -c 120 /dev/ttyUSB0
+```
+
 # 0~49：公共状态区
 
 | 地址 | 名称 | 含义 |
 |---:|---|---|
 | 0 | magic | 固定 `0x5650`，十进制 22096 |
-| 1 | protocol_version | v2.1 为 121 |
+| 1 | protocol_version | v2.2 为 122 |
 | 2 | heartbeat | 心跳计数，每次刷新 +1 |
 | 3 | service_status | 0=未知，1=运行中无结果，2=有结果，3=接口错误 |
 | 4 | result_valid | 0=无效，1=有效 |

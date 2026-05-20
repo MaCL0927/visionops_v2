@@ -1,32 +1,14 @@
-# VisionOps Modbus RTU Register Map
+# VisionOps Modbus Register Map
 
-当前版本使用统一寄存器表 v2。
-
-请参考：
+本版本 RTU/TCP 共用寄存器定义，请查看：
 
 ```text
-edge/robot_gateway/modbus_common/register_map_v2.md
+../modbus_common/register_map_v2.md
 ```
 
-RTU 通信参数默认：
-
-```text
-Slave ID: 1
-Function: 03 Read Holding Registers
-Serial: /dev/ttyS5
-Baudrate: 9600
-Format: 8N1
-GPIO: GPIO136, 0=RX, 1=TX
-```
-
-测试读取公共区：
+其中 `VISIONOPS_MODBUS_ADDRESS_BASE` 可控制 VisionOps 内部 `reg[0]` 对外映射到哪个 Modbus 协议地址。
+例如 PLC 表要求从 404097 读取时，通常设置：
 
 ```bash
-mbpoll -m rtu -a 1 -b 9600 -P none -s 1 -t 4 -r 1 -c 50 /dev/ttyUSB0
-```
-
-测试读取更多寄存器：
-
-```bash
-mbpoll -m rtu -a 1 -b 9600 -P none -s 1 -t 4 -r 1 -c 120 /dev/ttyUSB0
+VISIONOPS_MODBUS_ADDRESS_BASE=4096
 ```

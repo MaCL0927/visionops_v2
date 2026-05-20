@@ -34,7 +34,7 @@ from .visionops_result_parser import (
 )
 
 PROTOCOL_MAGIC = 0x5650
-PROTOCOL_VERSION_V2 = 121
+PROTOCOL_VERSION_V2 = 122
 
 # Register layout constants.
 COMMON_BASE = 0

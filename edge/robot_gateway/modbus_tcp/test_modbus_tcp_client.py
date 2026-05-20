@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-VisionOps Modbus TCP 简单测试客户端 v1.2.1。
+VisionOps Modbus TCP 简单测试客户端 v1.2.2。
 
 示例：
-    python3 test_modbus_tcp_client.py --host 192.168.1.202 --port 1502 --unit-id 1 --address 0 --count 50
+    python3 test_modbus_tcp_client.py --host 192.168.1.202 --port 1502 --unit-id 1 --address 4096 --count 50
 """
 
 import argparse
@@ -47,8 +47,9 @@ def main() -> int:
     parser.add_argument("--host", default="192.168.1.202")
     parser.add_argument("--port", type=int, default=1502)
     parser.add_argument("--unit-id", type=int, default=1)
-    parser.add_argument("--address", type=int, default=0)
+    parser.add_argument("--address", type=int, default=0, help="Modbus protocol address to read, e.g. 0 or 4096")
     parser.add_argument("--count", type=int, default=50)
+    parser.add_argument("--address-base", type=int, default=None, help="VisionOps reg[0] protocol address; default uses --address for common decode")
     args = parser.parse_args()
 
     client = ModbusTcpClient(host=args.host, port=args.port, timeout=3)
@@ -67,7 +68,8 @@ def main() -> int:
         for i, v in enumerate(regs):
             print(f"reg[{args.address + i:03d}] = {v}")
 
-        if args.address == 0 and len(regs) >= 25:
+        decode_base = args.address if args.address_base is None else args.address_base
+        if args.address == decode_base and len(regs) >= 25:
             task_type = regs[5]
             schema = regs[6]
             print("\n[DECODE v2 COMMON]")

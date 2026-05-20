@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-VisionOps Modbus TCP Server v1.2.1 - unified register map v2
+VisionOps Modbus TCP Server v1.2.2 - address-base + unified register map v2
 
 功能：
 1. 启动一个 Modbus TCP Server，默认监听 0.0.0.0:1502。
@@ -84,6 +84,9 @@ HOST = getenv_str("VISIONOPS_MODBUS_TCP_HOST", "0.0.0.0")
 PORT = getenv_int("VISIONOPS_MODBUS_TCP_PORT", 1502)
 UNIT_ID = getenv_int("VISIONOPS_MODBUS_TCP_UNIT_ID", 1)
 REGISTER_COUNT = getenv_int("VISIONOPS_MODBUS_TCP_REGISTER_COUNT", DEFAULT_REGISTER_COUNT)
+# Modbus protocol address where VisionOps internal reg[0] is exposed.
+# Example: PLC display address 404097 usually means protocol address 4096, so set this to 4096.
+ADDRESS_BASE = getenv_int("VISIONOPS_MODBUS_ADDRESS_BASE", getenv_int("VISIONOPS_MODBUS_TCP_ADDRESS_BASE", 0))
 MAX_OBJECTS = getenv_int("VISIONOPS_MODBUS_TCP_MAX_OBJECTS", DEFAULT_MAX_ITEMS)
 RESULT_URL = getenv_str("VISIONOPS_RESULT_URL", "http://127.0.0.1:8090/api/cpp/stream/latest_result")
 POLL_INTERVAL_MS = getenv_int("VISIONOPS_MODBUS_TCP_POLL_INTERVAL_MS", 100)
@@ -112,27 +115,30 @@ def fetch_json(url: str, timeout_s: float = 0.5) -> Optional[Dict[str, Any]]:
 
 
 def create_context() -> ModbusServerContext:
-    block = ModbusSequentialDataBlock(0, [0] * REGISTER_COUNT)
+    # DataBlock starts at protocol address 0 so both ADDRESS_BASE=0 and PLC-style
+    # ADDRESS_BASE=4096 are supported. VisionOps regs are written at ADDRESS_BASE.
+    block_count = max(REGISTER_COUNT, ADDRESS_BASE + REGISTER_COUNT + 10)
+    block = ModbusSequentialDataBlock(0, [0] * block_count)
     try:
         slave = ModbusSlaveContext(
-            di=ModbusSequentialDataBlock(0, [0] * REGISTER_COUNT),
-            co=ModbusSequentialDataBlock(0, [0] * REGISTER_COUNT),
+            di=ModbusSequentialDataBlock(0, [0] * block_count),
+            co=ModbusSequentialDataBlock(0, [0] * block_count),
             hr=block,
-            ir=ModbusSequentialDataBlock(0, [0] * REGISTER_COUNT),
+            ir=ModbusSequentialDataBlock(0, [0] * block_count),
             zero_mode=True,
         )
     except TypeError:
         slave = ModbusSlaveContext(
-            di=ModbusSequentialDataBlock(0, [0] * REGISTER_COUNT),
-            co=ModbusSequentialDataBlock(0, [0] * REGISTER_COUNT),
+            di=ModbusSequentialDataBlock(0, [0] * block_count),
+            co=ModbusSequentialDataBlock(0, [0] * block_count),
             hr=block,
-            ir=ModbusSequentialDataBlock(0, [0] * REGISTER_COUNT),
+            ir=ModbusSequentialDataBlock(0, [0] * block_count),
         )
     return ModbusServerContext(slaves={UNIT_ID: slave}, single=False)
 
 
 def set_holding_registers(context: ModbusServerContext, values):
-    context[UNIT_ID].setValues(3, 0, values)
+    context[UNIT_ID].setValues(3, ADDRESS_BASE, values)
 
 
 def updater_loop(context: ModbusServerContext) -> None:
@@ -182,7 +188,7 @@ def main() -> int:
         identity.ModelName = "VisionOps Edge Box"
         identity.MajorMinorRevision = "1.2"
 
-    logging.info("starting Modbus TCP server v1.2.1: host=%s port=%d unit_id=%d registers=%d", HOST, PORT, UNIT_ID, REGISTER_COUNT)
+    logging.info("starting Modbus TCP server v1.2.2: host=%s port=%d unit_id=%d registers=%d address_base=%d", HOST, PORT, UNIT_ID, REGISTER_COUNT, ADDRESS_BASE)
     StartTcpServer(context=context, identity=identity, address=(HOST, PORT))
     return 0
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-VisionOps Modbus RTU Slave v1.2.1 - GPIO-aware + unified register map v2
+VisionOps Modbus RTU Slave v1.2.2 - GPIO-aware + address-base + unified register map v2
 
 适用场景：
 - Neardi LPR3576 / LB3576 RS485: /dev/ttyS5
@@ -101,6 +101,9 @@ PARITY = getenv_str("VISIONOPS_MODBUS_PARITY", "N").upper()
 BYTESIZE = getenv_int("VISIONOPS_MODBUS_BYTESIZE", 8)
 STOPBITS = getenv_int("VISIONOPS_MODBUS_STOPBITS", 1)
 REGISTER_COUNT = getenv_int("VISIONOPS_MODBUS_REGISTER_COUNT", DEFAULT_REGISTER_COUNT)
+# Modbus protocol address where VisionOps internal reg[0] is exposed.
+# Example: PLC display address 404097 usually means protocol address 4096, so set this to 4096.
+ADDRESS_BASE = getenv_int("VISIONOPS_MODBUS_ADDRESS_BASE", 0)
 MAX_OBJECTS = getenv_int("VISIONOPS_MODBUS_MAX_OBJECTS", DEFAULT_MAX_ITEMS)
 RESULT_URL = getenv_str("VISIONOPS_RESULT_URL", "http://127.0.0.1:8090/api/cpp/stream/latest_result")
 POLL_INTERVAL_MS = getenv_int("VISIONOPS_MODBUS_POLL_INTERVAL_MS", 100)
@@ -221,9 +224,9 @@ def make_exception_response(slave_id: int, function_code: int, exception_code: i
     return append_crc(pdu)
 
 
-def make_read_holding_response(slave_id: int, start: int, qty: int) -> bytes:
+def make_read_holding_response(slave_id: int, internal_start: int, qty: int) -> bytes:
     with registers_lock:
-        regs = holding_registers[start:start + qty]
+        regs = holding_registers[internal_start:internal_start + qty]
 
     payload = bytearray()
     payload.append(slave_id & 0xFF)
@@ -270,11 +273,16 @@ def handle_request(frame: bytes) -> Optional[bytes]:
         logging.warning("invalid quantity: start=%d qty=%d", start, qty)
         return make_exception_response(SLAVE_ID, func, 0x03)
 
-    if start < 0 or start + qty > REGISTER_COUNT:
-        logging.warning("invalid address range: start=%d qty=%d count=%d", start, qty, REGISTER_COUNT)
+    internal_start = start - ADDRESS_BASE
+
+    if internal_start < 0 or internal_start + qty > REGISTER_COUNT:
+        logging.warning(
+            "invalid address range: modbus_start=%d address_base=%d internal_start=%d qty=%d count=%d",
+            start, ADDRESS_BASE, internal_start, qty, REGISTER_COUNT,
+        )
         return make_exception_response(SLAVE_ID, func, 0x02)
 
-    return make_read_holding_response(SLAVE_ID, start, qty)
+    return make_read_holding_response(SLAVE_ID, internal_start, qty)
 
 
 # -----------------------------
@@ -372,8 +380,8 @@ def rtu_slave_loop() -> None:
     ser.reset_output_buffer()
 
     logging.info(
-        "starting GPIO-aware Modbus RTU slave v1.2.1: port=%s slave_id=%d baudrate=%d %d%s%d registers=%d gpio=%d",
-        SERIAL_PORT, SLAVE_ID, BAUDRATE, BYTESIZE, PARITY, STOPBITS, REGISTER_COUNT, GPIO_NUM,
+        "starting GPIO-aware Modbus RTU slave v1.2.2: port=%s slave_id=%d baudrate=%d %d%s%d registers=%d address_base=%d gpio=%d",
+        SERIAL_PORT, SLAVE_ID, BAUDRATE, BYTESIZE, PARITY, STOPBITS, REGISTER_COUNT, ADDRESS_BASE, GPIO_NUM,
     )
     logging.info("Server listening.")
 

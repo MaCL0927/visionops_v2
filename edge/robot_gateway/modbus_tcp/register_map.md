@@ -1,30 +1,14 @@
-# VisionOps Modbus TCP Register Map
+# VisionOps Modbus Register Map
 
-当前版本使用统一寄存器表 v2。
-
-请参考：
+本版本 RTU/TCP 共用寄存器定义，请查看：
 
 ```text
-edge/robot_gateway/modbus_common/register_map_v2.md
+../modbus_common/register_map_v2.md
 ```
 
-TCP 通信参数默认：
-
-```text
-Host: 0.0.0.0
-Port: 1502
-Unit ID: 1
-Function: 03 Read Holding Registers
-```
-
-测试读取公共区：
+其中 `VISIONOPS_MODBUS_ADDRESS_BASE` 可控制 VisionOps 内部 `reg[0]` 对外映射到哪个 Modbus 协议地址。
+例如 PLC 表要求从 404097 读取时，通常设置：
 
 ```bash
-mbpoll -m tcp -a 1 -r 1 -c 50 192.168.1.202 -p 1502
-```
-
-测试读取更多寄存器：
-
-```bash
-mbpoll -m tcp -a 1 -r 1 -c 120 192.168.1.202 -p 1502
+VISIONOPS_MODBUS_ADDRESS_BASE=4096
 ```
