@@ -27,11 +27,16 @@ else
   echo "[INFO] SRC_DIR and DST_DIR are the same, skip file copy."
 fi
 
-
 if [ -n "${COMMON_SRC_DIR}" ] && [ -d "${COMMON_SRC_DIR}" ]; then
-  echo "[INFO] copy modbus_common to ${COMMON_DST_DIR}"
-  cp -f "${COMMON_SRC_DIR}"/*.py "${COMMON_DST_DIR}/"
-  cp -f "${COMMON_SRC_DIR}"/register_map_v2.md "${COMMON_DST_DIR}/"
+  if [ "$(realpath "${COMMON_SRC_DIR}")" != "$(realpath "${COMMON_DST_DIR}")" ]; then
+    echo "[INFO] copy modbus_common to ${COMMON_DST_DIR}"
+    cp -f "${COMMON_SRC_DIR}"/*.py "${COMMON_DST_DIR}/"
+    if [ -f "${COMMON_SRC_DIR}/register_map_v2.md" ]; then
+      cp -f "${COMMON_SRC_DIR}/register_map_v2.md" "${COMMON_DST_DIR}/"
+    fi
+  else
+    echo "[INFO] COMMON_SRC_DIR and COMMON_DST_DIR are the same, skip common copy."
+  fi
 else
   echo "[WARN] modbus_common source dir not found beside ${SRC_DIR}; skip common copy"
 fi

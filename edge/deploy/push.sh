@@ -51,8 +51,8 @@ SHARE_MODEL_DIR="${SHARE_MODEL_DIR:-models/share_models}"
 # 临时部署目标覆盖参数：用于从控制台把同一个模型部署到其他设备。
 # 部署目录第一版固定为 /opt/visionops，不对页面开放，避免 systemd 模板和运行目录不一致。
 TARGET_DEVICE_ID_OVERRIDE=""
-TARGET_HOST_OVERRIDE=""
-TARGET_USER_OVERRIDE="ubuntu"
+TARGET_HOST_OVERRIDE="192.168.1.202"
+TARGET_USER_OVERRIDE="neardi"
 TARGET_PORT_OVERRIDE="22"
 TARGET_HEALTH_PORT_OVERRIDE=""
 TARGET_HEALTH_URL_OVERRIDE=""
