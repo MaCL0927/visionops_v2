@@ -124,10 +124,10 @@ export:
   mode: rockchip
 
 external_export:
-  yolo_exec: /home/pc/anaconda3/envs/pt2onnx/bin/yolo  # pt转onnx环境
+  yolo_exec: /home/luzz/anaconda3/envs/pt2onnx/bin/yolo  # pt转onnx环境
 
 rknn:
-  python_exec: /home/pc/anaconda3/envs/rknn311/bin/python
+  python_exec: /home/luzz/anaconda3/envs/rknn311/bin/python
   target_platform: rk3588
   onnx_model: models/export_detection/model.onnx
   rknn_model: models/export_detection/model.rknn

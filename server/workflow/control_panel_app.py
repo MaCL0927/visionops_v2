@@ -96,6 +96,20 @@ def read_json(path: Path, default: Any = None) -> Any:
     except Exception:
         return default
 
+def get_current_device_id() -> str:
+    manifest = read_json(MODEL_CONTEXT_PATH, default={}) or {}
+    device_id = str(manifest.get("device_id") or "").strip()
+
+    if not device_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "data/model_context/manifest.json 中没有 device_id。"
+                "请先处理上传数据集，或检查 manifest.json。"
+            ),
+        )
+
+    return device_id
 
 def write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -952,8 +966,22 @@ def api_pipeline() -> dict[str, Any]:
 
 @app.post("/api/deploy")
 def api_deploy() -> dict[str, Any]:
-    job_id = jobs.start("deploy", ["make", "deploy"])
-    return {"job_id": job_id, "message": "已开始部署模型"}
+    device_id = get_current_device_id()
+
+    cmd = [
+        "bash",
+        "edge/deploy/deploy_cpp.sh",
+        "--model-only",
+        "--device-id",
+        device_id,
+    ]
+
+    job_id = jobs.start("deploy-cpp-model-only", cmd)
+    return {
+        "job_id": job_id,
+        "message": "已开始部署当前设备模型，命令: " + " ".join(cmd),
+        "device_id": device_id,
+    }
 
 
 @app.post("/api/deploy-roi-classification")
@@ -961,15 +989,27 @@ def api_deploy_roi_classification() -> dict[str, Any]:
     """
     部署 ROI 分类双模型 bundle。
 
-    第一版为了保证边缘端 pipeline_engine.py、engine.py 等运行时代码同步，
-    默认带 --code。后续代码稳定后，如果只想部署模型，把下面 cmd 里的
-    "--code" 删除即可。
+    当前只写入本地 Syncthing 共享目录：
+      models/share_models/<device_id>/<bundle_name>/
+
+    不再调用 push.sh，不同步 edge 代码，不 SSH 到边缘端，不重启服务。
     """
-    cmd = ["bash", "edge/deploy/push.sh", "--roi-classification", "--code"]
+    device_id = get_current_device_id()
+
+    cmd = [
+        "bash",
+        "edge/deploy/deploy_cpp.sh",
+        "--model-only",
+        "--roi-classification",
+        "--device-id",
+        device_id,
+    ]
+
     job_id = jobs.start("deploy-roi-classification", cmd)
     return {
         "job_id": job_id,
         "message": "已开始部署 ROI 分类双模型，命令: " + " ".join(cmd),
+        "device_id": device_id,
     }
 
 
@@ -1138,7 +1178,7 @@ HTML_PAGE = r'''
         <h2>4. 模型部署</h2>
         <div class="deploy-layout">
           <div>
-            <p>部署当前设备会执行 make deploy，沿用当前项目配置中的设备信息、模型路径和健康检查逻辑。</p>
+            <p>部署当前设备会调用 deploy_cpp.sh 的 model-only 模式，把当前任务 RKNN 模型和同名 YAML 写入 models/share_models/&lt;device_id&gt;/。</p>
             <div class="btn-row">
               <button onclick="startJob('/api/deploy')">部署当前设备</button>
               <button class="success" onclick="startRoiClassificationDeploy()">部署 ROI 分类双模型</button>
@@ -1146,9 +1186,9 @@ HTML_PAGE = r'''
             </div>
           </div>
           <div class="hint">
-            “部署当前设备”仍走原来的单模型部署链路，由 make deploy 调用 edge/deploy/push.sh。<br><br>
-            “部署 ROI 分类双模型”会调用 <code>bash edge/deploy/push.sh --roi-classification --code</code>，把 detection/classification 两个 RKNN 模型打包成双模型 bundle，并同步边缘端代码后重启服务。<br><br>
-            “部署其他设备”先作为界面入口预留，下一步可接入设备 IP、SSH 用户、端口、部署目录等参数。
+            “部署当前设备”会调用 <code>bash edge/deploy/deploy_cpp.sh --model-only --device-id &lt;device_id&gt;</code>，把当前任务 RKNN 模型和 YAML 写入 <code>models/share_models/&lt;device_id&gt;/</code>。<br><br>
+            “部署 ROI 分类双模型”会调用 <code>bash edge/deploy/deploy_cpp.sh --model-only --roi-classification --device-id &lt;device_id&gt;</code>，把 detection/classification 两个 RKNN 模型打包成双模型 bundle，并写入 <code>models/share_models/&lt;device_id&gt;/</code>。<br><br>
+            当前模式只写入本地 Syncthing 共享目录，不 SSH 到边缘端，不重启服务。
           </div>
         </div>
       </div>
@@ -1542,7 +1582,7 @@ async function saveAndStartPipeline() {
 }
 
 async function startRoiClassificationDeploy() {
-  const msg = "确认部署 ROI 分类双模型？\n\n这会执行：\nbash edge/deploy/push.sh --roi-classification --code\n\n第一版会同步边缘端代码并重启推理服务。";
+  const msg = "确认部署 ROI 分类双模型？\n\n这会执行：\nbash edge/deploy/deploy_cpp.sh --model-only --roi-classification --device-id <manifest.device_id>\n\n当前只写入 models/share_models/<device_id>/，不 SSH 到边缘端，不重启服务。";
   if (!confirm(msg)) return;
   await startJob('/api/deploy-roi-classification');
 }

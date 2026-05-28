@@ -117,9 +117,12 @@ export:
   opset: 12
   simplify: true
   dynamic: false
+  
+external_export:
+  yolo_exec: /home/luzz/anaconda3/envs/pt2onnx/bin/yolo
 
 rknn:
-  python_exec: /home/pc/anaconda3/envs/rknn311/bin/python
+  python_exec: /home/luzz/anaconda3/envs/rknn311/bin/python
   target_platform: rk3588
   onnx_model: models/export_segmentation/model.onnx
   rknn_model: models/export_segmentation/model.rknn
