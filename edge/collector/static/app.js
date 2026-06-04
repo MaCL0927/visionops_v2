@@ -50,6 +50,7 @@ let isProduction=false;
 function enterProductionMode(){
   isProduction=true;
   stopRealtimeClassification(false);
+  stopTimedCapture(false);
   clearPendingClassificationCapture(false);
   modeToggle.textContent='切换工厂模式';
   modeToggle.classList.add('prod');
@@ -95,6 +96,7 @@ const topTabs=document.querySelectorAll('.top-tab');
 const pages=document.querySelectorAll('.page');
 topTabs.forEach(btn=>btn.addEventListener('click',()=>{
   if(btn.dataset.page!=='validatePage') stopRealtimeClassification();
+  if(btn.dataset.page!=='collectPage') stopTimedCapture(false);
   topTabs.forEach(b=>b.classList.remove('active'));
   btn.classList.add('active');
   pages.forEach(p=>p.classList.remove('active'));
@@ -116,6 +118,7 @@ collectButtons.forEach(btn=>btn.addEventListener('click',async()=>{
   btn.classList.add('active');
   [captureStep,uploadStep].forEach(s=>s.classList.remove('active'));
   document.getElementById(btn.dataset.collectStep).classList.add('active');
+  if(btn.dataset.collectStep!=='captureStep') stopTimedCapture(false);
   updateCameraLifecycle();
   if(btn.dataset.collectStep==='uploadStep') await refreshFolder(currentFolder);
 }));
@@ -127,6 +130,13 @@ const simulatedCamera=document.getElementById('simulatedCamera');
 const cameraStatusTitle=document.getElementById('cameraStatusTitle');
 const cameraStatusText=document.getElementById('cameraStatusText');
 const captureTaskMode=document.getElementById('captureTaskMode');
+const timedCaptureBtn=document.getElementById('timedCaptureBtn');
+const timedCaptureStatus=document.getElementById('timedCaptureStatus');
+const timedCaptureModal=document.getElementById('timedCaptureModal');
+const timedCaptureIntervalInput=document.getElementById('timedCaptureInterval');
+const closeTimedCaptureModalBtn=document.getElementById('closeTimedCaptureModal');
+const cancelTimedCaptureModalBtn=document.getElementById('cancelTimedCaptureModal');
+const startTimedCaptureBtn=document.getElementById('startTimedCapture');
 const pendingCaptureModal=document.getElementById('pendingCaptureModal');
 const pendingCaptureModalImage=document.getElementById('pendingCaptureModalImage');
 const pendingCaptureZoomBox=document.getElementById('pendingCaptureZoomBox');
@@ -229,6 +239,11 @@ let cppModelSwitchBusy=false;
 let pendingClassificationImageData='';
 let pendingCaptureZoom=1;
 let captureBusy=false;
+let timedCaptureRunning=false;
+let timedCaptureTimer=null;
+let timedCaptureIntervalSec=5;
+let timedCaptureCount=0;
+let timedCaptureInProgress=false;
 let initialDefaultModeApplied=false;
 
 function applyInitialDefaultMode(defaultMode){
@@ -568,6 +583,85 @@ function setCaptureBusy(busy){
   }
 }
 
+function updateTimedCaptureUi(){
+  if(timedCaptureBtn){
+    timedCaptureBtn.textContent=timedCaptureRunning ? '停止定时' : '定时取图';
+    timedCaptureBtn.classList.toggle('primary', timedCaptureRunning);
+    timedCaptureBtn.classList.toggle('secondary', !timedCaptureRunning);
+    timedCaptureBtn.classList.toggle('timed-running', timedCaptureRunning);
+  }
+  if(timedCaptureStatus){
+    timedCaptureStatus.textContent=timedCaptureRunning
+      ? `定时中：${timedCaptureIntervalSec}s / 已取 ${timedCaptureCount} 张`
+      : '未开启';
+    timedCaptureStatus.classList.toggle('running', timedCaptureRunning);
+  }
+  if(startTimedCaptureBtn){
+    startTimedCaptureBtn.textContent=timedCaptureRunning ? '更新间隔并继续' : '开始定时取图';
+  }
+}
+
+function openTimedCaptureModal(){
+  if(!timedCaptureModal) return;
+  if(timedCaptureIntervalInput) timedCaptureIntervalInput.value=String(timedCaptureIntervalSec || 5);
+  timedCaptureModal.classList.add('active');
+  setTimeout(()=>timedCaptureIntervalInput && timedCaptureIntervalInput.focus(),50);
+}
+
+function closeTimedCaptureModal(){
+  if(timedCaptureModal) timedCaptureModal.classList.remove('active');
+}
+
+function getTimedCaptureIntervalSec(){
+  const raw=Number(timedCaptureIntervalInput && timedCaptureIntervalInput.value);
+  if(!Number.isFinite(raw) || raw<1) return 1;
+  return Math.max(1, Math.round(raw));
+}
+
+async function runTimedCaptureOnce(){
+  if(!timedCaptureRunning || timedCaptureInProgress) return;
+  timedCaptureInProgress=true;
+  try{
+    // 定时取图固定保存到 all_images，不受“分类/检测”采集模式影响。
+    await startCamera();
+    await captureToFolder('all');
+    timedCaptureCount+=1;
+    updateTimedCaptureUi();
+  }catch(err){
+    console.warn('timed capture failed', err);
+    showToast(err.message || '定时取图失败');
+  }finally{
+    timedCaptureInProgress=false;
+  }
+}
+
+function stopTimedCapture(showMessage=true){
+  if(timedCaptureTimer){
+    clearInterval(timedCaptureTimer);
+    timedCaptureTimer=null;
+  }
+  const wasRunning=timedCaptureRunning;
+  timedCaptureRunning=false;
+  timedCaptureInProgress=false;
+  updateTimedCaptureUi();
+  if(showMessage && wasRunning) showToast(`已停止定时取图，共取图 ${timedCaptureCount} 张`);
+}
+
+function startTimedCaptureFromModal(){
+  timedCaptureIntervalSec=getTimedCaptureIntervalSec();
+  if(timedCaptureTimer){
+    clearInterval(timedCaptureTimer);
+    timedCaptureTimer=null;
+  }
+  timedCaptureRunning=true;
+  timedCaptureCount=0;
+  closeTimedCaptureModal();
+  updateTimedCaptureUi();
+  showToast(`已开始定时取图，间隔 ${timedCaptureIntervalSec} 秒，图片保存到全部图片`);
+  runTimedCaptureOnce();
+  timedCaptureTimer=setInterval(runTimedCaptureOnce, timedCaptureIntervalSec*1000);
+}
+
 function makePreviewCard(item, folder){
   const card=document.createElement('div');
   card.className='preview-card';
@@ -691,6 +785,15 @@ async function savePendingClassificationCapture(label){
 }
 
 document.getElementById('captureAllBtn').addEventListener('click',handleCaptureButton);
+if(timedCaptureBtn) timedCaptureBtn.addEventListener('click',()=>{
+  if(timedCaptureRunning){stopTimedCapture(true);return;}
+  openTimedCaptureModal();
+});
+if(startTimedCaptureBtn) startTimedCaptureBtn.addEventListener('click',startTimedCaptureFromModal);
+if(closeTimedCaptureModalBtn) closeTimedCaptureModalBtn.addEventListener('click',closeTimedCaptureModal);
+if(cancelTimedCaptureModalBtn) cancelTimedCaptureModalBtn.addEventListener('click',closeTimedCaptureModal);
+if(timedCaptureIntervalInput) timedCaptureIntervalInput.addEventListener('keydown',(e)=>{if(e.key==='Enter') startTimedCaptureFromModal();});
+updateTimedCaptureUi();
 if(savePositiveCaptureBtn) savePositiveCaptureBtn.addEventListener('click',()=>savePendingClassificationCapture('positive'));
 if(saveNegativeCaptureBtn) saveNegativeCaptureBtn.addEventListener('click',()=>savePendingClassificationCapture('negative'));
 if(cancelPendingCaptureBtn) cancelPendingCaptureBtn.addEventListener('click',()=>{clearPendingClassificationCapture(true);showToast('已取消暂存图片')});
@@ -1497,9 +1600,10 @@ function drawCppPreviewFrame(img, latest={}){
         if(roiBox) drawCppPreviewRoiBox(ctx, roiBox, canvasW, canvasH);
       }
 
-      const conf=Number(p.confidence ?? p.score);
-      const label=`${p.class_name || p.class_id || 'target'} ${Number.isFinite(conf) ? (conf*100).toFixed(1)+'%' : ''}`.trim();
-      drawCppPreviewLabel(ctx, label, labelAnchor, canvasW);
+      const label=buildOverlayLabel(p);
+      if(label){
+        drawCppPreviewLabel(ctx, label, labelAnchor, canvasW);
+      }
 
       const rawCenter=getPredictionCenter(p, Array.isArray(p.bbox) ? p.bbox.map(Number) : null);
       if(shouldShowDetectionCenter() && rawCenter && Number.isFinite(rawCenter[0]) && Number.isFinite(rawCenter[1])){
@@ -2134,6 +2238,21 @@ function shouldShowDetectionCenter(){
   const det=(getCurrentAlgorithmSettings().detection)||{};
   return det.show_center !== false;
 }
+function getLabelDisplayMode(){
+  const common=(getCurrentAlgorithmSettings().common)||{};
+  return String(common.label_display || 'class_conf').trim().toLowerCase();
+}
+function shouldShowOverlayLabel(){
+  return getLabelDisplayMode() !== 'hidden';
+}
+function buildOverlayLabel(pred){
+  if(!shouldShowOverlayLabel()) return '';
+  const cls=String(pred.class_name ?? pred.class ?? pred.label ?? pred.class_id ?? '目标');
+  const mode=getLabelDisplayMode();
+  if(mode==='class_only') return cls;
+  const conf=Number(pred.confidence ?? pred.score);
+  return Number.isFinite(conf) ? `${cls} ${(conf*100).toFixed(1)}%` : cls;
+}
 function getMaskOverlayAlpha(){
   const seg=(getCurrentAlgorithmSettings().segmentation)||{};
   return clampNumber(seg.mask_alpha,0.24,0,1);
@@ -2261,20 +2380,20 @@ function drawDetectionOverlay(predictions=[]){
     const roiBox=getRoiBoxFromPrediction(pred);
     if(roiBox) drawRoiBoxOverlay(ctx, roiBox, canvas.width, canvas.height);
 
-    const cls=String(pred.class_name ?? pred.class ?? pred.label ?? pred.class_id ?? '目标');
-    const conf=Number(pred.confidence ?? pred.score);
-    const label=Number.isFinite(conf) ? `${cls} ${(conf*100).toFixed(1)}%` : cls;
+    const label=buildOverlayLabel(pred);
     const pad=Math.max(6, Math.round(canvas.width/180));
-    const textW=ctx.measureText(label).width;
-    const labelH=Math.max(24, Math.round(canvas.width/36));
-    const anchorX=Number(labelAnchor && labelAnchor[0]);
-    const anchorY=Number(labelAnchor && labelAnchor[1]);
-    const lx=Math.max(0, Math.min(canvas.width-(textW+pad*2), Number.isFinite(anchorX) ? anchorX : 0));
-    const ly=Math.max(0, (Number.isFinite(anchorY) ? anchorY : 0)-labelH-2);
-    ctx.fillStyle='rgba(15,23,42,.90)';
-    ctx.fillRect(lx,ly,textW+pad*2,labelH);
-    ctx.fillStyle='#fff';
-    ctx.fillText(label,lx+pad,ly+pad/2);
+    if(label){
+      const textW=ctx.measureText(label).width;
+      const labelH=Math.max(24, Math.round(canvas.width/36));
+      const anchorX=Number(labelAnchor && labelAnchor[0]);
+      const anchorY=Number(labelAnchor && labelAnchor[1]);
+      const lx=Math.max(0, Math.min(canvas.width-(textW+pad*2), Number.isFinite(anchorX) ? anchorX : 0));
+      const ly=Math.max(0, (Number.isFinite(anchorY) ? anchorY : 0)-labelH-2);
+      ctx.fillStyle='rgba(15,23,42,.90)';
+      ctx.fillRect(lx,ly,textW+pad*2,labelH);
+      ctx.fillStyle='#fff';
+      ctx.fillText(label,lx+pad,ly+pad/2);
+    }
 
     const center=getPredictionCenter(pred, box);
     if(shouldShowDetectionCenter() && center && Number.isFinite(center[0]) && Number.isFinite(center[1])){
@@ -2289,16 +2408,18 @@ function drawDetectionOverlay(predictions=[]){
       ctx.strokeStyle='#fff';
       ctx.stroke();
 
-      const centerText=`(${cx.toFixed(1)}, ${cy.toFixed(1)})`;
-      ctx.font=`${Math.max(14, Math.round(canvas.width/58))}px sans-serif`;
-      const cw=ctx.measureText(centerText).width;
-      const ch=Math.max(22, Math.round(canvas.width/44));
-      const tx=Math.min(canvas.width-cw-pad*2, cx+r+6);
-      const ty=Math.min(canvas.height-ch, cy+r+6);
-      ctx.fillStyle='rgba(15,23,42,.90)';
-      ctx.fillRect(Math.max(0,tx), Math.max(0,ty), cw+pad*2, ch);
-      ctx.fillStyle='#fff';
-      ctx.fillText(centerText, Math.max(0,tx)+pad, Math.max(0,ty)+pad/2);
+      if(shouldShowOverlayLabel()){
+        const centerText=`(${cx.toFixed(1)}, ${cy.toFixed(1)})`;
+        ctx.font=`${Math.max(14, Math.round(canvas.width/58))}px sans-serif`;
+        const cw=ctx.measureText(centerText).width;
+        const ch=Math.max(22, Math.round(canvas.width/44));
+        const tx=Math.min(canvas.width-cw-pad*2, cx+r+6);
+        const ty=Math.min(canvas.height-ch, cy+r+6);
+        ctx.fillStyle='rgba(15,23,42,.90)';
+        ctx.fillRect(Math.max(0,tx), Math.max(0,ty), cw+pad*2, ch);
+        ctx.fillStyle='#fff';
+        ctx.fillText(centerText, Math.max(0,tx)+pad, Math.max(0,ty)+pad/2);
+      }
     }
   });
 }
@@ -2685,9 +2806,7 @@ function drawProductionOverlay(predictions=[]){
     const w=Math.max(0, x2-x1);
     const h=Math.max(0, y2-y1);
     if(w<2 || h<2) return;
-    const cls=String(pred.class_name ?? pred.class ?? pred.label ?? pred.class_id ?? '目标');
-    const conf=Number(pred.confidence ?? pred.score);
-    const label=Number.isFinite(conf) ? `${cls} ${(conf*100).toFixed(1)}%` : cls;
+    const label=buildOverlayLabel(pred);
 
     if(maskSegments.length){
       ctx.strokeStyle='#f97316';
@@ -2718,14 +2837,16 @@ function drawProductionOverlay(predictions=[]){
     if(roiBox) drawRoiBoxOverlay(ctx, roiBox, canvas.width, canvas.height);
 
     const pad=Math.max(6, Math.round(canvas.width/180));
-    const textW=ctx.measureText(label).width;
-    const labelH=Math.max(24, Math.round(canvas.width/36));
-    const lx=Math.max(0, Math.min(canvas.width-(textW+pad*2), x1));
-    const ly=Math.max(0, y1-labelH-2);
-    ctx.fillStyle='rgba(15,23,42,.90)';
-    ctx.fillRect(lx,ly,textW+pad*2,labelH);
-    ctx.fillStyle='#fff';
-    ctx.fillText(label,lx+pad,ly+pad/2);
+    if(label){
+      const textW=ctx.measureText(label).width;
+      const labelH=Math.max(24, Math.round(canvas.width/36));
+      const lx=Math.max(0, Math.min(canvas.width-(textW+pad*2), x1));
+      const ly=Math.max(0, y1-labelH-2);
+      ctx.fillStyle='rgba(15,23,42,.90)';
+      ctx.fillRect(lx,ly,textW+pad*2,labelH);
+      ctx.fillStyle='#fff';
+      ctx.fillText(label,lx+pad,ly+pad/2);
+    }
 
     const center=getPredictionCenter(pred, box);
     if(shouldShowDetectionCenter() && center && Number.isFinite(center[0]) && Number.isFinite(center[1])){

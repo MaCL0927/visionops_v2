@@ -117,6 +117,8 @@
                     </select>
                   </label>
                   <button id="captureAllBtn" class="big-action secondary">取图</button>
+                  <button id="timedCaptureBtn" class="big-action secondary timed-capture-btn">定时取图</button>
+                  <span id="timedCaptureStatus" class="timed-capture-status">未开启</span>
                 </div>
                 <div class="stats-inline">
                   <span>检测图片 <b id="allCount">0</b></span>
@@ -722,6 +724,25 @@
     </div>
   </div>
 
+  <div id="timedCaptureModal" class="modal-mask">
+    <div class="dialog small timed-capture-dialog">
+      <div class="dialog-head">
+        <div>
+          <h2>定时取图设置</h2>
+          <p>设置时间间隔后会自动保存到全部图片 all_images。定时取图不受上方采集模式影响。</p>
+        </div>
+        <button id="closeTimedCaptureModal" class="close-btn">×</button>
+      </div>
+      <div class="form-grid single timed-capture-form">
+        <label>取图间隔（秒）<input id="timedCaptureInterval" type="number" min="1" step="1" value="5" /><small>建议不少于 2 秒；每次自动取图都会保存到 /opt/visionops/edge/collector/data/local_dataset/all_images。</small></label>
+      </div>
+      <div class="dialog-actions">
+        <button id="cancelTimedCaptureModal" class="big-action secondary compact">取消</button>
+        <button id="startTimedCapture" class="big-action primary compact">开始定时取图</button>
+      </div>
+    </div>
+  </div>
+
   <div id="imageViewerModal" class="modal-mask">
     <div class="dialog image-dialog">
       <div class="dialog-head">
@@ -815,6 +836,6 @@
 
   <div id="toast" class="toast"></div>
   <div id="centerNotice" class="center-notice" role="status" aria-live="polite"><div id="centerNoticeBox" class="center-notice-box"></div></div>
-  <script src="/static/app.js?v=v0_9_1_cpp_ui_fix"></script>
+  <script src="/static/app.js?v=v0_9_5_hide_overlay_labels"></script>
 </body>
 </html>

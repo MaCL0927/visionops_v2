@@ -1014,3 +1014,34 @@
 .settings-actions-v0942 .primary{background:#0f172a!important;border-color:#0f172a!important;color:#fff!important;}
 #cppSettingsStatus.warn{background:#fff7ed;border-color:#fdba74;color:#9a3412;}
 #cppSettingsStatus{border:1px dashed rgba(37,99,235,.35);border-radius:18px;background:#f8fbff;padding:10px 12px;color:#334155;font-size:14px;font-weight:900;line-height:1.45;}
+
+
+/* timed capture: 自动保存到 all_images 的定时取图控件 */
+.timed-capture-btn.timed-running{
+  background:#0f766e;
+  border-color:#0f766e;
+  color:#fff;
+}
+.timed-capture-status{
+  display:inline-flex;
+  align-items:center;
+  min-height:38px;
+  padding:8px 12px;
+  border-radius:999px;
+  background:#f1f5f9;
+  border:1px solid #dce6f0;
+  color:#64748b;
+  font-size:14px;
+  font-weight:900;
+  white-space:nowrap;
+}
+.timed-capture-status.running{
+  background:#ecfdf5;
+  border-color:#34d399;
+  color:#047857;
+}
+.timed-capture-dialog{width:min(520px,100%)}
+.timed-capture-form.single{grid-template-columns:1fr}
+@media (max-width:760px){
+  .timed-capture-status{width:100%;justify-content:center}
+}

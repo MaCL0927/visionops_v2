@@ -31,6 +31,7 @@ LOCAL_EDGE_ENV="edge/runtime/edge.env"
 
 SYNC_EDGE_CODE="false"
 CODE_ONLY="false"
+MODEL_ONLY="false"
 NO_RESTART="false"
 MODEL_PATH_EXPLICIT="false"
 CLASS_NAMES_EXPLICIT="false"
@@ -51,7 +52,7 @@ SHARE_MODEL_DIR="${SHARE_MODEL_DIR:-models/share_models}"
 # 临时部署目标覆盖参数：用于从控制台把同一个模型部署到其他设备。
 # 部署目录第一版固定为 /opt/visionops，不对页面开放，避免 systemd 模板和运行目录不一致。
 TARGET_DEVICE_ID_OVERRIDE=""
-TARGET_HOST_OVERRIDE="192.168.1.202"
+TARGET_HOST_OVERRIDE=""
 TARGET_USER_OVERRIDE="neardi"
 TARGET_PORT_OVERRIDE="22"
 TARGET_HEALTH_PORT_OVERRIDE=""
@@ -85,6 +86,7 @@ usage() {
   bash edge/deploy/push.sh
   bash edge/deploy/push.sh --code
   bash edge/deploy/push.sh --code-only
+  bash edge/deploy/push.sh --model-only --target-host <host> --target-user <user>
 
 可选参数：
   --model <path>              覆盖默认模型路径
@@ -117,6 +119,7 @@ usage() {
   --target-health-url <url>   临时指定完整健康检查地址，优先级高于 --target-health-port
   --code                      部署模型时同时同步 edge/ 代码到板端
   --code-only                 只同步 edge/ 代码，不上传模型、不改 env/service、不重启
+  --model-only                只上传模型和自动生成的同名 YAML 到 /opt/visionops/models；不改 env/service、不重启
   --no-restart                只上传文件和更新 env/service，不重启推理服务
   -h, --help                  显示帮助
 USAGE
@@ -146,6 +149,7 @@ while [[ $# -gt 0 ]]; do
     --target-health-url) TARGET_HEALTH_URL_OVERRIDE="${2:-}"; shift 2 ;;
     --code) SYNC_EDGE_CODE="true"; shift ;;
     --code-only) CODE_ONLY="true"; SYNC_EDGE_CODE="true"; NO_RESTART="true"; shift ;;
+    --model-only) MODEL_ONLY="true"; NO_RESTART="true"; shift ;;
     --no-restart) NO_RESTART="true"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[ERROR] 不支持的参数: $1" >&2; usage; exit 1 ;;
@@ -1571,11 +1575,13 @@ PY
 main() {
   require_cmd md5sum
   require_cmd python3
-  # 默认模型同步分支、默认 ROI bundle 分支都只写入本地 Syncthing 目录，不再依赖 SSH/SCP。
-  # 只有显式使用 --code / --code-only 时，才保留原来的 SSH 部署链路。
-  if [[ "$SYNC_EDGE_CODE" == "true" || "$CODE_ONLY" == "true" ]]; then
+  # --code / --code-only / --model-only 都需要通过 SSH/SCP 连接边缘端。
+  # 只有同步 edge/ 代码时才额外需要 rsync。
+  if [[ "$SYNC_EDGE_CODE" == "true" || "$CODE_ONLY" == "true" || "$MODEL_ONLY" == "true" ]]; then
     require_cmd ssh
     require_cmd scp
+  fi
+  if [[ "$SYNC_EDGE_CODE" == "true" || "$CODE_ONLY" == "true" ]]; then
     require_cmd rsync
   fi
 
@@ -1589,16 +1595,29 @@ main() {
 
   if [[ "$CODE_ONLY" == "true" ]]; then
     require_dir "$LOCAL_EDGE_DIR"
-    require_file "$CONFIG_FILE"
+
     local code_device_id code_parsed code_host code_port code_user code_deploy_path code_service code_health
-    code_device_id="${VISIONOPS_DEVICE_ID:-${DEVICE_ID:-rk3588-001}}"
-    code_parsed="$(parse_device_from_yaml "$CONFIG_FILE" "$code_device_id")"
-    case "$code_parsed" in
-      YAML_IMPORT_ERROR) log_error "缺少 PyYAML，无法解析设备配置: ${CONFIG_FILE}"; exit 1 ;;
-      CONFIG_NOT_FOUND) log_error "设备配置不存在: ${CONFIG_FILE}"; exit 1 ;;
-      DEVICE_NOT_FOUND) log_error "在 ${CONFIG_FILE} 中找不到设备: ${code_device_id}。可在 task.yaml/deploy.yaml 增加 edge_devices，或设置 EDGE_DEVICE_HOST/EDGE_USER。"; exit 1 ;;
-    esac
-    IFS='|' read -r code_host code_port code_user code_deploy_path code_service code_health <<< "$code_parsed"
+
+    if [[ -n "$TARGET_HOST_OVERRIDE" ]]; then
+      code_host="$TARGET_HOST_OVERRIDE"
+      code_port="${TARGET_PORT_OVERRIDE:-22}"
+      code_user="${TARGET_USER_OVERRIDE:-ubuntu}"
+      code_deploy_path="${REMOTE_MODEL_DIR}"
+      code_service="visionops-inference"
+      code_health=""
+      log_warn "code-only 使用命令行临时目标: ${code_user}@${code_host}:${code_port}"
+    else
+      require_file "$CONFIG_FILE"
+      code_device_id="${TARGET_DEVICE_ID_OVERRIDE:-${VISIONOPS_DEVICE_ID:-${DEVICE_ID:-rk3588-001}}}"
+      code_parsed="$(parse_device_from_yaml "$CONFIG_FILE" "$code_device_id")"
+      case "$code_parsed" in
+        YAML_IMPORT_ERROR) log_error "缺少 PyYAML，无法解析设备配置: ${CONFIG_FILE}"; exit 1 ;;
+        CONFIG_NOT_FOUND) log_error "设备配置不存在: ${CONFIG_FILE}"; exit 1 ;;
+        DEVICE_NOT_FOUND) log_error "在 ${CONFIG_FILE} 中找不到设备: ${code_device_id}。可在 task.yaml/deploy.yaml 增加 edge_devices，或设置 EDGE_DEVICE_HOST/EDGE_USER。"; exit 1 ;;
+      esac
+      IFS='|' read -r code_host code_port code_user code_deploy_path code_service code_health <<< "$code_parsed"
+    fi
+
     log_info "仅同步 edge/ 代码到 ${code_user}@${code_host}:${code_port}${REMOTE_EDGE_DIR}"
     remote_run "$code_user" "$code_host" "$code_port" "mkdir -p '${REMOTE_EDGE_DIR}'" || true
     sync_edge_code_to_remote "$code_user" "$code_host" "$code_port"
@@ -1608,7 +1627,9 @@ main() {
   require_file "$MODEL_PATH"
   require_file "$CLASS_NAMES_FILE"
   require_file "$DATASET_MANIFEST"
-  require_file "$CONFIG_FILE"
+  if [[ -z "$TARGET_HOST_OVERRIDE" ]]; then
+    require_file "$CONFIG_FILE"
+  fi
   [[ -f "$LOCAL_EDGE_ENV" ]] || log_warn "edge.env 不存在，将使用默认端口和默认推理参数: ${LOCAL_EDGE_ENV}"
   [[ "$SYNC_EDGE_CODE" == "true" ]] && require_dir "$LOCAL_EDGE_DIR"
 
@@ -1746,6 +1767,43 @@ PY
   local_service_file="$(mktemp /tmp/visionops_inference_XXXXXX.service)"
 
   write_meta_yaml "$context_file" "$local_meta_file"
+
+  if [[ "$MODEL_ONLY" == "true" ]]; then
+    log_warn "model-only 模式：只上传并安装 .rknn 和同名 YAML；不改 /opt/visionops/.env，不改 systemd，不重启服务"
+    log_info "目标设备: ${user}@${host}:${port}"
+    remote_run "$user" "$host" "$port" "echo connected >/dev/null" || { log_error "无法连接设备"; rm -f "$context_file" "$local_meta_file" "$local_deploy_env" "$local_service_file"; exit 1; }
+    log_ok "设备连通性验证通过"
+
+    remote_sudo_cmd "$user" "$host" "$port" mkdir -p "${REMOTE_MODEL_DIR}"
+
+    log_info "上传模型和 YAML 到远端临时目录 /tmp"
+    scp ${SSH_OPTS} -P "$port" "$MODEL_PATH" "${user}@${host}:${remote_tmp_model}"
+    scp ${SSH_OPTS} -P "$port" "$local_meta_file" "${user}@${host}:${remote_tmp_meta}"
+
+    local remote_md5_model_only
+    remote_md5_model_only="$(remote_run "$user" "$host" "$port" "md5sum '${remote_tmp_model}' | awk '{print \$1}'")"
+    if [[ "$remote_md5_model_only" != "$model_md5" ]]; then
+      log_error "模型 MD5 校验失败: local=${model_md5}, remote=${remote_md5_model_only}"
+      remote_run "$user" "$host" "$port" "rm -f '${remote_tmp_model}' '${remote_tmp_meta}'" || true
+      rm -f "$context_file" "$local_meta_file" "$local_deploy_env" "$local_service_file"
+      exit 1
+    fi
+    log_ok "模型 MD5 校验通过"
+
+    log_info "安装到 ${REMOTE_MODEL_DIR}"
+    remote_sudo_cmd "$user" "$host" "$port" install -m 644 "${remote_tmp_model}" "${remote_version_model}"
+    remote_sudo_cmd "$user" "$host" "$port" install -m 644 "${remote_tmp_meta}" "${remote_version_meta}"
+    remote_run "$user" "$host" "$port" "rm -f '${remote_tmp_model}' '${remote_tmp_meta}'" || true
+
+    log_ok "只部署模型和 YAML 完成"
+    log_ok "model=${remote_version_model}"
+    log_ok "meta=${remote_version_meta}"
+    log_warn "当前运行服务不会自动切换到该模型；如需生效，请在 Web 模型切换或 cpp.env 中手动切换后重启 C++ 服务。"
+
+    rm -f "$context_file" "$local_meta_file" "$local_deploy_env" "$local_service_file"
+    exit 0
+  fi
+
   build_deploy_env "$local_deploy_env" "$device_id" "$remote_version_model" "$remote_version_meta" "$task" "$input_size_env" "$num_classes" "$topk" "$conf_threshold" "$nms_threshold"
   build_inference_service_file "$local_service_file"
 
