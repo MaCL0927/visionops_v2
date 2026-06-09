@@ -334,6 +334,7 @@
               <select id="cppSettingCameraType" class="camera-type-title-select" aria-label="C++ 相机类型" data-cpp-setting="camera_type">
                 <option value="rtsp">RTSP 网络相机</option>
                 <option value="usb">USB / Orbbec RGB 相机</option>
+                <option value="ros1">ROS1 图像话题（HP60C）</option>
               </select>
               <span><em class="settings-mini-badge cpp">C++已接入</em> 这里的配置会写入 cpp.env，并由 visionops-inference-cpp 取流。</span>
             </div>
@@ -391,6 +392,23 @@
                 </label>
                 <label class="setting-field">缓冲帧数
                   <input data-cpp-setting="camera_buffer_size" type="number" value="1" min="1" max="8" />
+                </label>
+              </div>
+            </div>
+
+            <div id="cppCameraTypeRos1" class="cpp-camera-type-panel camera-inline-panel cpp-implemented-setting-block inner-cpp-panel">
+              <div class="settings-section-title"><b>C++ ROS1 / HP60C 参数</b><span>由独立 C++ ROS1 bridge 订阅官方 ascamera 话题；Web 不再走旧 Python 相机线程。</span></div>
+              <div class="settings-grid three">
+                <label class="setting-field full">ROS1 RGB 图像话题
+                  <input id="cppSettingRos1Topic" data-cpp-setting="camera_source" value="/ascamera_hp60c/rgb0/image" />
+                  <small>需先启动官方驱动：roslaunch ascamera hp60c.launch，并确认 rostopic hz 有帧。</small>
+                </label>
+                <label class="setting-field full">C++ ROS bridge 地址
+                  <input id="cppSettingRos1BridgeUrl" data-cpp-setting="ros1_bridge_url" value="http://127.0.0.1:18181" />
+                  <small>Collector 只代理这个 HTTP 服务，不 import rospy/cv_bridge。</small>
+                </label>
+                <label class="setting-field">取流后端
+                  <select data-cpp-setting="stream_backend"><option value="ros1-bridge" selected>C++ ROS1 Bridge</option></select>
                 </label>
               </div>
             </div>
