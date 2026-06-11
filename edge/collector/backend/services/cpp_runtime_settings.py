@@ -74,6 +74,11 @@ _CPP_ENV_TO_SETTING = {
     "VISIONOPS_CPP_PREPROCESS_BACKEND": "preprocess_backend",
     "VISIONOPS_CPP_RGA_MODE": "rga_mode",
     "VISIONOPS_CPP_ROS1_BRIDGE_URL": "ros1_bridge_url",
+    "VISIONOPS_HP60C_SDK_BRIDGE_URL": "hp60c_sdk_bridge_url",
+    "VISIONOPS_CPP_HP60C_SDK_BRIDGE_URL": "hp60c_sdk_bridge_url",
+    "VISIONOPS_CPP_UI_CAMERA_TYPE": "camera_type",
+    "VISIONOPS_CPP_UI_CAMERA_SOURCE": "camera_source",
+    "VISIONOPS_CPP_UI_HP60C_SDK_BRIDGE_URL": "hp60c_sdk_bridge_url",
 }
 
 _SETTING_TO_CPP_ENV = {
@@ -105,6 +110,7 @@ _SETTING_TO_CPP_ENV = {
     "preprocess_backend": "VISIONOPS_CPP_PREPROCESS_BACKEND",
     "rga_mode": "VISIONOPS_CPP_RGA_MODE",
     "ros1_bridge_url": "VISIONOPS_CPP_ROS1_BRIDGE_URL",
+    "hp60c_sdk_bridge_url": "VISIONOPS_CPP_HP60C_SDK_BRIDGE_URL",
 }
 
 _NUMERIC_KEYS = {
@@ -134,8 +140,8 @@ _BOOL_KEYS = {
 }
 
 _DEFAULT_SETTINGS: Dict[str, Any] = {
-    "camera_type": "auto",            # auto | rtsp | usb | ros1
-    "camera_source": "",             # rtsp://... | /dev/video7 | /dev/v4l/by-id/... | /ros/image/topic
+    "camera_type": "auto",            # auto | rtsp | usb | hp60c_sdk
+    "camera_source": "",             # rtsp://... | /dev/video7 | /dev/v4l/by-id/... | http://127.0.0.1:18181
     "camera_width": 0,
     "camera_height": 0,
     "camera_fps": 0,
@@ -162,6 +168,7 @@ _DEFAULT_SETTINGS: Dict[str, Any] = {
     "preprocess_backend": "auto",
     "rga_mode": "resize_color",
     "ros1_bridge_url": "http://127.0.0.1:18181",
+    "hp60c_sdk_bridge_url": "http://127.0.0.1:18181",
 }
 
 
@@ -193,12 +200,12 @@ def _as_int(value: Any, default: int = 0) -> int:
 
 def _normalize_camera_type(value: Any) -> str:
     s = str(value or "auto").strip().lower()
-    return s if s in {"auto", "rtsp", "usb", "ros1"} else "auto"
+    return s if s in {"auto", "rtsp", "usb", "hp60c_sdk"} else ("hp60c_sdk" if s == "ros1" else "auto")
 
 
 def _normalize_stream_backend(value: Any) -> str:
     s = str(value or "opencv").strip().lower()
-    return s if s in {"opencv", "gst-mpp", "ros1-bridge"} else "opencv"
+    return s if s in {"opencv", "gst-mpp", "hp60c-sdk-bridge"} else ("hp60c-sdk-bridge" if s == "ros1-bridge" else "opencv")
 
 
 def _normalize_fourcc(value: Any) -> str:
@@ -259,6 +266,18 @@ def _normalize_settings(raw: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
         url = str(data.get("ros1_bridge_url") or "http://127.0.0.1:18181").strip().rstrip("/")
         data["ros1_bridge_url"] = url or "http://127.0.0.1:18181"
 
+    if data["camera_type"] == "hp60c_sdk":
+        data["stream_backend"] = "hp60c-sdk-bridge"
+        data["camera_fourcc"] = ""
+        data["camera_width"] = 0
+        data["camera_height"] = 0
+        data["camera_fps"] = 0
+        url = str(data.get("hp60c_sdk_bridge_url") or data.get("ros1_bridge_url") or "http://127.0.0.1:18181").strip().rstrip("/")
+        data["hp60c_sdk_bridge_url"] = url or "http://127.0.0.1:18181"
+        data["ros1_bridge_url"] = data.get("ros1_bridge_url") or data["hp60c_sdk_bridge_url"]
+        if not str(data.get("camera_source") or "").strip():
+            data["camera_source"] = data["hp60c_sdk_bridge_url"]
+
     return data
 
 
@@ -278,9 +297,10 @@ def _validate_settings(settings: Mapping[str, Any]) -> None:
         if not source.lower().startswith("rtsp://"):
             raise CppRuntimeSettingsError("RTSP 相机源应以 rtsp:// 开头")
 
-    if camera_type == "ros1":
-        if not source.startswith("/"):
-            raise CppRuntimeSettingsError("ROS1 相机源应为图像话题，例如 /ascamera_hp60c/rgb0/image")
+    if camera_type == "hp60c_sdk":
+        bridge_url = str(settings.get("hp60c_sdk_bridge_url") or source or "").strip()
+        if not (bridge_url.startswith("http://") or bridge_url.startswith("https://")):
+            raise CppRuntimeSettingsError("HP60C SDK bridge 地址应为 HTTP 地址，例如 http://127.0.0.1:18181")
 
 
 def _parse_env_line(line: str) -> Optional[tuple[str, str]]:
@@ -318,6 +338,45 @@ def _env_to_settings(env: Mapping[str, str]) -> Dict[str, Any]:
     for env_key, setting_key in _CPP_ENV_TO_SETTING.items():
         if env_key in env and setting_key not in out:
             out[setting_key] = env[env_key]
+
+    # Runtime-compatible cpp.env may intentionally contain:
+    #   VISIONOPS_CPP_CAMERA_TYPE=auto
+    #   VISIONOPS_CPP_CAMERA_SOURCE=http://127.0.0.1:18181/stream.mjpeg
+    # while the UI-level source is actually HP60C SDK or ROS1 bridge. Prefer
+    # explicit UI metadata when present so the setting page can round-trip.
+    ui_type = str(env.get("VISIONOPS_CPP_UI_CAMERA_TYPE") or "").strip().lower()
+    if ui_type in {"hp60c_sdk", "ros1"}:
+        if ui_type == "ros1":
+            ui_type = "hp60c_sdk"
+        out["camera_type"] = ui_type
+        ui_source = str(env.get("VISIONOPS_CPP_UI_CAMERA_SOURCE") or "").strip()
+        if ui_source:
+            out["camera_source"] = ui_source
+        if ui_type == "hp60c_sdk":
+            bridge_url = str(
+                env.get("VISIONOPS_CPP_UI_HP60C_SDK_BRIDGE_URL")
+                or env.get("VISIONOPS_HP60C_SDK_BRIDGE_URL")
+                or env.get("VISIONOPS_CPP_HP60C_SDK_BRIDGE_URL")
+                or ui_source
+                or "http://127.0.0.1:18181"
+            ).strip()
+            if bridge_url.endswith("/stream.mjpeg"):
+                bridge_url = bridge_url[: -len("/stream.mjpeg")]
+            if bridge_url.endswith("/stream/mjpeg"):
+                bridge_url = bridge_url[: -len("/stream/mjpeg")]
+            out["camera_source"] = bridge_url.rstrip("/") or "http://127.0.0.1:18181"
+            out["hp60c_sdk_bridge_url"] = out["camera_source"]
+            out["stream_backend"] = "hp60c-sdk-bridge"
+        else:
+            topic = str(env.get("VISIONOPS_HP60C_ROS1_TOPIC") or ui_source or "/ascamera_hp60c/rgb0/image").strip()
+            out["camera_source"] = topic if topic.startswith("/") else "/ascamera_hp60c/rgb0/image"
+            out["ros1_bridge_url"] = str(
+                env.get("VISIONOPS_CPP_UI_ROS1_BRIDGE_URL")
+                or env.get("VISIONOPS_HP60C_ROS1_BRIDGE_URL")
+                or env.get("VISIONOPS_CPP_ROS1_BRIDGE_URL")
+                or "http://127.0.0.1:18181"
+            ).strip().rstrip("/")
+            out["stream_backend"] = "ros1-bridge"
     return _normalize_settings(out)
 
 
@@ -610,6 +669,62 @@ def _sanitize_ros1_camera_env_for_cpp_runtime(env: Dict[str, str], settings: Opt
     env["VISIONOPS_CPP_CAMERA_HEIGHT"] = "0"
     env["VISIONOPS_CPP_CAMERA_FPS"] = "0"
 
+
+def _hp60c_sdk_bridge_url_from_env_or_settings(env: Mapping[str, Any], settings: Optional[Mapping[str, Any]] = None) -> str:
+    settings = settings or {}
+    url = str(
+        settings.get("hp60c_sdk_bridge_url")
+        or settings.get("ros1_bridge_url")
+        or settings.get("camera_source")
+        or env.get("VISIONOPS_HP60C_SDK_BRIDGE_URL")
+        or env.get("VISIONOPS_CPP_HP60C_SDK_BRIDGE_URL")
+        or env.get("VISIONOPS_CPP_ROS1_BRIDGE_URL")
+        or "http://127.0.0.1:18181"
+    ).strip().rstrip("/")
+    if url.endswith("/stream.mjpeg"):
+        url = url[: -len("/stream.mjpeg")]
+    if url.endswith("/stream/mjpeg"):
+        url = url[: -len("/stream/mjpeg")]
+    return url or "http://127.0.0.1:18181"
+
+
+def _sanitize_hp60c_sdk_camera_env_for_cpp_runtime(env: Dict[str, str], settings: Optional[Mapping[str, Any]] = None) -> None:
+    """Translate UI-level HP60C SDK settings to a C++-runtime-compatible HTTP MJPEG source.
+
+    The HP60C SDK bridge owns the camera through Angstrong C++ SDK and exposes
+    /stream.mjpeg and /stream/snapshot.jpg. The existing visionops-inference-cpp
+    reads the bridge just like a normal OpenCV-readable HTTP video source.
+    """
+    settings = settings or {}
+    raw_type = str(settings.get("camera_type") or env.get("VISIONOPS_CPP_UI_CAMERA_TYPE") or env.get("VISIONOPS_CPP_CAMERA_TYPE") or "").strip().lower()
+    raw_backend = str(settings.get("stream_backend") or env.get("VISIONOPS_CPP_STREAM_BACKEND") or "").strip().lower()
+    raw_source = str(settings.get("camera_source") or env.get("VISIONOPS_CPP_CAMERA_SOURCE") or "").strip()
+    if raw_type != "hp60c_sdk" and raw_backend != "hp60c-sdk-bridge" and "18181/stream" not in raw_source:
+        return
+
+    bridge_url = _hp60c_sdk_bridge_url_from_env_or_settings(env, settings)
+    mjpeg_url = bridge_url + "/stream.mjpeg"
+
+    # UI / diagnostics variables. These let the Web page show HP60C SDK next
+    # time instead of misclassifying the runtime-compatible HTTP MJPEG URL as RTSP.
+    env["VISIONOPS_CPP_UI_CAMERA_TYPE"] = "hp60c_sdk"
+    env["VISIONOPS_CPP_UI_CAMERA_SOURCE"] = bridge_url
+    env["VISIONOPS_CPP_UI_HP60C_SDK_BRIDGE_URL"] = bridge_url
+    env["VISIONOPS_HP60C_SDK_BRIDGE_URL"] = bridge_url
+    env["VISIONOPS_CPP_HP60C_SDK_BRIDGE_URL"] = bridge_url
+
+    # Runtime variables consumed by visionops-inference-cpp.
+    env["VISIONOPS_CPP_CAMERA_TYPE"] = "auto"
+    env["VISIONOPS_CPP_CAMERA_SOURCE"] = mjpeg_url
+    env["VISIONOPS_CAMERA_SOURCE"] = mjpeg_url
+    env["VISIONOPS_CPP_STREAM_BACKEND"] = "opencv"
+    env.setdefault("VISIONOPS_CPP_STREAM_AUTO_START", "false")
+    env["VISIONOPS_CPP_CAMERA_FOURCC"] = ""
+    env["VISIONOPS_CPP_CAMERA_WIDTH"] = "0"
+    env["VISIONOPS_CPP_CAMERA_HEIGHT"] = "0"
+    env["VISIONOPS_CPP_CAMERA_FPS"] = "0"
+
+
 def write_cpp_pipeline_env(pipeline_config: Mapping[str, Any]) -> Path:
     """v0.8.4: Update cpp.env for ROI classification pipeline bundles.
 
@@ -642,6 +757,7 @@ def write_cpp_pipeline_env(pipeline_config: Mapping[str, Any]) -> Path:
     env.setdefault("VISIONOPS_CPP_NPU_CORE", "auto")
 
     _sanitize_ros1_camera_env_for_cpp_runtime(env)
+    _sanitize_hp60c_sdk_camera_env_for_cpp_runtime(env)
 
     CPP_ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
     lines = ["# Auto-generated/updated by VisionOps Collector C++ ROI pipeline API"]
@@ -706,6 +822,7 @@ def write_cpp_model_env(model_config: Mapping[str, Any]) -> Path:
     env.setdefault("VISIONOPS_CPP_NPU_CORE", "auto")
 
     _sanitize_ros1_camera_env_for_cpp_runtime(env)
+    _sanitize_hp60c_sdk_camera_env_for_cpp_runtime(env)
 
     CPP_ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
     lines = ["# Auto-generated/updated by VisionOps Collector C++ model API"]
@@ -731,6 +848,7 @@ def write_cpp_env(settings: Mapping[str, Any]) -> Path:
     # writing cpp.env, otherwise model switching later preserves ros1 and the
     # inference service fails to restart.
     _sanitize_ros1_camera_env_for_cpp_runtime(env, normalized)
+    _sanitize_hp60c_sdk_camera_env_for_cpp_runtime(env, normalized)
 
     # If cpp.env does not exist yet, provide safe defaults for the keys needed by the start script.
     env.setdefault("VISIONOPS_CPP_BIN", str(INSTALL_DIR / "bin" / "visionops_inference_cpp"))
@@ -799,6 +917,46 @@ def _bridge_base_url(settings: Mapping[str, Any]) -> str:
     return str(settings.get("ros1_bridge_url") or os.environ.get("VISIONOPS_CPP_ROS1_BRIDGE_URL") or "http://127.0.0.1:18181").rstrip("/")
 
 
+def _sdk_bridge_base_url(settings: Mapping[str, Any]) -> str:
+    return str(settings.get("hp60c_sdk_bridge_url") or settings.get("camera_source") or os.environ.get("VISIONOPS_HP60C_SDK_BRIDGE_URL") or "http://127.0.0.1:18181").rstrip("/")
+
+
+def restart_hp60c_sdk_bridge_service() -> Dict[str, Any]:
+    service = os.environ.get("VISIONOPS_HP60C_SDK_BRIDGE_SERVICE", "visionops-hp60c-sdk-bridge")
+    commands = [
+        ["sudo", "-n", "systemctl", "restart", f"{service}.service"],
+        ["systemctl", "restart", f"{service}.service"],
+    ]
+    last: Optional[subprocess.CompletedProcess] = None
+    for cmd in commands:
+        last = _run_command(cmd, timeout=20.0)
+        if last.returncode == 0:
+            return {"ok": True, "command": " ".join(cmd), "stdout": last.stdout.strip(), "service": service}
+    stderr = (last.stderr if last else "").strip()
+    return {
+        "ok": False,
+        "service": service,
+        "error": stderr or "service restart failed; bridge may not be installed yet",
+    }
+
+
+def wait_hp60c_sdk_bridge_health(settings: Mapping[str, Any], timeout_sec: float = 8.0) -> Dict[str, Any]:
+    url = _sdk_bridge_base_url(settings) + "/health"
+    deadline = time.time() + timeout_sec
+    last_error = ""
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=1.5) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+            import json
+            data = json.loads(raw) if raw.strip() else {}
+            return data if isinstance(data, dict) else {"data": data}
+        except Exception as exc:
+            last_error = str(exc)
+            time.sleep(0.5)
+    raise CppRuntimeSettingsError(f"HP60C SDK bridge health 检查超时：{last_error}")
+
+
 def restart_hp60c_ros1_bridge_service() -> Dict[str, Any]:
     service = os.environ.get("VISIONOPS_HP60C_ROS1_BRIDGE_SERVICE", "visionops-hp60c-ros1-bridge")
     commands = [
@@ -842,6 +1000,40 @@ def apply_cpp_camera_settings(settings: Optional[Mapping[str, Any]] = None) -> D
         _validate_settings(normalized)
 
     env_path = write_cpp_env(normalized)
+    if str(normalized.get("camera_type") or "") == "hp60c_sdk":
+        # HP60C SDK is a UI-level camera source. The camera is provided by the
+        # independent SDK bridge, but the actual model validation/realtime APIs
+        # still proxy to visionops-inference-cpp on VISIONOPS_CPP_PORT.
+        # Therefore applying this setting must restart both services:
+        #   1) hp60c sdk bridge: make sure 18181 provides snapshot/mjpeg
+        #   2) inference-cpp: reload cpp.env and open http://127.0.0.1:18181/stream.mjpeg
+        # Earlier versions only restarted the bridge, which made preview work
+        # while /api/cpp/infer failed with Errno 111 when inference-cpp was not
+        # listening or had not reloaded its camera source.
+        bridge_restart = restart_hp60c_sdk_bridge_service()
+        try:
+            bridge_health = wait_hp60c_sdk_bridge_health(normalized)
+        except Exception as exc:
+            bridge_health = {"ok": False, "error": str(exc), "bridge_url": _sdk_bridge_base_url(normalized)}
+
+        cpp_restart: Dict[str, Any]
+        cpp_health: Dict[str, Any]
+        try:
+            cpp_restart = restart_cpp_service()
+            cpp_health = wait_cpp_health()
+        except Exception as exc:
+            cpp_restart = {"ok": False, "error": str(exc), "service": CPP_SERVICE_NAME}
+            cpp_health = {"ok": False, "error": str(exc), "cpp_service_url": str(CPP_INFERENCE_URL or "http://127.0.0.1:18080").rstrip("/")}
+
+        return {
+            "ok": bool(bridge_health.get("ok", True)) and bool(cpp_health.get("ok", False)),
+            "message": "HP60C SDK 相机设置已写入 cpp.env；已重启 HP60C SDK bridge，并已尝试重启 C++ 推理服务以重新加载 HTTP MJPEG 相机源。",
+            "settings": normalized,
+            "cpp_env_path": str(env_path),
+            "restart": {"hp60c_sdk_bridge": bridge_restart, "cpp_inference": cpp_restart},
+            "health": {"hp60c_sdk_bridge": bridge_health, "cpp_inference": cpp_health},
+        }
+
     if str(normalized.get("camera_type") or "") == "ros1":
         restart_info = restart_hp60c_ros1_bridge_service()
         try:

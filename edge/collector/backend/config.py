@@ -102,8 +102,10 @@ DEFAULT_DATASET_NAME = os.getenv("VISIONOPS_DEFAULT_DATASET", "local_dataset")
 DEVICE_ID = str(_override("vision_box.device_id", os.getenv("VISIONOPS_DEVICE_ID", "rk3588-001")))
 USER_ID = os.getenv("VISIONOPS_USER_ID", "operator-001")
 _CUSTOMER_ID = str(_override("vision_box.customer_id", os.getenv("VISIONOPS_CUSTOMER_ID", "CUST-001")))
-_ENV_CAMERA_SOURCE = os.getenv("VISIONOPS_CAMERA_SOURCE", "browser")
-CAMERA_SOURCE = _runtime_camera_source(_ENV_CAMERA_SOURCE)
+# Legacy Python camera source is disabled.  Keep CAMERA_SOURCE as browser so
+# backend/services/camera.py never attempts to open RTSP/USB sources.
+_ENV_CAMERA_SOURCE = "browser"
+CAMERA_SOURCE = "browser"
 CAMERA_STREAM_FPS = _as_float(_override("camera.common.fps", os.getenv("VISIONOPS_CAMERA_STREAM_FPS", "6")), 6.0)
 CAMERA_PREVIEW_WIDTH = _as_int(_override("camera.common.preview_width", os.getenv("VISIONOPS_CAMERA_PREVIEW_WIDTH", "960")), 960)
 CAMERA_JPEG_QUALITY = _as_int(_override("camera.common.jpeg_quality", os.getenv("VISIONOPS_CAMERA_JPEG_QUALITY", "75")), 75)

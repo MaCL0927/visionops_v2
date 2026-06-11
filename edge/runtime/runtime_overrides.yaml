@@ -1,48 +1,11 @@
-version: 2.3.0
+version: 2.3.3
 camera:
-  type: rtsp
-  usb:
-    device_node: /dev/video0
-    backend: opencv
-    buffer_size: 1
-  rtsp:
-    ip: 192.168.2.64
-    port: 554
-    channel: '102'
-    username: admin
-    password: Abcd123_
-    transport: tcp
-    url: rtsp://admin:Abcd123_@192.168.2.64:554/Streaming/Channels/102
-  industrial:
-    vendor: hikrobot
-    trigger_mode: continuous
-    trigger_source: Line0
-    roi_x: 0
-    roi_y: 0
-    roi_wh: 1280x720
-  mock:
-    pattern: detection_scene
-    fps: 10
-    timestamp: true
+  # Legacy Python RTSP/USB camera path disabled.
+  # Use C++ settings: HP60C C++ SDK 相机 -> http://127.0.0.1:18181/stream.mjpeg
+  type: disabled
   common:
-    resolution: 1280x720
-    fps: 6
-    rotation: '0'
-    exposure_mode: auto
-    exposure: 0
-    gain: 0
-    white_balance: auto
-    brightness: 50
-    contrast: 50
     preview_width: 960
     jpeg_quality: 100
-    reconnect_max_fails: 30
-  calibration:
-    source: usb
-    calibration_type: mono
-    checkerboard: 9x6
-    square_size_mm: 25.0
-    active_file: ''
 vision_box:
   device_id: rk3588-001
   customer_id: CUST-001
@@ -55,7 +18,11 @@ vision_box:
   log_keep_days: 7
   usb_auto_mount: true
   disk_warn_percent: 80
-  time_sync: ntp
+  time_sync:
+    mode: upper_host_ntp
+    ntp_server: 192.168.1.100
+    fallback_ntp: ntp.ubuntu.com
+    client: chrony
   network:
     eth0:
       role: camera_lan

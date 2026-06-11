@@ -147,33 +147,34 @@ def list_camera_devices():
 
 @router.post("/camera/apply")
 def apply_camera_settings():
-    """v2.1：保存后立即让 RTSP 相机与预览参数生效。"""
-    try:
-        from backend.services.camera import camera_service
-        status = camera_service.reload_from_runtime(start=True)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"应用相机设置失败: {exc}") from exc
+    """旧 Python RTSP/USB 摄像头链路已禁用。
+
+    该接口保留为兼容旧前端调用，但不再启动 OpenCV/Python 读流线程。
+    HP60C 使用 C++ SDK bridge 与 /api/cpp/hp60c_sdk/* 接口。
+    """
     return {
         "ok": True,
-        "message": "相机设置已应用，正在重新连接后端摄像头预览",
-        "camera": status,
+        "message": "旧 Python 摄像头链路已禁用；当前使用 C++/HP60C SDK 相机。",
+        "camera": {
+            "enabled": False,
+            "type": "disabled",
+            "status": "disabled",
+            "source": "hp60c_sdk_cpp",
+        },
     }
 
 
 @router.post("/camera/test")
 def test_camera_settings():
-    """v2.1：测试当前 RTSP 配置是否能读取到一帧。"""
-    try:
-        from backend.services.camera import camera_service
-        camera_service.reload_from_runtime(start=True)
-        # 读取一帧即可判断当前相机配置是否基本正确。
-        camera_service.get_latest_jpeg(timeout=6.0)
-        status = camera_service.status()
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"相机连接测试失败: {exc}") from exc
+    """旧 Python 相机测试入口已禁用。"""
     return {
-        "ok": True,
-        "message": "相机连接测试通过",
-        "camera": status,
+        "ok": False,
+        "message": "旧 Python RTSP/USB 相机测试已禁用；请使用 C++ 设置中的 HP60C SDK 预览测试。",
+        "camera": {
+            "enabled": False,
+            "type": "disabled",
+            "status": "disabled",
+            "source": "hp60c_sdk_cpp",
+        },
     }
 

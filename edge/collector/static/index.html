@@ -332,9 +332,9 @@
             <div class="settings-section-title cpp-settings-title">
               <b>C++ 相机类型与输入源</b>
               <select id="cppSettingCameraType" class="camera-type-title-select" aria-label="C++ 相机类型" data-cpp-setting="camera_type">
-                <option value="rtsp">RTSP 网络相机</option>
+                <option value="rtsp">RTSP 网络相机（旧方案，不推荐）</option>
                 <option value="usb">USB / Orbbec RGB 相机</option>
-                <option value="ros1">ROS1 图像话题（HP60C）</option>
+                <option value="hp60c_sdk">HP60C C++ SDK 相机</option>
               </select>
               <span><em class="settings-mini-badge cpp">C++已接入</em> 这里的配置会写入 cpp.env，并由 visionops-inference-cpp 取流。</span>
             </div>
@@ -343,7 +343,7 @@
               <div class="settings-section-title"><b>C++ RTSP 参数</b><span>适合海康/大华网络相机；stream backend 可选 OpenCV 或 gst-mpp。</span></div>
               <div class="settings-grid three">
                 <label class="setting-field full">RTSP URL
-                  <input id="cppSettingRtspUrl" value="rtsp://admin:Abcd123_@192.168.2.64:554/Streaming/channels/101" />
+                  <input id="cppSettingRtspUrl" value="" />
                 </label>
                 <label class="setting-field">RTSP 传输
                   <select data-cpp-setting="rtsp_transport"><option value="tcp" selected>TCP</option><option value="udp">UDP</option></select>
@@ -396,23 +396,22 @@
               </div>
             </div>
 
-            <div id="cppCameraTypeRos1" class="cpp-camera-type-panel camera-inline-panel cpp-implemented-setting-block inner-cpp-panel">
-              <div class="settings-section-title"><b>C++ ROS1 / HP60C 参数</b><span>由独立 C++ ROS1 bridge 订阅官方 ascamera 话题；Web 不再走旧 Python 相机线程。</span></div>
+            <div id="cppCameraTypeHp60cSdk" class="cpp-camera-type-panel camera-inline-panel cpp-implemented-setting-block inner-cpp-panel">
+              <div class="settings-section-title"><b>C++ SDK / HP60C 参数</b><span>由独立 C++ SDK bridge 通过 Angstrong SDK 直接打开相机；不再依赖 ROS1。</span></div>
               <div class="settings-grid three">
-                <label class="setting-field full">ROS1 RGB 图像话题
-                  <input id="cppSettingRos1Topic" data-cpp-setting="camera_source" value="/ascamera_hp60c/rgb0/image" />
-                  <small>需先启动官方驱动：roslaunch ascamera hp60c.launch，并确认 rostopic hz 有帧。</small>
+                <label class="setting-field full">HP60C SDK bridge 地址
+                  <input id="cppSettingHp60cSdkBridgeUrl" data-cpp-setting="hp60c_sdk_bridge_url" value="http://127.0.0.1:18181" />
+                  <small>默认由 visionops-hp60c-sdk-bridge.service 提供 /stream/snapshot.jpg 和 /stream.mjpeg。</small>
                 </label>
-                <label class="setting-field full">C++ ROS bridge 地址
-                  <input id="cppSettingRos1BridgeUrl" data-cpp-setting="ros1_bridge_url" value="http://127.0.0.1:18181" />
-                  <small>Collector 只代理这个 HTTP 服务，不 import rospy/cv_bridge。</small>
+                <label class="setting-field full">C++ 推理读取流
+                  <input id="cppSettingHp60cSdkStreamUrl" value="http://127.0.0.1:18181/stream.mjpeg" disabled />
+                  <small>保存时会写入 cpp.env：VISIONOPS_CPP_CAMERA_SOURCE=http://127.0.0.1:18181/stream.mjpeg。</small>
                 </label>
                 <label class="setting-field">取流后端
-                  <select data-cpp-setting="stream_backend"><option value="ros1-bridge" selected>C++ ROS1 Bridge</option></select>
+                  <select data-cpp-setting="stream_backend"><option value="hp60c-sdk-bridge" selected>HP60C SDK Bridge</option></select>
                 </label>
               </div>
             </div>
-          </div>
 
           <div class="settings-section cpp-settings-card cpp-implemented-setting-block">
             <div class="settings-section-title"><b>C++ 取流与前端预览频率</b><span><em class="settings-mini-badge cpp">C++已接入</em> 这些参数影响相机读取和 Web snapshot 刷新，不再走旧 Python MJPEG 逻辑。</span></div>
@@ -854,6 +853,6 @@
 
   <div id="toast" class="toast"></div>
   <div id="centerNotice" class="center-notice" role="status" aria-live="polite"><div id="centerNoticeBox" class="center-notice-box"></div></div>
-  <script src="/static/app.js?v=v0_9_5_hide_overlay_labels"></script>
+  <script src="/static/app.js?v=v0_9_6_2_hp60c_sdk_only"></script>
 </body>
 </html>

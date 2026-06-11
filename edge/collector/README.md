@@ -68,7 +68,7 @@ export VISIONOPS_USER_ID=operator-001
 
 ```bash
 export OPENCV_FFMPEG_CAPTURE_OPTIONS="rtsp_transport;tcp|stimeout;5000000"
-export VISIONOPS_CAMERA_SOURCE="rtsp://用户名:密码@摄像头IP:554/Streaming/Channels/102"
+export VISIONOPS_CAMERA_SOURCE="browser"  # 旧 Python 摄像头链路已禁用；HP60C 使用 C++ SDK bridge
 export VISIONOPS_CAMERA_STREAM_FPS=6
 export VISIONOPS_CAMERA_PREVIEW_WIDTH=960
 export VISIONOPS_CAMERA_JPEG_QUALITY=75
@@ -288,7 +288,7 @@ export VISIONOPS_VALIDATION_REALTIME_INTERVAL_MS=1000
 
 - 采集标注页只有处于“拍照采集”子页面时才打开摄像头预览。
 - 切换到“确认上传”、校验页、模型验证页、生产模式时，会自动关闭前端摄像头预览。
-- RTSP/后端摄像头模式下，离开拍照采集页会调用 `/api/camera/stop` 停止后端读取线程，降低 RK3588 资源占用。
+- HP60C 当前使用 C++ SDK bridge；旧 Python `/api/camera/*` 摄像头线程已禁用。
 - 模型验证页的“拍照检测”和“实时检测”仍可按需临时打开摄像头；停止实时检测或离开页面后会自动释放摄像头资源。
 
 ## v6.5 更新说明：模型验证读取同名 YAML

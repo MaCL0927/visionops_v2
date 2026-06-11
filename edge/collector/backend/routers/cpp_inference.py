@@ -28,11 +28,11 @@ from backend.services.cpp_inference_client import (
     post_json,
     service_summary,
 )
-from backend.services.ros1_bridge_client import (
-    Ros1BridgeError,
-    get_binary as ros1_bridge_get_binary,
-    get_json as ros1_bridge_get_json,
-    post_json as ros1_bridge_post_json,
+from backend.services.hp60c_sdk_bridge_client import (
+    Hp60cSdkBridgeError,
+    get_binary as hp60c_sdk_bridge_get_binary,
+    get_json as hp60c_sdk_bridge_get_json,
+    post_json as hp60c_sdk_bridge_post_json,
 )
 from backend.services.models import list_rknn_models
 from backend.services.cpp_runtime_settings import (
@@ -41,7 +41,7 @@ from backend.services.cpp_runtime_settings import (
     get_cpp_current_model_config,
     get_cpp_settings_payload,
     restart_cpp_service,
-    restart_hp60c_ros1_bridge_service,
+    restart_hp60c_sdk_bridge_service,
     save_cpp_camera_settings,
     wait_cpp_health,
     write_cpp_env,
@@ -73,33 +73,27 @@ def _json_or_502(func, *args, **kwargs) -> Dict[str, Any]:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-def _ros1_json_or_502(func, *args, **kwargs) -> Dict[str, Any]:
-    """Proxy a JSON request to the independent HP60C ROS1 C++ bridge.
 
-    The bridge is a systemd service. In field use it may not be running yet
-    when the web page enters capture mode, so on the first proxy failure we
-    try to restart the bridge once and then retry the same request. Collector
-    still does not import rospy/cv_bridge here.
-    """
+def _hp60c_sdk_json_or_502(func, *args, **kwargs) -> Dict[str, Any]:
+    """Proxy a JSON request to the independent HP60C Angstrong SDK C++ bridge."""
     _ensure_enabled()
     first_error = None
     try:
         return func(*args, **kwargs)
-    except Ros1BridgeError as exc:
+    except Hp60cSdkBridgeError as exc:
         first_error = exc
 
-    restart_info = restart_hp60c_ros1_bridge_service()
+    restart_info = restart_hp60c_sdk_bridge_service()
     try:
         return func(*args, **kwargs)
-    except Ros1BridgeError as exc:
+    except Hp60cSdkBridgeError as exc:
         detail = {
             "error": str(exc),
             "first_error": str(first_error),
             "restart": restart_info,
-            "hint": "请检查 sudo systemctl status visionops-hp60c-ros1-bridge.service 和 journalctl -u visionops-hp60c-ros1-bridge.service -n 80",
+            "hint": "请检查 sudo systemctl status visionops-hp60c-sdk-bridge.service 和 journalctl -u visionops-hp60c-sdk-bridge.service -n 80",
         }
         raise HTTPException(status_code=502, detail=detail) from exc
-
 
 
 
@@ -811,49 +805,49 @@ def cpp_stream_annotated(request: Request) -> Response:
 
 
 # ---------------------------------------------------------------------------
-# HP60C ROS1 C++ bridge proxy
+# HP60C Angstrong SDK C++ bridge proxy
 # ---------------------------------------------------------------------------
-# These endpoints are intentionally under /api/cpp because the UI treats HP60C
-# as a C++ camera source. Collector does not import rospy/cv_bridge here; it
-# only proxies HTTP requests to an independent C++ ROS1 bridge process.
+# These endpoints replace the older ROS1 topic bridge. The SDK bridge owns the
+# camera directly through Angstrong C++ SDK and exposes the same HTTP snapshot
+# and MJPEG endpoints used by VisionOps.
 
-@router.get("/ros1/health")
-def cpp_ros1_bridge_health() -> Dict[str, Any]:
-    return _ros1_json_or_502(ros1_bridge_get_json, "/health")
-
-
-@router.post("/ros1/stream/start")
-def cpp_ros1_stream_start(request: Request) -> Dict[str, Any]:
-    return _ros1_json_or_502(ros1_bridge_post_json, "/stream/start", query_string=request.scope.get("query_string"))
+@router.get("/hp60c_sdk/health")
+def cpp_hp60c_sdk_bridge_health() -> Dict[str, Any]:
+    return _hp60c_sdk_json_or_502(hp60c_sdk_bridge_get_json, "/health")
 
 
-@router.post("/ros1/stream/stop")
-def cpp_ros1_stream_stop(request: Request) -> Dict[str, Any]:
-    return _ros1_json_or_502(ros1_bridge_post_json, "/stream/stop", query_string=request.scope.get("query_string"))
+@router.post("/hp60c_sdk/stream/start")
+def cpp_hp60c_sdk_stream_start(request: Request) -> Dict[str, Any]:
+    return _hp60c_sdk_json_or_502(hp60c_sdk_bridge_post_json, "/stream/start", query_string=request.scope.get("query_string"))
 
 
-@router.get("/ros1/stream/status")
-def cpp_ros1_stream_status(request: Request) -> Dict[str, Any]:
-    return _ros1_json_or_502(ros1_bridge_get_json, "/stream/status", query_string=request.scope.get("query_string"))
+@router.post("/hp60c_sdk/stream/stop")
+def cpp_hp60c_sdk_stream_stop(request: Request) -> Dict[str, Any]:
+    return _hp60c_sdk_json_or_502(hp60c_sdk_bridge_post_json, "/stream/stop", query_string=request.scope.get("query_string"))
 
 
-@router.get("/ros1/stream/snapshot.jpg")
-def cpp_ros1_stream_snapshot(request: Request) -> Response:
+@router.get("/hp60c_sdk/stream/status")
+def cpp_hp60c_sdk_stream_status(request: Request) -> Dict[str, Any]:
+    return _hp60c_sdk_json_or_502(hp60c_sdk_bridge_get_json, "/stream/status", query_string=request.scope.get("query_string"))
+
+
+@router.get("/hp60c_sdk/stream/snapshot.jpg")
+def cpp_hp60c_sdk_stream_snapshot(request: Request) -> Response:
     _ensure_enabled()
     first_error = None
     try:
-        data, content_type = ros1_bridge_get_binary("/stream/snapshot.jpg")
-    except Ros1BridgeError as exc:
+        data, content_type = hp60c_sdk_bridge_get_binary("/stream/snapshot.jpg")
+    except Hp60cSdkBridgeError as exc:
         first_error = exc
-        restart_info = restart_hp60c_ros1_bridge_service()
+        restart_info = restart_hp60c_sdk_bridge_service()
         try:
-            data, content_type = ros1_bridge_get_binary("/stream/snapshot.jpg")
-        except Ros1BridgeError as exc2:
+            data, content_type = hp60c_sdk_bridge_get_binary("/stream/snapshot.jpg")
+        except Hp60cSdkBridgeError as exc2:
             detail = {
                 "error": str(exc2),
                 "first_error": str(first_error),
                 "restart": restart_info,
-                "hint": "请检查 sudo systemctl status visionops-hp60c-ros1-bridge.service 和 journalctl -u visionops-hp60c-ros1-bridge.service -n 80",
+                "hint": "请检查 sudo systemctl status visionops-hp60c-sdk-bridge.service 和 journalctl -u visionops-hp60c-sdk-bridge.service -n 80",
             }
             raise HTTPException(status_code=502, detail=detail) from exc2
     return Response(

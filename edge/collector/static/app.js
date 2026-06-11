@@ -354,11 +354,10 @@ async function loadCollectorState(){
   if(data.disk) updateVisionBoxEffectiveStatus({vision_box:visionBox,disk:data.disk});
   applyInitialDefaultMode(visionBox.default_mode);
   syncCounts(data.counts);
-  if(data.camera && data.camera.backend_enabled){
-    backendCameraAvailable=true;
-    useBackendCamera=true;
-    useRealCamera=false;
-  }
+  // 旧 Python RTSP/USB 摄像头链路已禁用；采集页统一走 C++/HP60C SDK 预览。
+  backendCameraAvailable=false;
+  useBackendCamera=false;
+  useRealCamera=false;
   await refreshFolder(currentFolder);
 }
 
@@ -395,8 +394,14 @@ function updateCameraLifecycle(){
 function getActiveCppCameraType(){
   return String((cppSettingsCache && cppSettingsCache.camera_type) || (cppSettingCameraType && cppSettingCameraType.value) || 'rtsp').toLowerCase();
 }
+function isHp60cExternalBridgeType(type){
+  const t=String(type || getActiveCppCameraType()).toLowerCase();
+  return t==='hp60c_sdk';
+}
 function getCppCaptureStreamBase(){
-  return getActiveCppCameraType()==='ros1' ? '/api/cpp/ros1/stream' : '/api/cpp/stream';
+  const type=getActiveCppCameraType();
+  if(type==='hp60c_sdk') return '/api/cpp/hp60c_sdk/stream';
+  return '/api/cpp/stream';
 }
 async function getCppStreamStatusSafe(){
   try{return await apiGet(getCppCaptureStreamBase() + '/status');}
@@ -444,24 +449,24 @@ async function startCppCameraPreview(){
     useBackendCamera=false;
     useRealCamera=false;
     setBackendImageVisible(
-      alreadyRunning ? (getActiveCppCameraType()==='ros1' ? 'C++ ROS1 当前相机流画面' : 'C++ 当前相机流画面') : (getActiveCppCameraType()==='ros1' ? 'C++ ROS1 / HP60C 预览画面' : 'C++ 低延迟预览画面'),
+      alreadyRunning ? (getActiveCppCameraType()==='hp60c_sdk' ? 'HP60C SDK 当前相机画面' : 'C++ 当前相机流画面') : (getActiveCppCameraType()==='hp60c_sdk' ? 'HP60C C++ SDK 预览画面' : 'C++ 低延迟预览画面'),
       alreadyRunning
         ? 'C++ 服务已有相机流在运行，拍照采集页复用其最新帧；离开本页不会强制停止外部启动的流'
-        : (getActiveCppCameraType()==='ros1' ? '独立 C++ ROS1 bridge 正在从 HP60C ROS 话题取图；离开拍照采集页后会自动停止预览输出' : 'C++ 服务正在以 preview 模式取流；离开拍照采集页后会自动停止以降低资源占用')
+        : (getActiveCppCameraType()==='hp60c_sdk' ? '独立 HP60C SDK bridge 正在通过 Angstrong C++ SDK 取图；离开拍照采集页只会停止浏览器刷新，不会关闭底层相机服务' : 'C++ 服务正在以 preview 模式取流；离开拍照采集页后会自动停止以降低资源占用')
     );
     startCppCapturePreviewImageLoop();
     return true;
   }catch(err){
     const activeType=getActiveCppCameraType();
-    console.warn(activeType==='ros1' ? 'ROS1 C++ bridge preview start failed' : 'C++ preview start failed, fallback to Python camera_service',err);
+    console.warn(isHp60cExternalBridgeType(activeType) ? 'HP60C bridge preview start failed' : 'C++ preview start failed, fallback to Python camera_service',err);
     useCppCamera=false;
     cppCapturePreviewStartedByCapturePage=false;
     cppCapturePreviewExternalStream=false;
     stopCppCapturePreviewImageLoop();
-    if(activeType==='ros1'){
+    if(isHp60cExternalBridgeType(activeType)){
       setBackendImageVisible(
-        'HP60C ROS1 预览不可用',
-        '未能连接到 127.0.0.1:18181 的 C++ ROS1 bridge；请检查 visionops-hp60c-ros1-bridge.service。'
+        'HP60C SDK 预览不可用',
+        '未能连接到 127.0.0.1:18181 的 HP60C SDK bridge；请检查 visionops-hp60c-sdk-bridge.service。'
       );
     }
     return false;
@@ -477,7 +482,7 @@ async function stopCppCameraPreview(callBackend=true){
   const activeType=getActiveCppCameraType();
   // ROS1 bridge is a shared C++ frame provider. Do not stop it when leaving
   // the capture page; just stop the browser refresh loop.
-  if(activeType==='ros1') return;
+  if(isHp60cExternalBridgeType(activeType)) return;
   if(shouldStopCpp || (callBackend && wasStartedByCapturePage && !realtimeRunning && !productionRunning)){
     try{await apiPost(getCppCaptureStreamBase() + '/stop',{});}catch(err){console.warn('stop C++ preview failed',err);}
   }
@@ -503,25 +508,12 @@ async function captureCppSnapshotDataUrl(maxAttempts=5){
 async function startCamera(){
   if(cameraActive) return;
   cameraActive=true;
-  // v0.5.6：拍照采集页优先使用 C++ preview 模式作为唯一 RTSP 拉流 owner；失败时回退旧 Python MJPEG。
-  if((backendCameraAvailable || useBackendCamera) && isCapturePageVisible()){
+  // 采集页统一走 C++/HP60C SDK 预览。旧 Python /api/camera/stream 已禁用，
+  // 避免后台再次尝试读取历史 RTSP 地址。
+  if(isCapturePageVisible()){
     const cppOk=await startCppCameraPreview();
     if(cppOk) return;
-    // ROS1/HP60C 不再回退旧 Python 摄像头链路，否则会误读 /dev/video 或 RTSP 并触发 OpenCV timeout。
-    if(getActiveCppCameraType()==='ros1') return;
-  }
-  // 部署到 RK3588 + 海康 RTSP 时，旧路径使用后端 Python MJPEG 流；保留为 fallback，避免影响原有功能。
-  if(backendCameraAvailable || useBackendCamera){
-    useBackendCamera=true;
-    useCppCamera=false;
-    backendCamera.style.display='';
-    backendCamera.src='/api/camera/stream?t=' + Date.now();
-    backendCamera.classList.add('active','backend-active');
-    cameraVideo.classList.remove('active');
-    simulatedCamera.classList.remove('active');
-    cameraStatusTitle.textContent='RTSP/后端摄像头画面';
-    cameraStatusText.textContent='C++ 预览不可用，已回退到旧 Python 后端摄像头线程；离开拍照采集页后会自动停止以降低资源占用';
-    return;
+    if(isHp60cExternalBridgeType(getActiveCppCameraType())) return;
   }
   if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){cameraStatusTitle.textContent='模拟摄像头画面';cameraStatusText.textContent='当前浏览器不支持摄像头接口，点击按钮后保存模拟图片';return;}
   try{
@@ -547,9 +539,7 @@ async function stopCamera(callBackend=true){
   cameraActive=false;
   if(cameraStatusTitle) cameraStatusTitle.textContent='摄像头已关闭';
   if(cameraStatusText) cameraStatusText.textContent='只有进入“采集上传 / 拍照采集”页面，或开启实时检测时才会打开摄像头';
-  if(callBackend && getActiveCppCameraType()!=='ros1' && (backendCameraAvailable || useBackendCamera)){
-    try{await apiPost('/api/camera/stop');}catch(err){}
-  }
+  // 旧 Python 摄像头线程已禁用，不再调用 /api/camera/stop。
 }
 
 function buildSimulatedFrame(ctx,w,h){
@@ -725,9 +715,8 @@ async function captureCurrentFrameDataUrl(){
     return await captureCppSnapshotDataUrl();
   }
   if(useBackendCamera){
-    const res=await fetch('/api/camera/frame?t='+Date.now());
-    if(!res.ok) throw new Error('读取摄像头当前帧失败');
-    return await blobToDataUrl(await res.blob());
+    // 旧 Python 后端摄像头已禁用；如果仍处于该状态，退回画布当前帧，避免访问 /api/camera/frame。
+    return captureFrameAsJpeg();
   }
   return captureFrameAsJpeg();
 }
@@ -3027,7 +3016,7 @@ const cppSettingCameraType=document.getElementById('cppSettingCameraType');
 const cppCameraTypePanels={
   rtsp:document.getElementById('cppCameraTypeRtsp'),
   usb:document.getElementById('cppCameraTypeUsb'),
-  ros1:document.getElementById('cppCameraTypeRos1'),
+  hp60c_sdk:document.getElementById('cppCameraTypeHp60cSdk'),
 };
 const cppUsbDeviceNodeSelect=document.getElementById('cppUsbDeviceNodeSelect');
 const refreshCppUsbDevicesBtn=document.getElementById('refreshCppUsbDevicesBtn');
@@ -3233,15 +3222,16 @@ function normalizeCppSettingsPayload(raw){
   const source=raw && typeof raw==='object' ? raw : {};
   const out={...source};
   const type=String(out.camera_type || 'rtsp').toLowerCase();
-  out.camera_type=(type==='usb' || type==='ros1') ? type : 'rtsp';
-  out.camera_source=String(out.camera_source || (out.camera_type==='usb' ? '/dev/video7' : (out.camera_type==='ros1' ? '/ascamera_hp60c/rgb0/image' : ''))).trim();
-  out.stream_backend=out.camera_type==='ros1' ? 'ros1-bridge' : (String(out.stream_backend || 'opencv').trim() || 'opencv');
+  out.camera_type=(type==='usb' || type==='hp60c_sdk') ? type : 'rtsp';
+  out.camera_source=String(out.camera_source || (out.camera_type==='usb' ? '/dev/video7' : (out.camera_type==='hp60c_sdk' ? 'http://127.0.0.1:18181' : ''))).trim();
+  out.stream_backend=out.camera_type==='hp60c_sdk' ? 'hp60c-sdk-bridge' : (String(out.stream_backend || 'opencv').trim() || 'opencv');
   out.rtsp_transport=String(out.rtsp_transport || 'tcp').toLowerCase()==='udp' ? 'udp' : 'tcp';
   out.rtsp_timeout_ms=Number(out.rtsp_timeout_ms || 5000);
   out.camera_width=Number(out.camera_width || 0);
   out.camera_height=Number(out.camera_height || 0);
   out.camera_fps=Number(out.camera_fps || (out.camera_type==='usb' ? 10 : 0));
   out.ros1_bridge_url=String(out.ros1_bridge_url || 'http://127.0.0.1:18181').trim();
+  out.hp60c_sdk_bridge_url=String(out.hp60c_sdk_bridge_url || out.ros1_bridge_url || 'http://127.0.0.1:18181').trim();
   out.camera_buffer_size=Number(out.camera_buffer_size || 1);
   let fourcc=String(out.camera_fourcc || '').toUpperCase();
   if(fourcc==='MJPEG') fourcc='MJPG';
@@ -3301,6 +3291,13 @@ function fillCppSettingsForm(settings){
   if(cppUsbDeviceNodeSelect && cfg.camera_type==='usb'){
     ensureFixedCppVideoOptions(cfg.camera_source || '/dev/video7');
   }
+  if(cfg.camera_type==='hp60c_sdk'){
+    const bridgeEl=document.getElementById('cppSettingHp60cSdkBridgeUrl');
+    const streamEl=document.getElementById('cppSettingHp60cSdkStreamUrl');
+    const url=(cfg.hp60c_sdk_bridge_url || cfg.camera_source || 'http://127.0.0.1:18181').replace(/\/stream\.mjpeg$|\/stream\/mjpeg$/,'');
+    if(bridgeEl) bridgeEl.value=url;
+    if(streamEl) streamEl.value=url.replace(/\/$/,'') + '/stream.mjpeg';
+  }
   if(cfg.camera_type==='ros1'){
     const topicEl=document.getElementById('cppSettingRos1Topic');
     const bridgeEl=document.getElementById('cppSettingRos1BridgeUrl');
@@ -3334,6 +3331,16 @@ function collectCppSettingsFromForm(){
   if(base.camera_type==='usb'){
     base.camera_source=(cppUsbDeviceNodeSelect && cppUsbDeviceNodeSelect.value) || base.camera_source || '/dev/video7';
     base.stream_backend=(document.getElementById('cppSettingUsbBackend') && document.getElementById('cppSettingUsbBackend').value) || 'opencv';
+  }else if(base.camera_type==='hp60c_sdk'){
+    const bridgeEl=document.getElementById('cppSettingHp60cSdkBridgeUrl');
+    const bridgeUrl=((bridgeEl && bridgeEl.value) || base.hp60c_sdk_bridge_url || 'http://127.0.0.1:18181').replace(/\/stream\.mjpeg$|\/stream\/mjpeg$/,'').replace(/\/$/,'');
+    base.hp60c_sdk_bridge_url=bridgeUrl;
+    base.camera_source=bridgeUrl;
+    base.stream_backend='hp60c-sdk-bridge';
+    base.camera_width=0;
+    base.camera_height=0;
+    base.camera_fps=0;
+    base.camera_fourcc='';
   }else if(base.camera_type==='ros1'){
     const topicEl=document.getElementById('cppSettingRos1Topic');
     const bridgeEl=document.getElementById('cppSettingRos1BridgeUrl');
@@ -3356,8 +3363,11 @@ function collectCppSettingsFromForm(){
     normalized.camera_fourcc='';
   }else if(normalized.camera_type==='usb'){
     normalized.stream_backend='opencv';
-  }else if(normalized.camera_type==='ros1'){
-    normalized.stream_backend='ros1-bridge';
+  }else if(normalized.camera_type==='hp60c_sdk'){
+    const url=String(normalized.hp60c_sdk_bridge_url || normalized.camera_source || 'http://127.0.0.1:18181').replace(/\/stream\.mjpeg$|\/stream\/mjpeg$/,'').replace(/\/$/,'');
+    normalized.hp60c_sdk_bridge_url=url || 'http://127.0.0.1:18181';
+    normalized.camera_source=normalized.hp60c_sdk_bridge_url;
+    normalized.stream_backend='hp60c-sdk-bridge';
     normalized.camera_width=0;
     normalized.camera_height=0;
     normalized.camera_fps=0;
@@ -3463,27 +3473,19 @@ function syncRtspUrlFromFields(){
   if(urlEl && url) urlEl.value=url;
 }
 async function applyCameraSettingsAfterSave(){
-  const data=await apiPost('/api/settings/camera/apply',{});
-  return data;
+  // 旧 Python RTSP/USB 摄像头链路已禁用；C++/HP60C SDK 设置由 /api/cpp/settings/apply 负责。
+  return {ok:true,message:'旧 Python 摄像头链路已禁用，当前使用 C++/HP60C SDK 相机'};
 }
 
 function refreshBackendCameraPreview(){
-  backendCameraAvailable=true;
-  useBackendCamera=true;
+  // 旧 Python backend camera 已禁用；刷新时只重启 C++/HP60C SDK 预览循环。
+  backendCameraAvailable=false;
+  useBackendCamera=false;
   useRealCamera=false;
   if(isCapturePageVisible()){
     cameraActive=false;
     startCamera();
-    return;
   }
-  if(backendCamera){
-    backendCamera.removeAttribute('src');
-    backendCamera.src='/api/camera/stream?t=' + Date.now();
-    backendCamera.style.display='';
-    backendCamera.classList.add('active','backend-active');
-  }
-  if(cameraVideo) cameraVideo.classList.remove('active');
-  if(simulatedCamera) simulatedCamera.classList.remove('active');
 }
 
 async function saveUnifiedSettingsFromForm(){
@@ -3554,13 +3556,7 @@ async function saveRuntimeSettingsFromForm(){
     }catch(vbErr){
       message=`设置已保存，但视觉盒子参数应用失败：${vbErr.message || vbErr}`;
     }
-    try{
-      const applyResult=await applyCameraSettingsAfterSave();
-      refreshBackendCameraPreview();
-      if(applyResult && applyResult.message && !message.includes('失败')) message='设置已保存，相机、算法和视觉盒子基础参数已应用';
-    }catch(applyErr){
-      message=`设置已保存，但相机应用失败：${applyErr.message || applyErr}`;
-    }
+    // 旧 Python 相机应用步骤已禁用；C++/HP60C SDK 设置请使用统一保存中的 C++ 设置应用。
     showToast(message);
   }catch(err){
     showToast(err.message || '保存设置失败');
@@ -3575,10 +3571,7 @@ async function resetRuntimeSettings(){
     try{
       await applyAlgorithmSettingsAfterSave();
     }catch(_){/* 恢复默认后的算法应用失败不影响回显 */}
-    try{
-      await applyCameraSettingsAfterSave();
-      refreshBackendCameraPreview();
-    }catch(_){/* 恢复默认后的相机应用失败不影响回显 */}
+    // 旧 Python 相机应用步骤已禁用。
     showToast(data.message || '已恢复默认设置');
   }catch(err){
     showToast(err.message || '恢复默认设置失败');
@@ -3588,16 +3581,14 @@ async function resetRuntimeSettings(){
 
 async function testCameraConnection(){
   try{
-    if(settingCameraType && settingCameraType.value === 'rtsp') syncRtspUrlFromFields();
-    const settings=collectSettingsFromForm();
-    const saved=await apiPost('/api/settings',settings);
-    runtimeSettingsCache=saved.settings || settings;
-    fillSettingsForm(runtimeSettingsCache);
-    const data=await apiPost('/api/settings/camera/test',{});
-    refreshBackendCameraPreview();
-    showToast(data.message || '相机连接测试通过');
+    const data=await apiGet('/api/cpp/hp60c_sdk/health');
+    if(data && data.ok){
+      showToast('HP60C SDK bridge 连接正常');
+    }else{
+      showToast('HP60C SDK bridge 未就绪');
+    }
   }catch(err){
-    showToast(err.message || '相机连接测试失败');
+    showToast(err.message || 'HP60C SDK bridge 连接测试失败');
   }
 }
 
