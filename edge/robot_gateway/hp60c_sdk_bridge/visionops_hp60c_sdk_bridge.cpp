@@ -2,6 +2,7 @@
 // Provides the same HTTP surface as the previous ROS1 bridge:
 //   GET /health
 //   GET /stream/snapshot.jpg
+//   GET /stream/depth.png       (16-bit PNG depth, millimeters if SDK depthImg is in mm)
 //   GET /stream.mjpeg, /stream/mjpeg, /stream.mjpg
 //   GET /stream/status
 //   POST /stream/start, POST /stream/stop  (no-op; camera stays running)
@@ -100,6 +101,14 @@ static bool send_string(int fd, const std::string &s) {
 
 struct FrameSnapshot {
     std::vector<uchar> jpeg;
+    int width = 0;
+    int height = 0;
+    uint64_t frame_id = 0;
+    std::chrono::steady_clock::time_point ts;
+};
+
+struct DepthSnapshot {
+    std::vector<uchar> png;
     int width = 0;
     int height = 0;
     uint64_t frame_id = 0;
@@ -264,6 +273,41 @@ private:
         cv::Mat bgr;
         int src_w = 0, src_h = 0;
 
+        // Keep the latest depth frame as a 16-bit PNG.
+        // For HP60C, SDK demo saves depth as raw .yuv, but the callback depthImg
+        // buffer is typically a single-channel depth plane. If it is 16-bit, keep
+        // values unchanged so downstream Python can read it with cv2.IMREAD_UNCHANGED.
+        if (data->depthImg.size > 0 && data->depthImg.data && data->depthImg.width > 0 && data->depthImg.height > 0) {
+            const int dw = static_cast<int>(data->depthImg.width);
+            const int dh = static_cast<int>(data->depthImg.height);
+            const size_t expected_u16 = static_cast<size_t>(dw) * static_cast<size_t>(dh) * 2u;
+            const size_t expected_u8 = static_cast<size_t>(dw) * static_cast<size_t>(dh);
+            cv::Mat depth_for_png;
+
+            if (data->depthImg.size >= expected_u16) {
+                cv::Mat raw16(dh, dw, CV_16UC1, data->depthImg.data);
+                depth_for_png = raw16.clone();
+            } else if (data->depthImg.size >= expected_u8) {
+                cv::Mat raw8(dh, dw, CV_8UC1, data->depthImg.data);
+                // Preserve shape and expose as 16-bit PNG for a stable HTTP API.
+                raw8.convertTo(depth_for_png, CV_16UC1);
+            }
+
+            if (!depth_for_png.empty()) {
+                std::vector<uchar> depth_png;
+                std::vector<int> png_params = {cv::IMWRITE_PNG_COMPRESSION, 1};
+                if (cv::imencode(".png", depth_for_png, depth_png, png_params)) {
+                    std::lock_guard<std::mutex> lk(depth_mutex_);
+                    latest_depth_.png = std::move(depth_png);
+                    latest_depth_.width = depth_for_png.cols;
+                    latest_depth_.height = depth_for_png.rows;
+                    latest_depth_.frame_id++;
+                    latest_depth_.ts = std::chrono::steady_clock::now();
+                    depth_frame_count_++;
+                }
+            }
+        }
+
         if (prefer_mjpeg_ && data->mjpegImg.size > 0 && data->mjpegImg.data) {
             std::vector<uchar> bytes(
                 static_cast<uchar *>(data->mjpegImg.data),
@@ -326,6 +370,26 @@ private:
         return true;
     }
 
+    bool wait_depth(DepthSnapshot &out, int timeout_ms) {
+        std::unique_lock<std::mutex> lk(depth_mutex_);
+        if (latest_depth_.png.empty()) {
+            // Depth and RGB arrive in the same SDK callback. A short wait is enough.
+            lk.unlock();
+            std::this_thread::sleep_for(std::chrono::milliseconds(std::max(1, timeout_ms)));
+            lk.lock();
+        }
+        if (latest_depth_.png.empty()) return false;
+        out = latest_depth_;
+        return true;
+    }
+
+    double latest_depth_age_ms() {
+        std::lock_guard<std::mutex> lk(depth_mutex_);
+        if (latest_depth_.png.empty()) return -1.0;
+        auto d = std::chrono::steady_clock::now() - latest_depth_.ts;
+        return std::chrono::duration<double, std::milli>(d).count();
+    }
+
     double latest_age_ms() {
         std::lock_guard<std::mutex> lk(frame_mutex_);
         if (latest_.jpeg.empty()) return -1.0;
@@ -348,6 +412,9 @@ private:
         os << "  \"width\": " << (has ? snap.width : 0) << ",\n";
         os << "  \"height\": " << (has ? snap.height : 0) << ",\n";
         os << "  \"frame_count\": " << frame_count_.load() << ",\n";
+        os << "  \"depth_available\": " << (depth_frame_count_.load() > 0 ? "true" : "false") << ",\n";
+        os << "  \"depth_frame_count\": " << depth_frame_count_.load() << ",\n";
+        os << "  \"latest_depth_age_ms\": " << latest_depth_age_ms() << ",\n";
         os << "  \"camera_model\": " << cam_model_ << ",\n";
         os << "  \"serial\": \"" << json_escape(serial_) << "\",\n";
         os << "  \"sdk_version\": \"" << json_escape(sdk_version_) << "\",\n";
@@ -430,6 +497,22 @@ private:
                 send_string(fd, h.str());
                 send_all(fd, snap.jpeg.data(), snap.jpeg.size());
             }
+        } else if (path == "/stream/depth.png" || path == "/depth.png") {
+            DepthSnapshot depth;
+            if (!wait_depth(depth, 500)) {
+                std::string body = "no depth\n";
+                std::ostringstream h;
+                h << "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nContent-Length: " << body.size()
+                  << "\r\nConnection: close\r\n\r\n";
+                send_string(fd, h.str());
+                send_string(fd, body);
+            } else {
+                std::ostringstream h;
+                h << "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: " << depth.png.size()
+                  << "\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
+                send_string(fd, h.str());
+                send_all(fd, depth.png.data(), depth.png.size());
+            }
         } else if (path == "/stream.mjpeg" || path == "/stream/mjpeg" || path == "/stream.mjpg") {
             handle_mjpeg(fd);
             return;
@@ -499,6 +582,10 @@ private:
     std::mutex frame_mutex_;
     std::condition_variable frame_cv_;
     FrameSnapshot latest_;
+
+    std::mutex depth_mutex_;
+    DepthSnapshot latest_depth_;
+    std::atomic<uint64_t> depth_frame_count_{0};
 
     std::mutex cam_mutex_;
     std::list<AS_CAM_PTR> cameras_;

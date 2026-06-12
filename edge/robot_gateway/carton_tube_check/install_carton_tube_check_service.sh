@@ -16,6 +16,16 @@ echo "[INFO] SRC_DIR=$SRC_DIR"
 echo "[INFO] DST_DIR=$DST_DIR"
 echo "[INFO] PYTHON_BIN=$PYTHON_BIN"
 
+# Ensure Python dependencies are installed into the same interpreter used by systemd.
+# Do NOT rely on plain `pip install ...`, because systemd runs $PYTHON_BIN.
+echo "[INFO] install/check Python deps in $PYTHON_BIN"
+if ! "$PYTHON_BIN" - <<'PY' >/dev/null 2>&1
+import pymodbus
+PY
+then
+  "$PYTHON_BIN" -m pip install --no-cache-dir "pymodbus==3.6.9" requests numpy opencv-python-headless -i https://pypi.tuna.tsinghua.edu.cn/simple
+fi
+
 sudo mkdir -p "$DST_DIR"
 
 copy_if_different() {

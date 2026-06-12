@@ -21,10 +21,14 @@ def read_hr(client, address: int, count: int, unit_id: int):
     unit=..., slave=..., and device_id=.... Some new versions also work without
     passing the id explicitly for TCP. Try the known forms in a safe order.
     """
+    # PyModbus 3.x uses slave= for Modbus device id over TCP.
+    # Some newer development versions accept device_id=, but trying it first can
+    # be silently ignored by kwargs in some versions and result in unit id 0.
+    # Therefore use slave -> unit -> device_id -> no-id.
     attempts = [
-        lambda: client.read_holding_registers(address=address, count=count, device_id=unit_id),
         lambda: client.read_holding_registers(address=address, count=count, slave=unit_id),
         lambda: client.read_holding_registers(address=address, count=count, unit=unit_id),
+        lambda: client.read_holding_registers(address=address, count=count, device_id=unit_id),
         lambda: client.read_holding_registers(address=address, count=count),
     ]
     last_exc = None
@@ -38,10 +42,11 @@ def read_hr(client, address: int, count: int, unit_id: int):
 
 def write_reg(client, address: int, value: int, unit_id: int):
     """Write one holding register with compatibility across pymodbus 2.x/3.x."""
+    # PyModbus 3.x uses slave= for Modbus device id over TCP.
     attempts = [
-        lambda: client.write_register(address=address, value=value, device_id=unit_id),
         lambda: client.write_register(address=address, value=value, slave=unit_id),
         lambda: client.write_register(address=address, value=value, unit=unit_id),
+        lambda: client.write_register(address=address, value=value, device_id=unit_id),
         lambda: client.write_register(address=address, value=value),
     ]
     last_exc = None
