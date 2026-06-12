@@ -139,7 +139,7 @@ setup_python_env() {
   python -m pip install --no-cache-dir \
     fastapi "uvicorn[standard]" python-multipart \
     requests pyyaml numpy psutil \
-    "pymodbus>=2.5,<4" \
+    "pymodbus==3.6.9" \
     opencv-python-headless \
     -i https://pypi.tuna.tsinghua.edu.cn/simple
 
