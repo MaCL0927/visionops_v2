@@ -89,7 +89,7 @@ algorithm:
     production_fps_limit: 1
     production_detect_interval_ms: 1000
     warmup_runs: 3
-    label_display: class_conf
+    label_display: hidden
     max_results: 100
     log_level: INFO
   classification:
@@ -115,3 +115,34 @@ algorithm:
     show_mask: true
     show_box: true
     show_mode: mask_only
+cpp_inference:
+  camera:
+    camera_type: hp60c_sdk
+    camera_source: http://127.0.0.1:18182
+    camera_width: 0
+    camera_height: 0
+    camera_fps: 0
+    camera_buffer_size: 1
+    camera_fourcc: ''
+    stream_backend: hp60c-sdk-bridge
+    stream_codec: h264
+    stream_auto_start: false
+    camera_read_fps: 10
+    detect_fps: 1
+    snapshot_fps: 10
+    enable_snapshot: true
+    enable_annotated: true
+    rtsp_transport: tcp
+    rtsp_timeout_ms: 5000
+    gst_latency_ms: 100
+    quiet_ffmpeg_log: true
+    conf_threshold: 0.25
+    nms_threshold: 0.45
+    mask_threshold: 0.5
+    topk: 5
+    max_det: 100
+    output_mode: float
+    preprocess_backend: auto
+    rga_mode: resize_color
+    ros1_bridge_url: http://127.0.0.1:18181
+    hp60c_sdk_bridge_url: http://127.0.0.1:18182

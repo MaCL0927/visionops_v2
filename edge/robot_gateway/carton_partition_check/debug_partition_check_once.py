@@ -96,7 +96,7 @@ def parse_name_set(raw: str, default: Iterable[str]) -> set[str]:
 
 load_env_file(Path(os.environ.get("VISIONOPS_PARTITION_ENV", str(DEFAULT_ENV))))
 
-SNAPSHOT_URL = getenv_str("VISIONOPS_PARTITION_SNAPSHOT_URL", "http://127.0.0.1:18181/stream/snapshot.jpg")
+SNAPSHOT_URL = getenv_str("VISIONOPS_PARTITION_SNAPSHOT_URL", "http://127.0.0.1:18182/stream/snapshot.jpg")
 INFER_URL = getenv_str("VISIONOPS_PARTITION_INFER_URL", "http://127.0.0.1:8090/api/cpp/infer")
 HTTP_TIMEOUT_S = getenv_int("VISIONOPS_PARTITION_HTTP_TIMEOUT_MS", 5000) / 1000.0
 MIN_CONF = getenv_float("VISIONOPS_PARTITION_MIN_CONF", 0.25)

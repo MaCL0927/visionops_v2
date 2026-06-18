@@ -1,0 +1,418 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+VisionOps unified Robot/PLC Modbus-TCP protocol service.
+
+Protocol from 与视觉通讯内容定义表.xlsx:
+  Vision -> Robot/PLC holding registers:
+    0   heartbeat, +1 every 0.5s, reset to 0 after 1000
+    1   carton partition check result, 0=no trigger/no result, 1=OK, 2=NG/ERROR
+    2   product placement / carton tube check result, 0=no trigger/no result, 1=OK, 2=NG/ERROR
+    3   coordinate recognition result, 0=no trigger/no result, 1=OK, 2=NG/ERROR
+    20~99 partition cell center coordinates: slot1_x, slot1_y ... slot40_x, slot40_y
+
+  Robot/PLC -> Vision holding registers:
+    100 heartbeat from Robot/PLC (read-only for Vision)
+    101 carton partition check trigger: 0=idle, 1=trigger
+    102 product placement / carton tube check trigger: 0=idle, 1=trigger
+    103 coordinate recognition trigger: 0=idle, 1=trigger
+
+The robot side holds trigger=1 until it receives the result, then writes trigger=0.
+When trigger is 0, result registers 1~3 are cleared to 0. Coordinates 20~99 are not cleared.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sys
+import threading
+import time
+import traceback
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+try:
+    from pymodbus.server import StartTcpServer
+except Exception:  # pymodbus 2.x
+    from pymodbus.server.sync import StartTcpServer
+
+try:
+    from pymodbus.datastore import ModbusSequentialDataBlock, ModbusSlaveContext, ModbusServerContext
+except Exception:  # pymodbus newer versions
+    from pymodbus.datastore import ModbusSequentialDataBlock, ModbusDeviceContext as ModbusSlaveContext, ModbusServerContext
+
+try:
+    from pymodbus.device import ModbusDeviceIdentification
+except Exception:
+    ModbusDeviceIdentification = None
+
+THIS_DIR = Path(__file__).resolve().parent
+PARTITION_DIR = THIS_DIR / "carton_partition_check"
+TUBE_DIR = THIS_DIR / "carton_tube_check"
+
+# Import task cores from their existing folders.
+sys.path.insert(0, str(PARTITION_DIR))
+import debug_partition_check_once as partition_core  # type: ignore  # noqa: E402
+sys.path.insert(0, str(TUBE_DIR))
+import debug_depth_check_once as tube_core  # type: ignore  # noqa: E402
+
+DEFAULT_ENV = THIS_DIR / "vision_robot_protocol.env"
+DEFAULT_PARTITION_ENV = PARTITION_DIR / "partition_check.env"
+DEFAULT_TUBE_ENV = TUBE_DIR / "carton_tube_check.env"
+
+# Load env files.
+partition_core.load_env_file(Path(os.environ.get("VISIONOPS_PARTITION_ENV", str(DEFAULT_PARTITION_ENV))))
+tube_core.load_env_file(Path(os.environ.get("VISIONOPS_CARTON_TUBE_ENV", str(DEFAULT_TUBE_ENV))))
+partition_core.load_env_file(Path(os.environ.get("VISIONOPS_ROBOT_PROTOCOL_ENV", str(DEFAULT_ENV))))
+
+# -----------------------------
+# Protocol holding register map
+# -----------------------------
+REG_VISION_HEARTBEAT = 0
+REG_PARTITION_RESULT = 1
+REG_PRODUCT_RESULT = 2
+REG_COORD_RESULT = 3
+REG_COORD_BASE = 20              # slot1_x, slot1_y ... slot40_x, slot40_y
+REG_ROBOT_HEARTBEAT = 100
+REG_TRIGGER_PARTITION = 101
+REG_TRIGGER_PRODUCT = 102
+REG_TRIGGER_COORD = 103
+
+RESULT_NONE = 0
+RESULT_OK = 1
+RESULT_NG = 2
+
+ENABLE = partition_core.getenv_int("VISIONOPS_ROBOT_PROTOCOL_ENABLE", 1)
+HOST = partition_core.getenv_str("VISIONOPS_ROBOT_PROTOCOL_MODBUS_HOST", "0.0.0.0")
+PORT = partition_core.getenv_int("VISIONOPS_ROBOT_PROTOCOL_MODBUS_PORT", 5045)
+UNIT_ID = partition_core.getenv_int("VISIONOPS_ROBOT_PROTOCOL_MODBUS_UNIT_ID", 1)
+SINGLE_SLAVE = partition_core.getenv_int("VISIONOPS_ROBOT_PROTOCOL_MODBUS_SINGLE_SLAVE", 1)
+ADDRESS_BASE = partition_core.getenv_int("VISIONOPS_ROBOT_PROTOCOL_ADDRESS_BASE", 0)
+REGISTER_COUNT = partition_core.getenv_int("VISIONOPS_ROBOT_PROTOCOL_REGISTER_COUNT", 200)
+POLL_INTERVAL_S = max(0.02, partition_core.getenv_int("VISIONOPS_ROBOT_PROTOCOL_POLL_INTERVAL_MS", 50) / 1000.0)
+LOG_LEVEL = partition_core.getenv_str("VISIONOPS_ROBOT_PROTOCOL_LOG_LEVEL", "INFO").upper()
+SAVE_RESULT_ROOT = partition_core.getenv_str("VISIONOPS_ROBOT_PROTOCOL_SAVE_RESULT_ROOT", "/tmp/vision_robot_protocol_latest")
+SAVE_EVERY_TRIGGER = partition_core.getenv_int("VISIONOPS_ROBOT_PROTOCOL_SAVE_EVERY_TRIGGER", 1)
+
+logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format="%(asctime)s [%(levelname)s] %(message)s")
+
+
+def u16(v: int) -> int:
+    return int(v) & 0xFFFF
+
+
+def result_code_from_task(result: Dict[str, Any]) -> int:
+    return RESULT_OK if str(result.get("final_result", "")).upper() == "OK" else RESULT_NG
+
+
+def create_context() -> ModbusServerContext:
+    # Need at least 0~199 because the table defines Robot->Vision 100~199.
+    block_count = max(REGISTER_COUNT, ADDRESS_BASE + 200)
+    hr_block = ModbusSequentialDataBlock(0, [0] * block_count)
+    try:
+        slave = ModbusSlaveContext(
+            di=ModbusSequentialDataBlock(0, [0] * block_count),
+            co=ModbusSequentialDataBlock(0, [0] * block_count),
+            hr=hr_block,
+            ir=ModbusSequentialDataBlock(0, [0] * block_count),
+            zero_mode=True,
+        )
+    except TypeError:
+        slave = ModbusSlaveContext(
+            di=ModbusSequentialDataBlock(0, [0] * block_count),
+            co=ModbusSequentialDataBlock(0, [0] * block_count),
+            hr=hr_block,
+            ir=ModbusSequentialDataBlock(0, [0] * block_count),
+        )
+    if SINGLE_SLAVE == 1:
+        return ModbusServerContext(slaves=slave, single=True)
+    return ModbusServerContext(slaves={UNIT_ID: slave}, single=False)
+
+
+def get_reg(context: ModbusServerContext, reg: int) -> int:
+    try:
+        values = context[UNIT_ID].getValues(3, ADDRESS_BASE + reg, count=1)
+    except TypeError:
+        values = context[UNIT_ID].getValues(3, ADDRESS_BASE + reg, 1)
+    return int(values[0]) if values else 0
+
+
+def set_regs(context: ModbusServerContext, offset: int, values: List[int]) -> None:
+    context[UNIT_ID].setValues(3, ADDRESS_BASE + offset, [u16(v) for v in values])
+
+
+def set_reg(context: ModbusServerContext, reg: int, value: int) -> None:
+    set_regs(context, reg, [value])
+
+
+def safe_int_coord(v: Any) -> Optional[int]:
+    try:
+        iv = int(round(float(v)))
+    except Exception:
+        return None
+    if iv < 0:
+        iv = 0
+    if iv > 65535:
+        iv = 65535
+    return iv
+
+
+def write_partition_coordinates(context: ModbusServerContext, result: Dict[str, Any]) -> None:
+    """Write 40 cell center coordinates into registers 20~99.
+
+    Coordinates are not cleared when there is no coordinate trigger. Missing slots keep their previous value.
+    """
+    n = int(result.get("expected_rows") or partition_core.EXPECTED_ROWS or 5) * int(result.get("expected_cols") or partition_core.EXPECTED_COLS or 8)
+    n = min(max(n, 1), 40)
+
+    # Read current values so missing slots are preserved.
+    try:
+        current = context[UNIT_ID].getValues(3, ADDRESS_BASE + REG_COORD_BASE, count=80)
+    except TypeError:
+        current = context[UNIT_ID].getValues(3, ADDRESS_BASE + REG_COORD_BASE, 80)
+    coords = [int(x) for x in current[:80]] if current else [0] * 80
+    if len(coords) < 80:
+        coords += [0] * (80 - len(coords))
+
+    cells = result.get("cells") if isinstance(result.get("cells"), list) else []
+    for cell in cells:
+        if not isinstance(cell, dict):
+            continue
+        try:
+            sid = int(cell.get("slot_id"))
+        except Exception:
+            continue
+        if 0 <= sid < n:
+            x = safe_int_coord(cell.get("cx"))
+            y = safe_int_coord(cell.get("cy"))
+            if x is not None:
+                coords[2 * sid] = x
+            if y is not None:
+                coords[2 * sid + 1] = y
+
+    set_regs(context, REG_COORD_BASE, coords)
+
+
+def save_partition_debug(task_name: str, rgb_bytes: bytes, payload: Dict[str, Any], result: Dict[str, Any]) -> None:
+    if SAVE_EVERY_TRIGGER != 1:
+        return
+    try:
+        out_dir = Path(SAVE_RESULT_ROOT) / task_name
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "rgb.jpg").write_bytes(rgb_bytes)
+        (out_dir / "infer.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        (out_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        try:
+            partition_core.draw_overlay(rgb_bytes, result, out_dir / "overlay.jpg")
+        except Exception:
+            logging.exception("failed to save partition overlay")
+    except Exception:
+        logging.exception("failed to save partition debug files")
+
+
+def save_tube_debug(rgb_bytes: bytes, depth_bytes: bytes, payload: Dict[str, Any], result: Dict[str, Any]) -> None:
+    if SAVE_EVERY_TRIGGER != 1:
+        return
+    try:
+        out_dir = Path(SAVE_RESULT_ROOT) / "product_tube_check"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "rgb.jpg").write_bytes(rgb_bytes)
+        (out_dir / "depth.png").write_bytes(depth_bytes)
+        (out_dir / "infer.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        (out_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        logging.exception("failed to save tube debug files")
+
+
+def run_partition_once() -> Dict[str, Any]:
+    logging.info("partition: fetch RGB snapshot: %s", partition_core.SNAPSHOT_URL)
+    rgb_bytes = partition_core.http_get_bytes(partition_core.SNAPSHOT_URL, partition_core.HTTP_TIMEOUT_S)
+    if not rgb_bytes:
+        raise RuntimeError("partition snapshot is empty")
+    logging.info("partition: post C++ infer: %s bytes=%d", partition_core.INFER_URL, len(rgb_bytes))
+    payload = partition_core.post_multipart_image(partition_core.INFER_URL, rgb_bytes, timeout_s=partition_core.HTTP_TIMEOUT_S)
+    result = partition_core.analyze(payload)
+    result["_rgb_bytes"] = rgb_bytes
+    result["_infer_payload"] = payload
+    return result
+
+
+def run_tube_once() -> Dict[str, Any]:
+    logging.info("tube: fetch RGB snapshot: %s", tube_core.SNAPSHOT_URL)
+    rgb_bytes = tube_core.http_get_bytes(tube_core.SNAPSHOT_URL, tube_core.HTTP_TIMEOUT_S)
+    if not rgb_bytes:
+        raise RuntimeError("tube snapshot is empty")
+    logging.info("tube: post OBB infer: %s bytes=%d", tube_core.INFER_URL, len(rgb_bytes))
+    payload = tube_core.post_multipart_image(tube_core.INFER_URL, rgb_bytes, timeout_s=tube_core.HTTP_TIMEOUT_S)
+    logging.info("tube: fetch depth PNG: %s", tube_core.DEPTH_URL)
+    depth_bytes = tube_core.http_get_bytes(tube_core.DEPTH_URL, tube_core.HTTP_TIMEOUT_S)
+    depth = tube_core.decode_depth_png(depth_bytes)
+    result = tube_core.analyze(payload, depth)
+    result["_rgb_bytes"] = rgb_bytes
+    result["_depth_bytes"] = depth_bytes
+    result["_infer_payload"] = payload
+    return result
+
+
+class VisionRobotProtocolService:
+    def __init__(self, context: ModbusServerContext) -> None:
+        self.context = context
+        self.lock = threading.Lock()
+        self.busy = False
+        self.heartbeat = 0
+        self.last_cmd = {
+            REG_TRIGGER_PARTITION: 0,
+            REG_TRIGGER_PRODUCT: 0,
+            REG_TRIGGER_COORD: 0,
+        }
+
+    def init_registers(self) -> None:
+        set_regs(self.context, 0, [0] * max(REGISTER_COUNT, 200))
+
+    def heartbeat_loop(self) -> None:
+        while True:
+            self.heartbeat = 0 if self.heartbeat >= 1000 else self.heartbeat + 1
+            set_reg(self.context, REG_VISION_HEARTBEAT, self.heartbeat)
+            time.sleep(0.5)
+
+    def maybe_clear_result(self, trigger_reg: int, result_reg: int) -> None:
+        cmd = get_reg(self.context, trigger_reg)
+        if cmd == 0:
+            self.last_cmd[trigger_reg] = 0
+            set_reg(self.context, result_reg, RESULT_NONE)
+
+    def poll_loop(self) -> None:
+        logging.info("Vision robot protocol trigger poll started")
+        while True:
+            try:
+                # Clear result registers while their trigger signals are 0. Coordinates are intentionally kept.
+                self.maybe_clear_result(REG_TRIGGER_PARTITION, REG_PARTITION_RESULT)
+                self.maybe_clear_result(REG_TRIGGER_PRODUCT, REG_PRODUCT_RESULT)
+                self.maybe_clear_result(REG_TRIGGER_COORD, REG_COORD_RESULT)
+
+                # Start at most one task at a time to avoid competing for camera/infer service.
+                if not self.busy:
+                    part_cmd = get_reg(self.context, REG_TRIGGER_PARTITION)
+                    tube_cmd = get_reg(self.context, REG_TRIGGER_PRODUCT)
+                    coord_cmd = get_reg(self.context, REG_TRIGGER_COORD)
+
+                    if part_cmd == 1 and self.last_cmd[REG_TRIGGER_PARTITION] == 0:
+                        self.last_cmd[REG_TRIGGER_PARTITION] = 1
+                        threading.Thread(target=self.handle_partition_check, daemon=True).start()
+                    elif tube_cmd == 1 and self.last_cmd[REG_TRIGGER_PRODUCT] == 0:
+                        self.last_cmd[REG_TRIGGER_PRODUCT] = 1
+                        threading.Thread(target=self.handle_tube_check, daemon=True).start()
+                    elif coord_cmd == 1 and self.last_cmd[REG_TRIGGER_COORD] == 0:
+                        self.last_cmd[REG_TRIGGER_COORD] = 1
+                        threading.Thread(target=self.handle_coordinate_check, daemon=True).start()
+            except Exception:
+                logging.exception("trigger poll error")
+            time.sleep(POLL_INTERVAL_S)
+
+    def _enter_busy(self) -> bool:
+        with self.lock:
+            if self.busy:
+                return False
+            self.busy = True
+            return True
+
+    def _leave_busy(self) -> None:
+        with self.lock:
+            self.busy = False
+
+    def handle_partition_check(self) -> None:
+        if not self._enter_busy():
+            return
+        set_reg(self.context, REG_PARTITION_RESULT, RESULT_NONE)
+        start = time.time()
+        try:
+            result = run_partition_once()
+            code = result_code_from_task(result)
+            set_reg(self.context, REG_PARTITION_RESULT, code)
+            rgb_bytes = result.pop("_rgb_bytes", b"")
+            payload = result.pop("_infer_payload", {})
+            save_partition_debug("partition_check", rgb_bytes, payload, result)
+            logging.info("partition check done: result=%s code=%d reason=%s time=%dms", result.get("final_result"), code, result.get("reason"), int((time.time()-start)*1000))
+        except Exception as exc:
+            logging.error("partition check failed: %s", exc)
+            logging.debug("%s", traceback.format_exc())
+            set_reg(self.context, REG_PARTITION_RESULT, RESULT_NG)
+        finally:
+            self._leave_busy()
+
+    def handle_tube_check(self) -> None:
+        if not self._enter_busy():
+            return
+        set_reg(self.context, REG_PRODUCT_RESULT, RESULT_NONE)
+        start = time.time()
+        try:
+            result = run_tube_once()
+            code = result_code_from_task(result)
+            set_reg(self.context, REG_PRODUCT_RESULT, code)
+            rgb_bytes = result.pop("_rgb_bytes", b"")
+            depth_bytes = result.pop("_depth_bytes", b"")
+            payload = result.pop("_infer_payload", {})
+            save_tube_debug(rgb_bytes, depth_bytes, payload, result)
+            logging.info("tube/product check done: result=%s code=%d reason=%s time=%dms", result.get("final_result"), code, result.get("reason"), int((time.time()-start)*1000))
+        except Exception as exc:
+            logging.error("tube/product check failed: %s", exc)
+            logging.debug("%s", traceback.format_exc())
+            set_reg(self.context, REG_PRODUCT_RESULT, RESULT_NG)
+        finally:
+            self._leave_busy()
+
+    def handle_coordinate_check(self) -> None:
+        if not self._enter_busy():
+            return
+        set_reg(self.context, REG_COORD_RESULT, RESULT_NONE)
+        start = time.time()
+        try:
+            result = run_partition_once()
+            code = result_code_from_task(result)
+            write_partition_coordinates(self.context, result)
+            set_reg(self.context, REG_COORD_RESULT, code)
+            rgb_bytes = result.pop("_rgb_bytes", b"")
+            payload = result.pop("_infer_payload", {})
+            save_partition_debug("coordinate_check", rgb_bytes, payload, result)
+            logging.info("coordinate check done: result=%s code=%d reason=%s time=%dms", result.get("final_result"), code, result.get("reason"), int((time.time()-start)*1000))
+        except Exception as exc:
+            logging.error("coordinate check failed: %s", exc)
+            logging.debug("%s", traceback.format_exc())
+            set_reg(self.context, REG_COORD_RESULT, RESULT_NG)
+        finally:
+            self._leave_busy()
+
+
+def main() -> int:
+    if ENABLE != 1:
+        logging.warning("VISIONOPS_ROBOT_PROTOCOL_ENABLE != 1, exit")
+        return 0
+
+    context = create_context()
+    service = VisionRobotProtocolService(context)
+    service.init_registers()
+
+    threading.Thread(target=service.heartbeat_loop, daemon=True).start()
+    threading.Thread(target=service.poll_loop, daemon=True).start()
+
+    identity = None
+    if ModbusDeviceIdentification is not None:
+        identity = ModbusDeviceIdentification()
+        identity.VendorName = "VisionOps"
+        identity.ProductCode = "ROBOT_PROTO"
+        identity.ProductName = "VisionOps Robot Protocol Modbus TCP"
+        identity.ModelName = "LB3576 HP60C Partition+Tube Robot Gateway"
+        identity.MajorMinorRevision = "1.0"
+
+    logging.info(
+        "starting VisionOps robot protocol: host=%s port=%d unit_id=%d single_slave=%d address_base=%d register_count=%d",
+        HOST, PORT, UNIT_ID, SINGLE_SLAVE, ADDRESS_BASE, max(REGISTER_COUNT, 200),
+    )
+    logging.info("registers: result 1/2/3, coords 20~99, triggers 101/102/103")
+    StartTcpServer(context=context, identity=identity, address=(HOST, PORT))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
