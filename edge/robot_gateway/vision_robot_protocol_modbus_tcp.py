@@ -221,6 +221,10 @@ def save_tube_debug(rgb_bytes: bytes, depth_bytes: bytes, payload: Dict[str, Any
         (out_dir / "depth.png").write_bytes(depth_bytes)
         (out_dir / "infer.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         (out_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        try:
+            tube_core.draw_tube_overlay(rgb_bytes, payload, result, out_dir / "overlay.jpg")
+        except Exception:
+            logging.exception("failed to save tube overlay")
     except Exception:
         logging.exception("failed to save tube debug files")
 

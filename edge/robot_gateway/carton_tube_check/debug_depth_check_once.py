@@ -591,6 +591,145 @@ def analyze(payload: Dict[str, Any], depth: "np.ndarray") -> Dict[str, Any]:
     }
 
 
+def _extract_obb_points(pred: Dict[str, Any]) -> Optional[List[Tuple[int, int]]]:
+    obb = pred.get("obb")
+    if not isinstance(obb, dict):
+        return None
+    pts = obb.get("points")
+    if not isinstance(pts, list) or len(pts) < 4:
+        return None
+    out: List[Tuple[int, int]] = []
+    for pt in pts[:4]:
+        if isinstance(pt, (list, tuple)) and len(pt) >= 2:
+            try:
+                out.append((int(round(float(pt[0]))), int(round(float(pt[1])))))
+            except Exception:
+                return None
+    return out if len(out) >= 4 else None
+
+
+def _extract_bbox(pred: Dict[str, Any]) -> Optional[Tuple[int, int, int, int]]:
+    bbox = pred.get("bbox")
+    if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+        return None
+    try:
+        x1, y1, x2, y2 = [int(round(float(v))) for v in bbox[:4]]
+        return x1, y1, x2, y2
+    except Exception:
+        return None
+
+
+def draw_tube_overlay(rgb_bytes: bytes, payload: Dict[str, Any], result: Dict[str, Any], out_path: Path) -> None:
+    """Draw OBB / bbox detections on RGB image and save overlay.jpg.
+
+    This function is debug-only and does not affect Modbus result.
+    """
+    arr = np.frombuffer(rgb_bytes, dtype=np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise RuntimeError("failed to decode RGB image for tube overlay")
+
+    preds = find_predictions(payload)
+    tubes = result.get("tubes") if isinstance(result.get("tubes"), list) else []
+    tube_by_idx: Dict[int, Dict[str, Any]] = {}
+    for item in tubes:
+        if isinstance(item, dict) and item.get("idx") is not None:
+            try:
+                tube_by_idx[int(item.get("idx"))] = item
+            except Exception:
+                pass
+
+    for idx, pred in enumerate(preds):
+        if not isinstance(pred, dict):
+            continue
+
+        conf = pred_conf(pred)
+        if conf < MIN_CONF:
+            continue
+
+        role = class_role(pred)
+        name = pred_name(pred)
+        cid = pred_class_id(pred)
+
+        if role == "stand":
+            color = (0, 255, 0)
+        elif role == "lying":
+            color = (0, 0, 255)
+        else:
+            color = (160, 160, 160)
+
+        pts = _extract_obb_points(pred)
+        bbox = _extract_bbox(pred)
+
+        label_x = 5
+        label_y = 20
+
+        if pts:
+            poly = np.array(pts, dtype=np.int32).reshape((-1, 1, 2))
+            cv2.polylines(img, [poly], True, color, 2)
+            label_x = max(0, min(x for x, _ in pts))
+            label_y = max(15, min(y for _, y in pts) - 5)
+        elif bbox:
+            x1, y1, x2, y2 = bbox
+            cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+            label_x = max(0, x1)
+            label_y = max(15, y1 - 5)
+        else:
+            continue
+
+        text = f"{idx}:{role}"
+        if name:
+            text += f"/{name}"
+        elif cid is not None:
+            text += f"/cls{cid}"
+        text += f" {conf:.2f}"
+
+        item = tube_by_idx.get(idx)
+        if item:
+            if item.get("row_id") is not None and item.get("col_id") is not None:
+                text += f" r{item.get('row_id')}c{item.get('col_id')}"
+            if item.get("height_high"):
+                text += " HIGH"
+            elif item.get("height_diff_mm") is not None:
+                text += f" d={item.get('height_diff_mm')}mm"
+
+            cx = item.get("cx", None)
+            cy = item.get("cy", None)
+            if cx is None or cy is None:
+                center = item.get("center")
+                if isinstance(center, (list, tuple)) and len(center) >= 2:
+                    cx, cy = center[0], center[1]
+            try:
+                if cx is not None and cy is not None:
+                    cv2.circle(img, (int(round(float(cx))), int(round(float(cy)))), 4, color, -1)
+            except Exception:
+                pass
+
+        cv2.putText(
+            img,
+            text,
+            (int(label_x), int(label_y)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            color,
+            1,
+            cv2.LINE_AA,
+        )
+
+    summary = (
+        f"final={result.get('final_result')} reason={result.get('reason')} "
+        f"stand={result.get('stand_count')} lying={result.get('lying_count')} "
+        f"high={result.get('high_count')}"
+    )
+    cv2.putText(img, summary, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 3, cv2.LINE_AA)
+    cv2.putText(img, summary, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1, cv2.LINE_AA)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    ok = cv2.imwrite(str(out_path), img)
+    if not ok:
+        raise RuntimeError(f"failed to write tube overlay: {out_path}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="One-shot RGB OBB + depth height debug check for carton tubes.")
     parser.add_argument("--save-dir", default="", help="Optional directory to save rgb.jpg, depth.png, infer.json and result.json.")
@@ -627,6 +766,10 @@ def main() -> int:
     result = analyze(payload, depth)
     if save_dir:
         (save_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        try:
+            draw_tube_overlay(rgb_bytes, payload, result, save_dir / "overlay.jpg")
+        except Exception as exc:
+            print(f"[WARN] failed to save tube overlay: {exc}", file=sys.stderr)
 
     if args.print_payload:
         print("[RAW_INFER]", json.dumps(payload, ensure_ascii=False, indent=2))
