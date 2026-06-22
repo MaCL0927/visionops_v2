@@ -25,6 +25,12 @@ REG_TRIGGER = {
 }
 REG_COORD_BASE = 20
 
+TUBE_REGION_TO_CMD = {
+    "left": 1,
+    "right": 2,
+    "all": 3,
+}
+
 
 def _is_no_response(resp) -> bool:
     try:
@@ -101,6 +107,8 @@ def main() -> int:
     ap.add_argument("--unit-id", type=int, default=1)
     ap.add_argument("--address-base", type=int, default=0)
     ap.add_argument("--task", choices=["partition", "tube", "coord"], required=True)
+    ap.add_argument("--region", choices=["left", "right", "all"], default="all", help="Only for --task tube: left=trigger 102=1, right=102=2, all=102=3.")
+    ap.add_argument("--cmd", type=int, default=None, help="Raw trigger command. For tube: 1=left, 2=right, 3=all. For other tasks default is 1.")
     ap.add_argument("--timeout", type=float, default=15.0)
     ap.add_argument("--print-coords", action="store_true")
     args = ap.parse_args()
@@ -114,11 +122,18 @@ def main() -> int:
     result_reg = REG_RESULT[args.task]
     trigger_reg = REG_TRIGGER[args.task]
 
+    if args.cmd is not None:
+        trigger_value = int(args.cmd)
+    elif args.task == "tube":
+        trigger_value = TUBE_REGION_TO_CMD[args.region]
+    else:
+        trigger_value = 1
+
     try:
-        # Clear trigger first, then set it to 1, same as robot behavior.
+        # Clear trigger first, then set it to the requested command, same as robot behavior.
         for addr, val, name in [
             (base + trigger_reg, 0, "trigger=0"),
-            (base + trigger_reg, 1, "trigger=1"),
+            (base + trigger_reg, trigger_value, f"trigger={trigger_value}"),
         ]:
             wr = write_reg(client, addr, val, args.unit_id)
             if hasattr(wr, "isError") and wr.isError():
@@ -126,7 +141,8 @@ def main() -> int:
                 return 3
             time.sleep(0.1)
 
-        print(f"[INFO] task={args.task} trigger register {trigger_reg} set to 1")
+        extra = f" region={args.region}" if args.task == "tube" else ""
+        print(f"[INFO] task={args.task}{extra} trigger register {trigger_reg} set to {trigger_value}")
 
         deadline = time.time() + args.timeout
         result = 0
@@ -148,7 +164,8 @@ def main() -> int:
             print("[ERROR] timeout waiting result")
             return 4
 
-        print(f"\n[RESULT] task={args.task} result_reg={result_reg} value={result}/{result_name(result)}")
+        extra = f" region={args.region} cmd={trigger_value}" if args.task == "tube" else f" cmd={trigger_value}"
+        print(f"\n[RESULT] task={args.task}{extra} result_reg={result_reg} value={result}/{result_name(result)}")
 
         if args.task == "coord" or args.print_coords:
             rr = read_hr(client, base + REG_COORD_BASE, 80, args.unit_id)

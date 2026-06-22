@@ -126,7 +126,7 @@ cpp_inference:
     camera_fourcc: ''
     stream_backend: hp60c-sdk-bridge
     stream_codec: h264
-    stream_auto_start: false
+    stream_auto_start: true
     camera_read_fps: 10
     detect_fps: 1
     snapshot_fps: 10

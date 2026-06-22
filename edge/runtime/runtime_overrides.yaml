@@ -89,7 +89,7 @@ algorithm:
     production_fps_limit: 1
     production_detect_interval_ms: 1000
     warmup_runs: 3
-    label_display: class_conf
+    label_display: hidden
     max_results: 100
     log_level: INFO
   classification:
@@ -102,7 +102,7 @@ algorithm:
     show_center: true
     max_detections: 100
   obb_detection:
-    conf_threshold: 0.25
+    conf_threshold: 0.5
     nms_threshold: 0.45
     nms_mode: horizontal
     show_angle: true

@@ -114,6 +114,17 @@ NORMAL_DEPTH_MM = getenv_float("VISIONOPS_CARTON_TUBE_NORMAL_DEPTH_MM", 0.0)
 BASELINE_MODE = getenv_str("VISIONOPS_CARTON_TUBE_BASELINE_MODE", "row_median").strip().lower()
 EXPECTED_ROWS = getenv_int("VISIONOPS_CARTON_TUBE_EXPECTED_ROWS", 5)
 EXPECTED_COLS = getenv_int("VISIONOPS_CARTON_TUBE_EXPECTED_COLS", 8)
+SLOT_ORDER = getenv_str("VISIONOPS_CARTON_TUBE_SLOT_ORDER", "col_major").strip().lower()
+LEFT_COL_START = getenv_int("VISIONOPS_CARTON_TUBE_LEFT_COL_START", 0)
+LEFT_COL_END = getenv_int("VISIONOPS_CARTON_TUBE_LEFT_COL_END", 3)
+RIGHT_COL_START = getenv_int("VISIONOPS_CARTON_TUBE_RIGHT_COL_START", 4)
+RIGHT_COL_END = getenv_int("VISIONOPS_CARTON_TUBE_RIGHT_COL_END", 7)
+# If >0, left/right region selection is based on center x relative to this split line.
+# If <=0, use image_width/2 when image width is available; fallback to col_id range.
+REGION_SPLIT_X = getenv_float("VISIONOPS_CARTON_TUBE_REGION_SPLIT_X", 0.0)
+MIN_STAND_COUNT_LEFT = getenv_int("VISIONOPS_CARTON_TUBE_MIN_STAND_COUNT_LEFT", 20)
+MIN_STAND_COUNT_RIGHT = getenv_int("VISIONOPS_CARTON_TUBE_MIN_STAND_COUNT_RIGHT", 20)
+MIN_STAND_COUNT_ALL = getenv_int("VISIONOPS_CARTON_TUBE_MIN_STAND_COUNT_ALL", 40)
 HEIGHT_THRESHOLD_MM = getenv_float("VISIONOPS_CARTON_TUBE_HEIGHT_THRESHOLD_MM", 35.0)
 HTTP_TIMEOUT_S = getenv_int("VISIONOPS_CARTON_TUBE_HTTP_TIMEOUT_MS", 5000) / 1000.0
 
@@ -328,48 +339,172 @@ def sample_depth_mm(depth: "np.ndarray", cx: float, cy: float, radius_px: int) -
 
 
 def kmeans_1d(values: List[float], k: int, max_iter: int = 50) -> Tuple[List[int], List[float]]:
-    """Small dependency-free 1D k-means used for row/column grouping."""
+    """Small dependency-free 1D clustering used for row/column grouping.
+
+    Despite the historical name, this implementation first splits sorted coordinates by the largest gaps.
+    This is more stable for fixed grid detections than iterative k-means, especially when there is a large
+    visual gap between left/right halves.
+    """
     n = len(values)
     if n == 0 or k <= 0:
         return [], []
-    k = min(k, n)
-    vmin = min(values)
-    vmax = max(values)
-    if k == 1 or abs(vmax - vmin) < 1e-6:
+    k = min(int(k), n)
+    if k == 1:
         return [0 for _ in values], [float(sum(values) / n)]
 
-    centers = [vmin + (vmax - vmin) * (i + 0.5) / k for i in range(k)]
-    labels = [0 for _ in values]
-    for _ in range(max_iter):
-        changed = False
-        for i, v in enumerate(values):
-            label = min(range(k), key=lambda j: abs(v - centers[j]))
-            if label != labels[i]:
-                labels[i] = label
-                changed = True
-        new_centers = centers[:]
-        for j in range(k):
-            bucket = [values[i] for i, lb in enumerate(labels) if lb == j]
-            if bucket:
-                new_centers[j] = float(sum(bucket) / len(bucket))
-        if max(abs(new_centers[j] - centers[j]) for j in range(k)) < 1e-4 and not changed:
-            centers = new_centers
-            break
-        centers = new_centers
+    order = sorted(range(n), key=lambda i: float(values[i]))
+    sorted_vals = [float(values[i]) for i in order]
+    gaps = [(sorted_vals[i + 1] - sorted_vals[i], i) for i in range(n - 1)]
 
-    # Re-map labels so 0..k-1 are ordered by coordinate from small to large.
-    order = sorted(range(k), key=lambda j: centers[j])
-    remap = {old: new for new, old in enumerate(order)}
+    # Pick the k-1 largest positive gaps as split points. If there are not enough positive gaps,
+    # fill the remaining split points as evenly as possible.
+    split_positions = sorted(i for gap, i in sorted(gaps, key=lambda x: x[0], reverse=True)[: max(0, k - 1)])
+    split_set = set(split_positions)
+    if len(split_set) < k - 1:
+        for j in range(1, k):
+            pos = int(round(j * n / k)) - 1
+            if 0 <= pos < n - 1:
+                split_set.add(pos)
+            if len(split_set) >= k - 1:
+                break
+    split_positions = sorted(split_set)[: k - 1]
+
+    labels_sorted = [0] * n
+    groups: List[List[int]] = []
+    start = 0
+    label = 0
+    for split in split_positions + [n - 1]:
+        end = split + 1
+        group_sorted_indices = list(range(start, end))
+        if group_sorted_indices:
+            groups.append(group_sorted_indices)
+            for si in group_sorted_indices:
+                labels_sorted[si] = label
+            label += 1
+        start = end
+
+    # If duplicate split points produced fewer groups, keep labels compact.
+    if not groups:
+        return [0 for _ in values], [float(sum(values) / n)]
+
+    centers = [sum(sorted_vals[si] for si in g) / len(g) for g in groups]
+    labels = [0] * n
+    for sorted_pos, original_idx in enumerate(order):
+        labels[original_idx] = labels_sorted[sorted_pos]
+
+    # Compact and order by center.
+    uniq = sorted(set(labels), key=lambda lb: centers[lb] if lb < len(centers) else 0.0)
+    remap = {old: new for new, old in enumerate(uniq)}
     labels = [remap[lb] for lb in labels]
-    centers = [centers[old] for old in order]
+    centers = [centers[old] for old in uniq]
     return labels, centers
+
+def _norm_order(order: str) -> str:
+    order = (order or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if order in {"column", "col", "column_major", "col_major", "down_then_right", "top_down_left_right"}:
+        return "col_major"
+    return "row_major"
+
+
+def slot_id_from_row_col(row: int, col: int, rows: int, cols: int, slot_order: Optional[str] = None) -> int:
+    """Return 0-based slot id.
+
+    row_major: left->right first, then top->bottom.
+    col_major: top->bottom first, then left->right.
+    """
+    order = _norm_order(slot_order or SLOT_ORDER)
+    if order == "col_major":
+        return int(col) * int(rows) + int(row)
+    return int(row) * int(cols) + int(col)
+
+
+def normalize_region(region: Any) -> str:
+    raw = str(region if region is not None else "all").strip().lower()
+    mapping = {
+        "0": "none",
+        "1": "left",
+        "2": "right",
+        "3": "all",
+        "l": "left",
+        "left4": "left",
+        "left_four": "left",
+        "left_cols": "left",
+        "r": "right",
+        "right4": "right",
+        "right_four": "right",
+        "right_cols": "right",
+        "a": "all",
+        "full": "all",
+        "whole": "all",
+        "all_cols": "all",
+    }
+    raw = mapping.get(raw, raw)
+    if raw not in {"left", "right", "all", "none"}:
+        raw = "all"
+    return raw
+
+
+def trigger_cmd_to_region(cmd: Any) -> str:
+    try:
+        iv = int(cmd)
+    except Exception:
+        return normalize_region(cmd)
+    return {0: "none", 1: "left", 2: "right", 3: "all"}.get(iv, "none")
+
+
+def region_col_range(region: str, cols: int) -> Tuple[int, int]:
+    region = normalize_region(region)
+    cols = max(1, int(cols))
+    if region == "left":
+        return max(0, min(LEFT_COL_START, cols - 1)), max(0, min(LEFT_COL_END, cols - 1))
+    if region == "right":
+        return max(0, min(RIGHT_COL_START, cols - 1)), max(0, min(RIGHT_COL_END, cols - 1))
+    return 0, cols - 1
+
+
+def min_stand_count_for_region(region: str) -> int:
+    region = normalize_region(region)
+    if region == "left":
+        return int(MIN_STAND_COUNT_LEFT)
+    if region == "right":
+        return int(MIN_STAND_COUNT_RIGHT)
+    if region == "all":
+        return int(MIN_STAND_COUNT_ALL)
+    return int(MIN_STAND_COUNT)
+
+
+def item_in_region(item: Dict[str, Any], region: str, cols: int, split_x: Optional[float] = None) -> bool:
+    region = normalize_region(region)
+    if region == "none":
+        return False
+    if region == "all":
+        return True
+
+    # Prefer image-x based region split. This remains stable even when only left or only right four columns are present,
+    # where k-means cannot infer all 8 column centers reliably.
+    if split_x is not None and split_x > 0:
+        try:
+            cx = float(item.get("cx", item.get("center", [0, 0])[0]))
+            if region == "left":
+                return cx < split_x
+            if region == "right":
+                return cx >= split_x
+        except Exception:
+            pass
+
+    # Fallback to assigned col_id when x split is unavailable.
+    try:
+        c = int(item.get("col_id"))
+    except Exception:
+        return False
+    c0, c1 = region_col_range(region, cols)
+    return c0 <= c <= c1
 
 
 def assign_grid_indices(items: List[Dict[str, Any]], rows: int, cols: int) -> Tuple[List[float], List[float]]:
-    """Assign row_id/col_id to each item according to center y/x.
+    """Assign row_id/col_id/slot_id to items according to center y/x.
 
-    This is only for debugging and matrix display. It does not require every slot to be detected.
-    Missing tubes remain null in the matrix.
+    Missing tubes remain null in the matrix. slot_id follows VISIONOPS_CARTON_TUBE_SLOT_ORDER.
     """
     if not items:
         return [], []
@@ -385,10 +520,9 @@ def assign_grid_indices(items: List[Dict[str, Any]], rows: int, cols: int) -> Tu
     for item, r, c in zip(items, row_labels, col_labels):
         item["row_id"] = int(r)
         item["col_id"] = int(c)
-        item["slot_id"] = int(r) * cols + int(c)
+        item["slot_id"] = slot_id_from_row_col(int(r), int(c), rows, cols)
 
     return row_centers, col_centers
-
 
 def empty_matrix(rows: int, cols: int, value: Any = None) -> List[List[Any]]:
     return [[value for _ in range(cols)] for _ in range(rows)]
@@ -418,6 +552,7 @@ def build_matrices(items: List[Dict[str, Any]], rows: int, cols: int) -> Dict[st
     baseline_matrix = empty_matrix(rows, cols, None)
     diff_matrix = empty_matrix(rows, cols, None)
     high_matrix = empty_matrix(rows, cols, None)
+    selected_matrix = empty_matrix(rows, cols, None)
     conf_matrix = empty_matrix(rows, cols, None)
     idx_matrix = empty_matrix(rows, cols, None)
     conflicts: List[Dict[str, Any]] = []
@@ -429,6 +564,7 @@ def build_matrices(items: List[Dict[str, Any]], rows: int, cols: int) -> Dict[st
         put_matrix_value(baseline_matrix, r, c, item.get("baseline_depth_mm"), conflicts, item)
         put_matrix_value(diff_matrix, r, c, item.get("height_diff_mm"), conflicts, item)
         put_matrix_value(high_matrix, r, c, item.get("height_high"), conflicts, item)
+        put_matrix_value(selected_matrix, r, c, item.get("selected"), conflicts, item)
         put_matrix_value(conf_matrix, r, c, item.get("confidence"), conflicts, item)
         put_matrix_value(idx_matrix, r, c, item.get("idx"), conflicts, item)
 
@@ -437,6 +573,7 @@ def build_matrices(items: List[Dict[str, Any]], rows: int, cols: int) -> Dict[st
         "baseline_depth_mm": baseline_matrix,
         "height_diff_mm": diff_matrix,
         "height_high": high_matrix,
+        "selected": selected_matrix,
         "confidence": conf_matrix,
         "idx": idx_matrix,
         "conflicts": conflicts,
@@ -462,12 +599,28 @@ def format_matrix(mat: List[List[Any]], none_text: str = "----", width: int = 7,
         lines.append(f"row{r:02d}: " + " ".join(cells))
     return "\n".join(lines)
 
-def analyze(payload: Dict[str, Any], depth: "np.ndarray") -> Dict[str, Any]:
+def analyze(payload: Dict[str, Any], depth: "np.ndarray", region: str = "all") -> Dict[str, Any]:
+    """Analyze one RGB OBB result + depth frame.
+
+    region:
+      left  -> only judge left four columns
+      right -> only judge right four columns
+      all   -> judge all 8 columns
+
+    The full 5x8 matrix is still returned for debugging, but only selected columns participate in OK/NG.
+    """
+    region = normalize_region(region)
     preds = find_predictions(payload)
     width, height = image_size_from_payload(payload)
     valid_preds: List[Dict[str, Any]] = []
     stand_items: List[Dict[str, Any]] = []
     lying_items: List[Dict[str, Any]] = []
+
+    rows = max(1, EXPECTED_ROWS)
+    cols = max(1, EXPECTED_COLS)
+    c0, c1 = region_col_range(region, cols)
+    split_x = float(REGION_SPLIT_X) if REGION_SPLIT_X > 0 else (float(width) / 2.0 if width else 0.0)
+    required_stand_count = max(0, min_stand_count_for_region(region))
 
     for idx, pred in enumerate(preds):
         conf = pred_conf(pred)
@@ -482,6 +635,8 @@ def analyze(payload: Dict[str, Any], depth: "np.ndarray") -> Dict[str, Any]:
             "class_name": pred_name(pred),
             "confidence": round(conf, 4),
             "center": [round(center[0], 2), round(center[1], 2)],
+            "cx": round(center[0], 2),
+            "cy": round(center[1], 2),
         }
         valid_preds.append(item)
         if role == "stand":
@@ -489,26 +644,57 @@ def analyze(payload: Dict[str, Any], depth: "np.ndarray") -> Dict[str, Any]:
         elif role == "lying":
             lying_items.append(item)
 
+    # Assign grid indices for all valid stand/lying items so region filtering also applies to lying detections.
+    row_centers, col_centers = assign_grid_indices(valid_preds, rows, cols)
+
+    for item in valid_preds:
+        selected = item_in_region(item, region, cols, split_x=split_x)
+        item["selected"] = bool(selected)
+        item["check_region"] = region
+        if not selected:
+            item["excluded_reason"] = "REGION_FILTER"
+
+    # When only left/right half is present, 8-column k-means may split those 4 physical columns
+    # into 8 artificial labels. Re-cluster selected items into the physical selected 4 columns
+    # so slot_id/matrix still align with columns 0~3 or 4~7.
+    if region in {"left", "right"}:
+        selected_for_cols = [x for x in valid_preds if bool(x.get("selected"))]
+        selected_col_count = max(1, c1 - c0 + 1)
+        if selected_for_cols:
+            xs_sel = [float(x.get("cx", x.get("center", [0, 0])[0])) for x in selected_for_cols]
+            col_labels_sel, _col_centers_sel = kmeans_1d(xs_sel, min(selected_col_count, len(selected_for_cols)))
+            for item, c_label in zip(selected_for_cols, col_labels_sel):
+                try:
+                    r = int(item.get("row_id", 0))
+                    c = int(c0 + int(c_label))
+                    item["col_id"] = c
+                    item["slot_id"] = slot_id_from_row_col(r, c, rows, cols)
+                except Exception:
+                    pass
+
     sampled: List[Dict[str, Any]] = []
     for item in stand_items:
         cx, cy = item["center"]
         sd = sample_depth_mm(depth, cx, cy, DEPTH_ROI_RADIUS_PX)
         item_with_depth = dict(item)
         item_with_depth.update(sd)
+        # Keep slot assignment and region-selection fields from the original stand item.
+        for key in ("row_id", "col_id", "slot_id", "selected", "check_region", "excluded_reason"):
+            if key in item:
+                item_with_depth[key] = item[key]
         sampled.append(item_with_depth)
 
-    # Assign 5x8 grid indices for row-wise comparison and matrix display.
-    rows = max(1, EXPECTED_ROWS)
-    cols = max(1, EXPECTED_COLS)
-    row_centers, col_centers = assign_grid_indices(sampled, rows, cols)
+    selected_sampled = [x for x in sampled if bool(x.get("selected"))]
+    selected_lying_items = [x for x in lying_items if bool(x.get("selected"))]
+    selected_valid_preds = [x for x in valid_preds if bool(x.get("selected"))]
 
-    valid_depths = [float(x["depth_mm"]) for x in sampled if x.get("depth_mm") is not None]
+    valid_depths = [float(x["depth_mm"]) for x in selected_sampled if x.get("depth_mm") is not None]
     baseline_mode_requested = BASELINE_MODE or "row_median"
 
     row_baselines: Dict[int, float] = {}
     if baseline_mode_requested == "row_median":
         for r in range(rows):
-            vals = [float(x["depth_mm"]) for x in sampled if x.get("row_id") == r and x.get("depth_mm") is not None]
+            vals = [float(x["depth_mm"]) for x in selected_sampled if x.get("row_id") == r and x.get("depth_mm") is not None]
             if vals:
                 row_baselines[r] = float(np.median(np.array(vals, dtype=np.float32)))
         baseline_depth = float(np.median(np.array(list(row_baselines.values()), dtype=np.float32))) if row_baselines else 0.0
@@ -526,6 +712,12 @@ def analyze(payload: Dict[str, Any], depth: "np.ndarray") -> Dict[str, Any]:
     high_items: List[Dict[str, Any]] = []
     max_height_diff = 0.0
     for item in sampled:
+        if not bool(item.get("selected")):
+            item["baseline_depth_mm"] = None
+            item["height_diff_mm"] = None
+            item["height_high"] = False
+            continue
+
         item_baseline = baseline_depth
         if baseline_mode == "row_median":
             try:
@@ -547,10 +739,10 @@ def analyze(payload: Dict[str, Any], depth: "np.ndarray") -> Dict[str, Any]:
 
     grid = build_matrices(sampled, rows, cols)
 
-    if lying_items:
+    if selected_lying_items:
         final_result = "NG"
         reason = "LYING_DETECTED"
-    elif len(stand_items) < MIN_STAND_COUNT:
+    elif len(selected_sampled) < required_stand_count:
         final_result = "NG"
         reason = "STAND_COUNT_LOW"
     elif not valid_depths:
@@ -567,8 +759,17 @@ def analyze(payload: Dict[str, Any], depth: "np.ndarray") -> Dict[str, Any]:
         "ok": True,
         "final_result": final_result,
         "reason": reason,
+        "check_region": region,
+        "selected_col_start": c0,
+        "selected_col_end": c1,
+        "region_split_x": round(float(split_x), 2) if split_x else None,
+        "slot_order": _norm_order(SLOT_ORDER),
+        "required_stand_count": required_stand_count,
         "stand_count": len(stand_items),
         "lying_count": len(lying_items),
+        "selected_stand_count": len(selected_sampled),
+        "selected_lying_count": len(selected_lying_items),
+        "selected_prediction_count": len(selected_valid_preds),
         "valid_prediction_count": len(valid_preds),
         "raw_prediction_count": len(preds),
         "image_width": width,
@@ -588,8 +789,8 @@ def analyze(payload: Dict[str, Any], depth: "np.ndarray") -> Dict[str, Any]:
         "high_count": len(high_items),
         "grid": grid,
         "tubes": sampled,
+        "lying_items": lying_items,
     }
-
 
 def _extract_obb_points(pred: Dict[str, Any]) -> Optional[List[Tuple[int, int]]]:
     obb = pred.get("obb")
@@ -687,7 +888,9 @@ def draw_tube_overlay(rgb_bytes: bytes, payload: Dict[str, Any], result: Dict[st
         item = tube_by_idx.get(idx)
         if item:
             if item.get("row_id") is not None and item.get("col_id") is not None:
-                text += f" r{item.get('row_id')}c{item.get('col_id')}"
+                text += f" r{item.get('row_id')}c{item.get('col_id')} s{int(item.get('slot_id'))+1 if item.get('slot_id') is not None else '?'}"
+            if item.get("selected") is False:
+                text += " SKIP"
             if item.get("height_high"):
                 text += " HIGH"
             elif item.get("height_diff_mm") is not None:
@@ -734,6 +937,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="One-shot RGB OBB + depth height debug check for carton tubes.")
     parser.add_argument("--save-dir", default="", help="Optional directory to save rgb.jpg, depth.png, infer.json and result.json.")
     parser.add_argument("--print-payload", action="store_true", help="Print raw infer payload too.")
+    parser.add_argument("--region", choices=["left", "right", "all"], default="all", help="Detection region: left=left four columns, right=right four columns, all=all columns.")
     args = parser.parse_args()
 
     save_dir: Optional[Path] = Path(args.save_dir).resolve() if args.save_dir else None
@@ -763,7 +967,7 @@ def main() -> int:
         (save_dir / "depth.png").write_bytes(depth_bytes)
     depth = decode_depth_png(depth_bytes)
 
-    result = analyze(payload, depth)
+    result = analyze(payload, depth, region=args.region)
     if save_dir:
         (save_dir / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
         try:
@@ -776,7 +980,7 @@ def main() -> int:
     print("[RESULT]", json.dumps(result, ensure_ascii=False, indent=2))
     grid = result.get("grid") if isinstance(result.get("grid"), dict) else {}
     if grid:
-        print("[MATRIX] depth_mm 5x8 / detected slots; ---- means missing or not detected")
+        print(f"[MATRIX] depth_mm 5x8 / detected slots; region={result.get('check_region')} selected cols={result.get('selected_col_start')}~{result.get('selected_col_end')}; ---- means missing or not detected")
         print(format_matrix(grid.get("depth_mm") or []))
         print("[MATRIX] baseline_depth_mm 5x8")
         print(format_matrix(grid.get("baseline_depth_mm") or []))
@@ -784,9 +988,12 @@ def main() -> int:
         print(format_matrix(grid.get("height_diff_mm") or []))
         print("[MATRIX] height_high 5x8")
         print(format_matrix(grid.get("height_high") or [], width=7))
+        print("[MATRIX] selected 5x8 / only selected cells participate in OK/NG")
+        print(format_matrix(grid.get("selected") or [], width=7))
     print(
         f"[SUMMARY] final={result['final_result']} reason={result['reason']} "
-        f"stand={result['stand_count']} lying={result['lying_count']} "
+        f"region={result['check_region']} stand={result['stand_count']} lying={result['lying_count']} "
+        f"selected_stand={result['selected_stand_count']} selected_lying={result['selected_lying_count']} required={result['required_stand_count']} "
         f"baseline_mode={result['baseline_mode']} baseline={result['baseline_depth_mm']}mm "
         f"high_count={result['high_count']} max_diff={result['max_height_diff_mm']}mm"
     )

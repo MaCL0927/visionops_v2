@@ -53,17 +53,21 @@ IP：3576 的实际 IP
 |---:|---|---|
 | 100 | 机器人/PLC 通讯心跳 | 视觉侧只读取，不主动写 |
 | 101 | 井字隔板识别判断触发 | 0=不触发，1=触发 |
-| 102 | 产品放置识别判断触发 | 0=不触发，1=触发 |
+| 102 | 产品放置识别判断触发 | 0=不触发，1=判断左四列，2=判断右四列，3=判断全部区域 |
 | 103 | 产品放置坐标识别触发 | 0=不触发，1=触发 |
 
 说明：
 
 - 上位机写 `101=1` 后，视觉执行纸隔板是否放好检测，并把结果写到 `1`。
-- 上位机写 `102=1` 后，视觉执行纸筒/产品放置检测，并把结果写到 `2`。
+- 上位机写 `102=1` 后，视觉只判断纸筒左四列，并把结果写到 `2`。
+- 上位机写 `102=2` 后，视觉只判断纸筒右四列，并把结果写到 `2`。
+- 上位机写 `102=3` 后，视觉判断纸筒全部 8 列，并把结果写到 `2`。
+- 纸筒任务不区分异常类型，也不区分左/右/全部的返回格式；只要本次指定区域存在异常，`2` 都返回 `2=异常`，否则返回 `1=正常`。
 - 上位机写 `103=1` 后，视觉执行纸隔板小方格中心点识别，并把结果写到 `3`，坐标写到 `20~99`。
 - 上位机收到结果后，将对应触发寄存器写回 `0`。
 - 当触发寄存器为 `0` 时，视觉侧会把对应结果寄存器清零。
 - 坐标寄存器 `20~99` 不会因为触发信号归零而清零，保留最近一次坐标识别结果。
+- 当前纸筒槽位按 `5 行 x 8 列` 组织；纸筒槽位编号默认采用按列排列，即从上到下、再从左到右。左四列对应列号 0~3，右四列对应列号 4~7。
 
 ---
 
@@ -117,11 +121,29 @@ python robot_gateway/test_vision_robot_protocol_client.py \
 纸筒/产品放置检测：
 
 ```bash
+# 判断左四列，对应触发寄存器 102=1
 python robot_gateway/test_vision_robot_protocol_client.py \
   --host 192.168.213.145 \
   --port 5045 \
   --unit-id 1 \
-  --task tube
+  --task tube \
+  --region left
+
+# 判断右四列，对应触发寄存器 102=2
+python robot_gateway/test_vision_robot_protocol_client.py \
+  --host 192.168.213.145 \
+  --port 5045 \
+  --unit-id 1 \
+  --task tube \
+  --region right
+
+# 判断全部区域，对应触发寄存器 102=3
+python robot_gateway/test_vision_robot_protocol_client.py \
+  --host 192.168.213.145 \
+  --port 5045 \
+  --unit-id 1 \
+  --task tube \
+  --region all
 ```
 
 坐标识别：
@@ -141,5 +163,5 @@ python robot_gateway/test_vision_robot_protocol_client.py \
 
 1. 如果上位机软件使用 `40001` 显示法，则 offset 0 对应 40001，offset 101 对应 40102。
 2. 如果上位机软件直接填写 Modbus 协议地址，则直接填 0、1、2、3、20、101、102、103。
-3. 该协议只返回 `1=正常`、`2=异常`，内部的具体 NG 原因仍保存在 `/tmp/vision_robot_protocol_latest/<task>/result.json` 中用于调试。
+3. 该协议只返回 `1=正常`、`2=异常`，内部的具体 NG 原因仍保存在 `/tmp/vision_robot_protocol_latest/<task>/result.json` 中用于调试。纸筒任务的 `result.json` 会包含 `check_region`、`selected_col_start/end`、`selected_stand_count`、`selected_lying_count`、`grid` 等信息。
 4. Modbus 03 功能码单次最多读取 125 个 Holding Register；如果要读 0~199，需要分段读取。
