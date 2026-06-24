@@ -803,10 +803,10 @@ def draw_overlay(image_bytes: bytes, result: Dict[str, Any], out_path: Path) -> 
         bbox = cell.get("bbox")
         if isinstance(bbox, list) and len(bbox) >= 4:
             x1, y1, x2, y2 = [int(round(float(v))) for v in bbox[:4]]
-            cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+            cv2.rectangle(img, (x1, y1), (x2, y2), color, 1)
         cx = int(round(float(cell.get("cx", 0))))
         cy = int(round(float(cell.get("cy", 0))))
-        cv2.circle(img, (cx, cy), 4, (0, 255, 255), -1)
+        cv2.circle(img, (cx, cy), 2, (0, 255, 255), -1)
         sid = cell.get("slot_id")
         if sid is not None:
             cv2.putText(img, str(sid), (cx + 4, cy - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)

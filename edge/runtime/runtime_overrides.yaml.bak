@@ -102,7 +102,7 @@ algorithm:
     show_center: true
     max_detections: 100
   obb_detection:
-    conf_threshold: 0.25
+    conf_threshold: 0.5
     nms_threshold: 0.45
     nms_mode: horizontal
     show_angle: true
@@ -128,7 +128,7 @@ cpp_inference:
     stream_codec: h264
     stream_auto_start: true
     camera_read_fps: 10
-    detect_fps: 1
+    detect_fps: 10
     snapshot_fps: 10
     enable_snapshot: true
     enable_annotated: true
