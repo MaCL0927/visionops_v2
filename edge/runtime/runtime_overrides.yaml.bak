@@ -136,7 +136,7 @@ cpp_inference:
     rtsp_timeout_ms: 5000
     gst_latency_ms: 100
     quiet_ffmpeg_log: true
-    conf_threshold: 0.25
+    conf_threshold: 0.7
     nms_threshold: 0.45
     mask_threshold: 0.5
     topk: 5

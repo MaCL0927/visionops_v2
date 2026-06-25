@@ -226,7 +226,7 @@ def save_state(state_path, save_count, regs_raw):
 def main():
     parser = argparse.ArgumentParser(description="Monitor coordinate registers 20-99 and save image-coordinate update logs.")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=5045)
+    parser.add_argument("--port", type=int, default=5046)
     parser.add_argument("--unit-id", type=int, default=1)
     parser.add_argument("--base-reg", type=int, default=20)
     parser.add_argument("--count", type=int, default=80)
@@ -238,12 +238,12 @@ def main():
     parser.add_argument("--matrix-cols", type=int, default=5)
 
     # Robot coordinate affine transform.
-    parser.add_argument("--a00", type=float, default=-0.02646376)
-    parser.add_argument("--a01", type=float, default=-1.61093243)
-    parser.add_argument("--a10", type=float, default=-1.59551583)
-    parser.add_argument("--a11", type=float, default=0.04411728)
-    parser.add_argument("--b0", type=float, default=1068.38162254)
-    parser.add_argument("--b1", type=float, default=993.50940836)
+    parser.add_argument("--a00", type=float, default=0.02143055)
+    parser.add_argument("--a01", type=float, default=-1.49495102)
+    parser.add_argument("--a10", type=float, default=-1.47967273)
+    parser.add_argument("--a11", type=float, default=-0.00292085)
+    parser.add_argument("--b0", type=float, default=946.29821487)
+    parser.add_argument("--b1", type=float, default=994.16131507)
 
     parser.add_argument("--round-image", action="store_true", default=True, help="图像坐标四舍五入为整数")
     parser.add_argument("--float-image", dest="round_image", action="store_false", help="图像坐标保存为小数")

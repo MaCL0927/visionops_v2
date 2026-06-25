@@ -106,12 +106,41 @@ SAVE_EVERY_TRIGGER = partition_core.getenv_int("VISIONOPS_ROBOT_PROTOCOL_SAVE_EV
 
 COORD_OUTPUT_FRAME = partition_core.getenv_str("VISIONOPS_COORD_OUTPUT_FRAME", "image").strip().lower()
 COORD_REGISTER_ORDER = partition_core.getenv_str("VISIONOPS_COORD_REGISTER_ORDER", "column").strip().lower()
+
+# Coordinate affine transform.
+# Legacy VISIONOPS_COORD_A00...B1 is kept as the default/single-arm transform and
+# also as the default left-hand transform for backward compatibility.
 COORD_A00 = float(partition_core.getenv_str("VISIONOPS_COORD_A00", "1.0"))
 COORD_A01 = float(partition_core.getenv_str("VISIONOPS_COORD_A01", "0.0"))
 COORD_A10 = float(partition_core.getenv_str("VISIONOPS_COORD_A10", "0.0"))
 COORD_A11 = float(partition_core.getenv_str("VISIONOPS_COORD_A11", "1.0"))
 COORD_B0 = float(partition_core.getenv_str("VISIONOPS_COORD_B0", "0.0"))
 COORD_B1 = float(partition_core.getenv_str("VISIONOPS_COORD_B1", "0.0"))
+
+# 103 coordinate recognition can use different robot coordinate transforms for
+# the left-hand and right-hand workspaces. A cell is assigned to left/right by
+# its vision column index: default left cols 0~3, right cols 4~7.
+COORD_DUAL_ARM_ENABLE = partition_core.getenv_int("VISIONOPS_COORD_DUAL_ARM_ENABLE", 0)
+COORD_LEFT_COL_START = partition_core.getenv_int("VISIONOPS_COORD_LEFT_COL_START", 0)
+COORD_LEFT_COL_END = partition_core.getenv_int("VISIONOPS_COORD_LEFT_COL_END", 3)
+COORD_RIGHT_COL_START = partition_core.getenv_int("VISIONOPS_COORD_RIGHT_COL_START", 4)
+COORD_RIGHT_COL_END = partition_core.getenv_int("VISIONOPS_COORD_RIGHT_COL_END", 7)
+
+COORD_LEFT_A00 = float(partition_core.getenv_str("VISIONOPS_COORD_LEFT_A00", str(COORD_A00)))
+COORD_LEFT_A01 = float(partition_core.getenv_str("VISIONOPS_COORD_LEFT_A01", str(COORD_A01)))
+COORD_LEFT_A10 = float(partition_core.getenv_str("VISIONOPS_COORD_LEFT_A10", str(COORD_A10)))
+COORD_LEFT_A11 = float(partition_core.getenv_str("VISIONOPS_COORD_LEFT_A11", str(COORD_A11)))
+COORD_LEFT_B0 = float(partition_core.getenv_str("VISIONOPS_COORD_LEFT_B0", str(COORD_B0)))
+COORD_LEFT_B1 = float(partition_core.getenv_str("VISIONOPS_COORD_LEFT_B1", str(COORD_B1)))
+
+# If right-hand parameters are not configured, fall back to the legacy transform
+# so old deployments keep working even when COORD_DUAL_ARM_ENABLE is enabled by mistake.
+COORD_RIGHT_A00 = float(partition_core.getenv_str("VISIONOPS_COORD_RIGHT_A00", str(COORD_A00)))
+COORD_RIGHT_A01 = float(partition_core.getenv_str("VISIONOPS_COORD_RIGHT_A01", str(COORD_A01)))
+COORD_RIGHT_A10 = float(partition_core.getenv_str("VISIONOPS_COORD_RIGHT_A10", str(COORD_A10)))
+COORD_RIGHT_A11 = float(partition_core.getenv_str("VISIONOPS_COORD_RIGHT_A11", str(COORD_A11)))
+COORD_RIGHT_B0 = float(partition_core.getenv_str("VISIONOPS_COORD_RIGHT_B0", str(COORD_B0)))
+COORD_RIGHT_B1 = float(partition_core.getenv_str("VISIONOPS_COORD_RIGHT_B1", str(COORD_B1)))
 
 # 103 coordinate recognition policy.
 # During product placement, some cells are covered and the visible cell count can be < 40.
@@ -196,7 +225,37 @@ def safe_i16_coord(v: Any) -> Optional[int]:
     return iv
 
 
-def image_to_robot_coord(x_camera: Any, y_camera: Any) -> tuple[Optional[int], Optional[int]]:
+def coord_arm_from_slot_id(slot_id: int, rows: int, cols: int) -> str:
+    """Return coordinate transform arm name for a vision slot.
+
+    Vision slot_id is 0-based row-major, so col = slot_id % cols.
+    With the default 5x8 grid, cols 0~3 are left-hand and cols 4~7 are
+    right-hand. If a configured column range misses the slot, fall back to the
+    image/grid midpoint to avoid silently dropping coordinates.
+    """
+    if COORD_DUAL_ARM_ENABLE != 1:
+        return "single"
+    try:
+        col = int(slot_id) % max(int(cols), 1)
+    except Exception:
+        return "single"
+
+    if COORD_LEFT_COL_START <= col <= COORD_LEFT_COL_END:
+        return "left"
+    if COORD_RIGHT_COL_START <= col <= COORD_RIGHT_COL_END:
+        return "right"
+    return "left" if col < max(int(cols), 1) / 2.0 else "right"
+
+
+def coord_affine_params_for_arm(arm: str) -> tuple[float, float, float, float, float, float]:
+    if COORD_DUAL_ARM_ENABLE == 1 and arm == "left":
+        return COORD_LEFT_A00, COORD_LEFT_A01, COORD_LEFT_A10, COORD_LEFT_A11, COORD_LEFT_B0, COORD_LEFT_B1
+    if COORD_DUAL_ARM_ENABLE == 1 and arm == "right":
+        return COORD_RIGHT_A00, COORD_RIGHT_A01, COORD_RIGHT_A10, COORD_RIGHT_A11, COORD_RIGHT_B0, COORD_RIGHT_B1
+    return COORD_A00, COORD_A01, COORD_A10, COORD_A11, COORD_B0, COORD_B1
+
+
+def image_to_robot_coord(x_camera: Any, y_camera: Any, arm: str = "single") -> tuple[Optional[int], Optional[int]]:
     try:
         x = float(x_camera)
         y = float(y_camera)
@@ -204,8 +263,9 @@ def image_to_robot_coord(x_camera: Any, y_camera: Any) -> tuple[Optional[int], O
         return None, None
 
     if COORD_OUTPUT_FRAME in {"robot", "robot_mm", "base", "robot_base"}:
-        xr = COORD_A00 * x + COORD_A01 * y + COORD_B0
-        yr = COORD_A10 * x + COORD_A11 * y + COORD_B1
+        a00, a01, a10, a11, b0, b1 = coord_affine_params_for_arm(arm)
+        xr = a00 * x + a01 * y + b0
+        yr = a10 * x + a11 * y + b1
     else:
         xr = x
         yr = y
@@ -555,10 +615,17 @@ def write_partition_coordinates(context: ModbusServerContext, result: Dict[str, 
         if out_idx is not None and 0 <= out_idx < n:
             x_img = cell.get("cx")
             y_img = cell.get("cy")
-            x_out, y_out = image_to_robot_coord(x_img, y_img)
+            arm = coord_arm_from_slot_id(sid, rows, cols)
+            x_out, y_out = image_to_robot_coord(x_img, y_img, arm=arm)
+            row = sid // cols if cols > 0 else 0
+            col = sid % cols if cols > 0 else 0
 
             # Keep debug information in result.json.
             cell["output_frame"] = COORD_OUTPUT_FRAME
+            cell["coord_dual_arm_enable"] = COORD_DUAL_ARM_ENABLE
+            cell["coord_arm"] = arm
+            cell["vision_row"] = row
+            cell["vision_col"] = col
             cell["register_order"] = COORD_REGISTER_ORDER
             cell["vision_slot_id"] = sid
             cell["register_slot_id"] = out_idx
@@ -853,7 +920,7 @@ def main() -> int:
     )
     logging.info("registers: result 1/2/3, coords 20~99, triggers 101/102/103, tube trigger 102: 1=left,2=right,3=all, coord_register_order=%s", COORD_REGISTER_ORDER)
     logging.info(
-        "coordinate output frame=%s, affine A=[[%.6f, %.6f], [%.6f, %.6f]], b=[%.6f, %.6f]",
+        "coordinate output frame=%s, single/legacy affine A=[[%.6f, %.6f], [%.6f, %.6f]], b=[%.6f, %.6f]",
         COORD_OUTPUT_FRAME,
         COORD_A00,
         COORD_A01,
@@ -861,6 +928,26 @@ def main() -> int:
         COORD_A11,
         COORD_B0,
         COORD_B1,
+    )
+    logging.info(
+        "coordinate dual-arm=%d, left_cols=%d~%d affine A=[[%.6f, %.6f], [%.6f, %.6f]], b=[%.6f, %.6f], right_cols=%d~%d affine A=[[%.6f, %.6f], [%.6f, %.6f]], b=[%.6f, %.6f]",
+        COORD_DUAL_ARM_ENABLE,
+        COORD_LEFT_COL_START,
+        COORD_LEFT_COL_END,
+        COORD_LEFT_A00,
+        COORD_LEFT_A01,
+        COORD_LEFT_A10,
+        COORD_LEFT_A11,
+        COORD_LEFT_B0,
+        COORD_LEFT_B1,
+        COORD_RIGHT_COL_START,
+        COORD_RIGHT_COL_END,
+        COORD_RIGHT_A00,
+        COORD_RIGHT_A01,
+        COORD_RIGHT_A10,
+        COORD_RIGHT_A11,
+        COORD_RIGHT_B0,
+        COORD_RIGHT_B1,
     )
     StartTcpServer(context=context, identity=identity, address=(HOST, PORT))
     return 0
