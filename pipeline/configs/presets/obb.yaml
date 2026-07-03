@@ -53,6 +53,7 @@ rknn:
   input:
     mean_values: [[0, 0, 0]]
     std_values: [[255, 255, 255]]
+    input_size_list: [[1, 3, 640, 640]]
 
 mlflow:
   experiment_name: visionops-obb
